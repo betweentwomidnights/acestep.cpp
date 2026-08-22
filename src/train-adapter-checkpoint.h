@@ -106,7 +106,7 @@ static bool ace_write_safetensors(const std::filesystem::path &                 
     output.write(header.data(), (std::streamsize) header.size());
     for (const ACETrainCheckpointTensor & tensor : tensors) {
         output.write(reinterpret_cast<const char *>(tensor.values->data()),
-                     (std::streamsize) (tensor.values->size() * sizeof(float)));
+                     (std::streamsize)(tensor.values->size() * sizeof(float)));
     }
     if (!output) {
         error = "failed while writing " + path.string();

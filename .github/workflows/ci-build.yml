@@ -88,15 +88,15 @@ jobs:
       image: nvidia/cuda:12.6.3-devel-ubuntu24.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
       - name: Install build tools
         run: |
           apt-get update -qq
           apt-get install -y -qq build-essential cmake git pkg-config
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Configure CUDA
         run: |

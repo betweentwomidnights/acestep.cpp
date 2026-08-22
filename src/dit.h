@@ -87,9 +87,9 @@ struct DiTGGMLLayer {
 #define DIT_GGML_MAX_LAYERS 32
 
 using DiTGGMLLinearTransform = struct ggml_tensor * (*) (struct ggml_context * ctx,
-                                                         void *               data,
-                                                         struct ggml_tensor * weight,
-                                                         struct ggml_tensor * input);
+                                                         void *                data,
+                                                         struct ggml_tensor *  weight,
+                                                         struct ggml_tensor *  input);
 
 struct DiTGGML {
     DiTGGMLConfig cfg;
