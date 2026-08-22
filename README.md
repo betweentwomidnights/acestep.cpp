@@ -1,4 +1,29 @@
-# acestep.cpp
+# Sawhee
+
+Sawhee is a native ACE-Step inference and adapter-training runtime. It adds
+LoRA and DoRA-row training to
+[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) by porting the
+training-capable GGML work from
+[sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp) onto ACE-Step's GGML
+base.
+
+The target is CPU, CUDA, Vulkan, and Metal support with PEFT-compatible
+artifacts and a command-line contract suitable for a future drop-in backend
+for
+[gary-localhost-installer](https://github.com/betweentwomidnights/gary-localhost-installer).
+Gary itself remains outside this repository's scope.
+
+## Status
+
+The full ACE-Step fork and native trainer are present at the repository root.
+Backend-resident DoRA-row graphs with F32, Q8_0, Q4_K, Q5_K, and Q6_K frozen
+weights pass on CPU, Metal, and Vulkan. CUDA hardware execution and the first
+official-GGUF training journey are the remaining validation gates.
+
+See [the research report](docs/research.md) and
+[the OpenSpec proposal](openspec/changes/acestep-dora-training/proposal.md).
+
+## Runtime
 
 Local AI music generation server with browser UI, powered by GGML.
 Describe a song, get stereo 48kHz audio. Runs on CPU, CUDA, Metal, Vulkan.

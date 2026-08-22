@@ -1,1 +1,3 @@
 * text=auto eol=lf
+*.log whitespace=-trailing-space
+vendor/cpp-httplib/LICENSE whitespace=-blank-at-eof
