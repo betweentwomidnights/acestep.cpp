@@ -116,10 +116,10 @@ validation also caught an incomplete rebase resolution: SA3's expanded typed `OU
 had been added beside upstream's later basic-F32 implementation. Removing only the stale duplicate
 registration and backend path restored one authoritative F32/F16/quantized implementation. The validated
 integration heads are GGML
-`7ccc6dfc08d7ec5952fa933a20b596c0d4f382d3` and ACE-Step
-`5a47b5b7108c106232ca64c79112124dd415ccc8`. Sawhee merged the
-complete ACE-Step history at `3fc27a5`. CUDA remains unexecuted until matching
-hardware is available.
+`7ccc6dfc08d7ec5952fa933a20b596c0d4f382d3` and Sawhee
+`d8b15adfcce93ae1de3d4678aa2a99867dc7f9ba`. Sawhee merged the complete
+ACE-Step history at `3fc27a5`. CUDA remains unexecuted until matching hardware
+is available.
 
 Sawhee is a public personal-account repository with no registered self-hosted
 runner. Standard public GitHub-hosted runners are free but do not expose an
@@ -162,18 +162,25 @@ One supplied pair passed the executable dataset journey: the 31.7 MB WAV decoded
 samples at 48 kHz, its sidecar metadata parsed, and the validator measured 2.89 minutes. A deterministic
 ten-second slice of that pair then completed native DoRA-row training against the official
 `acestep-v15-turbo-Q8_0.gguf`, `Qwen3-Embedding-0.6B-Q8_0.gguf`, and `vae-BF16.gguf` files on an Apple
-M3 Max. The first three optimizer steps reported losses of 1.138885, 1.495292, and 1.583906. Resuming the
-full native checkpoint restored epoch and optimizer state, completed step four, and reported 1.027149.
-The stochastic sequence is not claimed as monotonic convergence, but the resumed observation is below
-the initial loss and proves continued optimization rather than a weight-only restart.
+M3 Max. The final-head first optimizer step reported a loss of 1.576722.
+Resuming the full native checkpoint restored 792 adapter tensors, 1,584 AdamW
+state tensors, the completed epoch, and the optimizer step. The resumed second
+step reported 1.131291. The stochastic sequence is not claimed as monotonic
+convergence, but the resumed observation is below the initial loss and proves
+continued optimization rather than a weight-only restart.
 
-The resulting PEFT directory contains 576 adapter tensors. Fixed-seed inference loaded them, merged 192
-LoRA pairs with 192 DoRA-row magnitudes and zero skips, and generated a ten-second 48 kHz stereo WAV. Its
-SHA-256 digest differs from the otherwise identical base generation, and their sample difference has an
-overall RMS level of -13.03 dB with no NaNs, infinities, or denormals. This establishes native adapter
-reload and a material output change; subjective audio quality remains an ear-test decision rather than an
-automated claim. The complete 13-song training run is intentionally deferred because the acceptance goal
-only requires a bounded real-data overfit and reload journey.
+Fixed-seed inference loaded the resulting PEFT directory, merged 264 LoRA
+pairs with 264 DoRA-row magnitudes and zero skips, and generated a ten-second
+48 kHz stereo WAV. Its SHA-256 digest
+(`f399f1ffc2fdb6c87876c814b8a5d121cabc83c1758a1f83995560760d4eebd2`)
+differs from the otherwise identical base generation
+(`6276f3a9bb87c7088e5edce9ab0ecb5f1bcc7d4a865a03303bc35a93b21d5ea7`).
+Their sample difference has an overall RMS level of -13.20 dB with no NaNs,
+infinities, or denormals. This establishes native adapter reload and a
+material output change; subjective audio quality remains an ear-test decision
+rather than an automated claim. The complete 13-song training run is
+intentionally deferred because the acceptance goal only requires a bounded
+real-data overfit and reload journey.
 
 ## Repository layout
 
