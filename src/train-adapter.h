@@ -20,6 +20,13 @@ struct DiTAdapterTransform {
     std::unordered_map<struct ggml_tensor *, DiTAdapterParam> params;
 };
 
+static struct ggml_tensor * dit_adapter_stop_gradient(struct ggml_context * ctx,
+                                                      struct ggml_tensor *  tensor) {
+    struct ggml_tensor * result = ggml_view_tensor(ctx, tensor);
+    result->src[0] = tensor;
+    return result;
+}
+
 static struct ggml_tensor * dit_adapter_linear_transform(struct ggml_context * ctx,
                                                          void *                data,
                                                          struct ggml_tensor *  weight,
@@ -75,6 +82,7 @@ static struct ggml_tensor * dit_adapter_linear_transform(struct ggml_context * c
                  adapter.base_norm_sq,
                  ggml_scale(ctx, ggml_reshape_1d(ctx, cross_term, out), 2.0f * adapter.scale)),
         ggml_scale(ctx, ggml_reshape_1d(ctx, update_sq, out), adapter.scale * adapter.scale));
-    struct ggml_tensor * row_scale = ggml_div(ctx, adapter.magnitude, ggml_sqrt(ctx, norm_sq));
+    struct ggml_tensor * norm = dit_adapter_stop_gradient(ctx, ggml_sqrt(ctx, norm_sq));
+    struct ggml_tensor * row_scale = ggml_div(ctx, adapter.magnitude, norm);
     return ggml_mul(ctx, output, row_scale);
 }

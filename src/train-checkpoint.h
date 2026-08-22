@@ -7,8 +7,8 @@
 #include "train-adapter-checkpoint.h"
 #include "train-adapter-optimizer.h"
 
+#include <algorithm>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -107,82 +107,125 @@ static bool ace_sync_checkpoint_path(const std::filesystem::path & path,
     return true;
 }
 
-static bool ace_create_train_checkpoint_links(const std::filesystem::path & directory,
-                                              const std::string &           token,
-                                              std::string &                 error) {
-    std::vector<std::string> names;
-    for (const char * name : ace_train_checkpoint_files) {
-        names.emplace_back(name);
+static bool ace_checkpoint_files_equal(const std::filesystem::path & first,
+                                       const std::filesystem::path & second,
+                                       bool &                        equal,
+                                       std::string &                 error) {
+    std::error_code filesystem_error;
+    const uintmax_t first_size = std::filesystem::file_size(first, filesystem_error);
+    if (filesystem_error) {
+        error = "cannot inspect checkpoint file " + first.string() + ": " + filesystem_error.message();
+        return false;
     }
-    names.emplace_back("checkpoint_manifest.json");
-    for (const std::string & name : names) {
-        const std::filesystem::path link = directory / name;
-        const std::filesystem::path target = std::filesystem::path("checkpoint.current") / name;
-        std::error_code filesystem_error;
-        const std::filesystem::file_status status = std::filesystem::symlink_status(link, filesystem_error);
+    const uintmax_t second_size = std::filesystem::file_size(second, filesystem_error);
+    if (filesystem_error) {
+        error = "cannot inspect checkpoint file " + second.string() + ": " + filesystem_error.message();
+        return false;
+    }
+    if (first_size != second_size) {
+        equal = false;
+        return true;
+    }
+    std::ifstream first_input(first, std::ios::binary);
+    std::ifstream second_input(second, std::ios::binary);
+    if (!first_input || !second_input) {
+        error = "cannot compare checkpoint files";
+        return false;
+    }
+    equal = std::equal(std::istreambuf_iterator<char>(first_input),
+                       std::istreambuf_iterator<char>(),
+                       std::istreambuf_iterator<char>(second_input));
+    return true;
+}
+
+static bool ace_replace_checkpoint_file(const std::filesystem::path & source,
+                                        const std::filesystem::path & destination,
+                                        std::string &                 error) {
+#ifdef _WIN32
+    const bool replaced = MoveFileExW(source.wstring().c_str(),
+                                      destination.wstring().c_str(),
+                                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    const bool replaced = ::rename(source.c_str(), destination.c_str()) == 0;
+#endif
+    if (!replaced) {
+        error = "cannot publish checkpoint file " + destination.filename().string();
+    }
+    return replaced;
+}
+
+static bool ace_publish_peft_checkpoint(const std::filesystem::path & directory,
+                                        const std::filesystem::path & relative_generation,
+                                        const std::string &           token,
+                                        std::string &                 error) {
+    const std::filesystem::path generation = directory / relative_generation;
+    const std::filesystem::path config = directory / "adapter_config.json";
+    const std::filesystem::path model = directory / "adapter_model.safetensors";
+    std::error_code filesystem_error;
+    auto inspect = [&](const std::filesystem::path & path, std::filesystem::file_status & status) {
+        status = std::filesystem::symlink_status(path, filesystem_error);
         if (filesystem_error == std::make_error_code(std::errc::no_such_file_or_directory)) {
             filesystem_error.clear();
         }
         if (filesystem_error) {
-            error = "cannot inspect checkpoint publication link " + name + ": " + filesystem_error.message();
+            error = "cannot inspect checkpoint file " + path.filename().string() + ": " +
+                    filesystem_error.message();
             return false;
         }
-        if (std::filesystem::exists(status)) {
-            if (!std::filesystem::is_symlink(status) ||
-                std::filesystem::read_symlink(link, filesystem_error) != target || filesystem_error) {
-                error = "checkpoint directory contains a non-generational " + name;
-                return false;
-            }
-            continue;
-        }
-        const std::filesystem::path temporary = directory / (name + ".link-" + token);
-        std::filesystem::create_symlink(target, temporary, filesystem_error);
-        if (!filesystem_error) {
-            std::filesystem::rename(temporary, link, filesystem_error);
-        }
-        if (filesystem_error) {
-            std::error_code ignored;
-            std::filesystem::remove(temporary, ignored);
-            error = "cannot create checkpoint publication link " + name + ": " + filesystem_error.message();
-            return false;
-        }
-    }
-    return true;
-}
-
-#ifdef _WIN32
-static bool ace_replace_train_checkpoint_pointer(const std::filesystem::path & source,
-                                                 const std::filesystem::path & destination,
-                                                 std::string &                 error) {
-    const std::filesystem::path absolute_source = std::filesystem::absolute(source);
-    const std::wstring absolute_destination = std::filesystem::absolute(destination).wstring();
-    HANDLE handle = CreateFileW(absolute_source.wstring().c_str(),
-                                DELETE,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                nullptr,
-                                OPEN_EXISTING,
-                                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
-                                nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        error = "cannot open checkpoint generation pointer for publication";
+        return true;
+    };
+    std::filesystem::file_status config_status;
+    std::filesystem::file_status model_status;
+    if (!inspect(config, config_status) || !inspect(model, model_status)) {
         return false;
     }
-    const size_t name_size = absolute_destination.size() * sizeof(wchar_t);
-    std::vector<unsigned char> buffer(FIELD_OFFSET(FILE_RENAME_INFO, FileName) + name_size);
-    FILE_RENAME_INFO * information = reinterpret_cast<FILE_RENAME_INFO *>(buffer.data());
-    information->Flags = 0x1 | 0x2;
-    information->RootDirectory = nullptr;
-    information->FileNameLength = (DWORD) name_size;
-    std::memcpy(information->FileName, absolute_destination.data(), name_size);
-    const bool published = SetFileInformationByHandle(
-                               handle, FileRenameInfoEx, information, (DWORD) buffer.size()) != 0;
-    CloseHandle(handle);
-    if (!published) {
-        error = "cannot publish checkpoint generation pointer";
+    const bool config_exists = std::filesystem::exists(config_status);
+    const bool model_exists = std::filesystem::exists(model_status);
+    if ((config_exists && !std::filesystem::is_regular_file(config_status)) ||
+        (model_exists && (!config_exists || !std::filesystem::is_regular_file(model_status)))) {
+        error = "checkpoint directory contains incompatible PEFT files";
+        return false;
     }
-    return published;
+    if (config_exists) {
+        bool equal = false;
+        if (!ace_checkpoint_files_equal(config, generation / "adapter_config.json", equal, error)) {
+            return false;
+        }
+        if (!equal) {
+            error = "checkpoint adapter configuration cannot change between generations";
+            return false;
+        }
+    } else {
+        const std::filesystem::path temporary = directory / ("adapter_config.json.publish-" + token);
+        std::filesystem::copy_file(generation / "adapter_config.json", temporary, filesystem_error);
+        if (filesystem_error || !ace_sync_checkpoint_path(temporary, false, error) ||
+            !ace_replace_checkpoint_file(temporary, config, error)) {
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            if (error.empty()) {
+                error = "cannot publish adapter_config.json: " + filesystem_error.message();
+            }
+            return false;
+        }
+    }
+
+    const std::filesystem::path temporary = directory / ("adapter_model.safetensors.publish-" + token);
+    std::filesystem::create_hard_link(generation / "adapter_model.safetensors", temporary, filesystem_error);
+    if (filesystem_error) {
+        filesystem_error.clear();
+        std::filesystem::copy_file(generation / "adapter_model.safetensors", temporary, filesystem_error);
+    }
+    if (filesystem_error || !ace_sync_checkpoint_path(temporary, false, error) ||
+        !ace_replace_checkpoint_file(temporary, model, error)) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        if (error.empty()) {
+            error = "cannot publish adapter_model.safetensors: " + filesystem_error.message();
+        }
+        return false;
+    }
+    return ace_sync_checkpoint_path(directory, true, error);
 }
-#endif
 
 static bool ace_publish_train_checkpoint_generation(const std::filesystem::path & directory,
                                                     const std::filesystem::path & relative_generation,
@@ -191,13 +234,28 @@ static bool ace_publish_train_checkpoint_generation(const std::filesystem::path 
     const std::filesystem::path pointer = directory / "checkpoint.current";
     const std::filesystem::path temporary = directory / ("checkpoint.current-" + token);
     std::error_code filesystem_error;
+#ifdef _WIN32
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    output << relative_generation.generic_string();
+    output.close();
+    if (!output.good() || !ace_sync_checkpoint_path(temporary, false, error)) {
+        std::filesystem::remove(temporary, filesystem_error);
+        if (error.empty()) {
+            error = "cannot create checkpoint generation pointer";
+        }
+        return false;
+    }
+#else
     std::filesystem::create_directory_symlink(relative_generation, temporary, filesystem_error);
     if (filesystem_error) {
         error = "cannot create checkpoint generation pointer: " + filesystem_error.message();
         return false;
     }
+#endif
 #ifdef _WIN32
-    const bool published = ace_replace_train_checkpoint_pointer(temporary, pointer, error);
+    const bool published = MoveFileExW(temporary.wstring().c_str(),
+                                       pointer.wstring().c_str(),
+                                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
     const bool published = ::rename(temporary.c_str(), pointer.c_str()) == 0;
 #endif
@@ -423,7 +481,7 @@ static bool ace_save_train_checkpoint(const std::string &               director
         discard_staging();
         return false;
     }
-    if (!ace_create_train_checkpoint_links(path, token, error) ||
+    if (!ace_publish_peft_checkpoint(path, relative_generation, token, error) ||
         !ace_sync_checkpoint_path(path, true, error) ||
         !ace_publish_train_checkpoint_generation(path, relative_generation, token, error)) {
         return false;

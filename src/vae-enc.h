@@ -284,7 +284,11 @@ static int vae_enc_compute(VAEEncoder *  m,
     }
     ggml_backend_tensor_set(m->graph_input, m->scratch_in.data(), 0, in_size * sizeof(float));
 
-    ggml_backend_sched_graph_compute(m->sched, m->graph);
+    const enum ggml_status status = ggml_backend_sched_graph_compute(m->sched, m->graph);
+    if (status != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "[VAE-Enc] FATAL: graph compute failed for T=%d with status %d\n", T_audio, (int) status);
+        return -1;
+    }
 
     return (int) m->graph_output->ne[0];  // T_latent
 }

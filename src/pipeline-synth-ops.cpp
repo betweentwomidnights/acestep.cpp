@@ -478,9 +478,15 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             main_fwd[b].S_text  = S_text;
             main_fwd[b].S_lyric = S_lyric;
             main_fwd[b].text_hidden.resize((size_t) H_text * S_text);
-            qwen3_forward(te, text_ids.data(), S_text, main_fwd[b].text_hidden.data());
+            if (!qwen3_forward(te, text_ids.data(), S_text, main_fwd[b].text_hidden.data())) {
+                fprintf(stderr, "[Encode-Text] FATAL: text encoder compute failed\n");
+                return -1;
+            }
             main_fwd[b].lyric_embed.resize((size_t) H_text * S_lyric);
-            qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, main_fwd[b].lyric_embed.data());
+            if (!qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, main_fwd[b].lyric_embed.data())) {
+                fprintf(stderr, "[Encode-Text] FATAL: lyric embedding compute failed\n");
+                return -1;
+            }
         }
 
         if (s.need_enc_switch) {
@@ -498,9 +504,15 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
                 nc_fwd[b].S_text  = S_text;
                 nc_fwd[b].S_lyric = S_lyric;
                 nc_fwd[b].text_hidden.resize((size_t) H_text * S_text);
-                qwen3_forward(te, text_ids.data(), S_text, nc_fwd[b].text_hidden.data());
+                if (!qwen3_forward(te, text_ids.data(), S_text, nc_fwd[b].text_hidden.data())) {
+                    fprintf(stderr, "[Encode-Text] FATAL: non-cover text encoder compute failed\n");
+                    return -1;
+                }
                 nc_fwd[b].lyric_embed.resize((size_t) H_text * S_lyric);
-                qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, nc_fwd[b].lyric_embed.data());
+                if (!qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, nc_fwd[b].lyric_embed.data())) {
+                    fprintf(stderr, "[Encode-Text] FATAL: non-cover lyric embedding compute failed\n");
+                    return -1;
+                }
             }
         }
 
@@ -537,9 +549,17 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
         for (int b = 0; b < batch_n; b++) {
             s.timer.reset();
-            cond_ggml_forward(ce, main_fwd[b].text_hidden.data(), main_fwd[b].S_text, main_fwd[b].lyric_embed.data(),
-                              main_fwd[b].S_lyric, s.timbre_feats.data(), s.S_ref_timbre, s.per_enc[b],
-                              &s.per_enc_S[b]);
+            if (!cond_ggml_forward(ce,
+                                   main_fwd[b].text_hidden.data(),
+                                   main_fwd[b].S_text,
+                                   main_fwd[b].lyric_embed.data(),
+                                   main_fwd[b].S_lyric,
+                                   s.timbre_feats.data(),
+                                   s.S_ref_timbre,
+                                   s.per_enc[b],
+                                   &s.per_enc_S[b])) {
+                return -1;
+            }
             fprintf(stderr, "[Encode-Text Batch%d] %d+%d tokens -> enc_S=%d, %.1f ms\n", b, main_fwd[b].S_text,
                     main_fwd[b].S_lyric, s.per_enc_S[b], s.timer.ms());
         }
@@ -547,9 +567,17 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
         if (s.need_enc_switch) {
             for (int b = 0; b < batch_n; b++) {
-                cond_ggml_forward(ce, nc_fwd[b].text_hidden.data(), nc_fwd[b].S_text, nc_fwd[b].lyric_embed.data(),
-                                  nc_fwd[b].S_lyric, s.timbre_feats.data(), s.S_ref_timbre, s.per_enc_nc[b],
-                                  &s.per_enc_S_nc[b]);
+                if (!cond_ggml_forward(ce,
+                                       nc_fwd[b].text_hidden.data(),
+                                       nc_fwd[b].S_text,
+                                       nc_fwd[b].lyric_embed.data(),
+                                       nc_fwd[b].S_lyric,
+                                       s.timbre_feats.data(),
+                                       s.S_ref_timbre,
+                                       s.per_enc_nc[b],
+                                       &s.per_enc_S_nc[b])) {
+                    return -1;
+                }
                 fprintf(stderr, "[Encode-Text Batch%d] non-cover: %d+%d tokens -> enc_S=%d\n", b, nc_fwd[b].S_text,
                         nc_fwd[b].S_lyric, s.per_enc_S_nc[b]);
             }

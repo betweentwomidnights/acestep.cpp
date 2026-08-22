@@ -184,27 +184,44 @@ int main() {
         return 1;
     }
 
-    const float analytical = static_cast<const float *>(adapter_a_grad->data)[0];
-    const float saved = static_cast<float *>(adapter_a->data)[0];
-    auto loss_at = [&](float value) {
-        static_cast<float *>(adapter_a->data)[0] = value;
-        ggml_graph_reset(training_graph);
-        if (ggml_backend_graph_compute(cpu, training_graph) != GGML_STATUS_SUCCESS) {
-            return NAN;
+    const float adapter_dot = adapter_a_data[0] * input_data[0] + adapter_a_data[1] * input_data[1];
+    float expected_a_gradient[2] = {};
+    float expected_b_gradient[2] = {};
+    float expected_magnitude_gradient[2] = {};
+    for (int row = 0; row < 2; ++row) {
+        const float base_dot = weight_data[row * 2] * input_data[0] + weight_data[row * 2 + 1] * input_data[1];
+        const float effective_dot = base_dot + 0.5f * adapter_b_data[row] * adapter_dot;
+        const float effective_norm_sq = row == 0 ? 3.25f : 26.328125f;
+        const float output_gradient =
+            2.0f * magnitude_data[row] * magnitude_data[row] * effective_dot / effective_norm_sq;
+        for (int column = 0; column < 2; ++column) {
+            expected_a_gradient[column] +=
+                output_gradient * 0.5f * adapter_b_data[row] * input_data[column];
         }
-        return static_cast<const float *>(loss->data)[0];
-    };
-    const float step = 1e-3f;
-    const float numerical = (loss_at(saved + step) - loss_at(saved - step)) / (2.0f * step);
-    static_cast<float *>(adapter_a->data)[0] = saved;
-    if (!std::isfinite(numerical) || std::fabs(analytical - numerical) > 2e-2f) {
-        std::fprintf(stderr,
-                     "DoRA gradient mismatch: analytical %f, numerical %f\n",
-                     analytical,
-                     numerical);
-        ggml_backend_free(cpu);
-        ggml_free(ctx);
-        return 1;
+        expected_b_gradient[row] = output_gradient * 0.5f * adapter_dot;
+        expected_magnitude_gradient[row] =
+            2.0f * magnitude_data[row] * effective_dot * effective_dot / effective_norm_sq;
+    }
+    const float * actual_a_gradient = static_cast<const float *>(adapter_a_grad->data);
+    const float * actual_b_gradient = static_cast<const float *>(adapter_b_grad->data);
+    const float * actual_magnitude_gradient = static_cast<const float *>(magnitude_grad->data);
+    for (int i = 0; i < 2; ++i) {
+        if (!nearly_equal(actual_a_gradient[i], expected_a_gradient[i]) ||
+            !nearly_equal(actual_b_gradient[i], expected_b_gradient[i]) ||
+            !nearly_equal(actual_magnitude_gradient[i], expected_magnitude_gradient[i])) {
+            std::fprintf(stderr,
+                         "PEFT DoRA gradient mismatch at %d: A=%f/%f B=%f/%f magnitude=%f/%f\n",
+                         i,
+                         actual_a_gradient[i],
+                         expected_a_gradient[i],
+                         actual_b_gradient[i],
+                         expected_b_gradient[i],
+                         actual_magnitude_gradient[i],
+                         expected_magnitude_gradient[i]);
+            ggml_backend_free(cpu);
+            ggml_free(ctx);
+            return 1;
+        }
     }
 
     ggml_backend_free(cpu);

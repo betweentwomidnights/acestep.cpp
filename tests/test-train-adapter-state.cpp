@@ -4,6 +4,7 @@
 #include "adapter-merge.h"
 #include "dit-graph.h"
 #include "ggml-cpu.h"
+#include "qwen3-enc.h"
 #include "train-adapter-checkpoint.h"
 #include "train-adapter-optimizer.h"
 #include "train-adapter-state.h"
@@ -58,6 +59,10 @@ static ggml_tensor * make_vector(ggml_context * ctx, const char * name, int64_t 
 static int fail(const char * message) {
     std::fprintf(stderr, "FAIL: %s\n", message);
     return 1;
+}
+
+static bool abort_backend_compute(void *) {
+    return true;
 }
 
 int main() {
@@ -436,6 +441,35 @@ int main() {
     tiny.cpu_backend = tiny.backend;
     tiny.use_flash_attn = true;
 
+    ggml_init_params encoder_params = {
+        /*.mem_size   =*/2 * ggml_tensor_overhead(),
+        /*.mem_buffer =*/nullptr,
+        /*.no_alloc   =*/true,
+    };
+    ggml_context * encoder_ctx = ggml_init(encoder_params);
+    Qwen3GGML encoder = {};
+    encoder.cfg.hidden_size = 2;
+    encoder.embed_tokens = ggml_new_tensor_2d(encoder_ctx, GGML_TYPE_F32, 2, 4);
+    ggml_backend_buffer_t encoder_buffer = ggml_backend_alloc_ctx_tensors(encoder_ctx, tiny.backend);
+    const float encoder_weights[] = { 0.25f, -0.5f, 0.5f, -0.25f, 0.75f, -0.75f, 1.0f, -1.0f };
+    ggml_backend_tensor_set(encoder.embed_tokens, encoder_weights, 0, sizeof(encoder_weights));
+    ggml_backend_t encoder_backends[] = { tiny.backend };
+    encoder.sched = ggml_backend_sched_new(encoder_backends, nullptr, 1, 32, false, true);
+    ggml_backend_cpu_set_abort_callback(tiny.backend, abort_backend_compute, nullptr);
+    const int encoder_token = 1;
+    float encoder_output[] = { 123.0f, 456.0f };
+    const bool encoder_succeeded = qwen3_embed_lookup(&encoder, &encoder_token, 1, encoder_output);
+    ggml_backend_cpu_set_abort_callback(tiny.backend, nullptr, nullptr);
+    ggml_backend_sched_free(encoder.sched);
+    ggml_backend_buffer_free(encoder_buffer);
+    ggml_free(encoder_ctx);
+    if (encoder_succeeded || encoder_output[0] != 123.0f || encoder_output[1] != 456.0f) {
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("text preprocessing must reject scheduler compute failures before downloading output");
+    }
+
     auto set_timestep_weights = [&](DiTGGMLTembWeights & weights, const char * prefix) {
         const std::string p(prefix);
         weights.linear_1_w = make_matrix(tiny_ctx, (p + ".linear_1.weight").c_str(), 256, 4, 0.01f);
@@ -689,9 +723,19 @@ int main() {
         training_checkpoint_dir / ".checkpoint-generations" / "generation-interrupted";
     std::filesystem::create_directories(interrupted_generation);
     ACETrainCheckpointKind retained_checkpoint_kind;
+#ifdef _WIN32
+    const bool publication_layout = std::filesystem::is_regular_file(training_checkpoint_dir / "checkpoint.current") &&
+                                    std::filesystem::is_regular_file(training_checkpoint_dir /
+                                                                     "adapter_model.safetensors") &&
+                                    std::filesystem::is_regular_file(training_checkpoint_dir /
+                                                                     "adapter_config.json");
+#else
     const bool publication_layout = std::filesystem::is_symlink(training_checkpoint_dir / "checkpoint.current") &&
-                                    std::filesystem::is_symlink(training_checkpoint_dir /
-                                                                "adapter_model.safetensors");
+                                    std::filesystem::is_regular_file(training_checkpoint_dir /
+                                                                     "adapter_model.safetensors") &&
+                                    std::filesystem::is_regular_file(training_checkpoint_dir /
+                                                                     "adapter_config.json");
+#endif
     if (!adapter_checkpoint_directory(training_checkpoint_dir, first_generation, error) ||
         first_generation == training_checkpoint_dir ||
         !publication_layout ||
@@ -726,7 +770,7 @@ int main() {
         return fail("full checkpoint must validate its generation and frozen base model");
     }
     {
-        std::fstream optimizer_file(training_checkpoint_dir / "optimizer_state.safetensors",
+        std::fstream optimizer_file(first_generation / "optimizer_state.safetensors",
                                     std::ios::binary | std::ios::in | std::ios::out);
         optimizer_file.seekg(-1, std::ios::end);
         char value = 0;
@@ -735,6 +779,29 @@ int main() {
         optimizer_file.seekp(-1, std::ios::end);
         optimizer_file.write(&value, 1);
     }
+    const std::filesystem::path peft_in_place_dir =
+        std::filesystem::temp_directory_path() /
+        ("ace-peft-in-place-" + std::to_string(std::random_device {}()));
+    ACETrainCheckpointKind migrated_checkpoint_kind;
+    if (!ace_save_train_adapter_checkpoint(peft_in_place_dir.string(), tiny_state, error) ||
+        !ace_train_checkpoint_kind(peft_in_place_dir.string(), migrated_checkpoint_kind, error) ||
+        migrated_checkpoint_kind != ACE_TRAIN_CHECKPOINT_ADAPTER ||
+        !ace_save_train_checkpoint(
+            peft_in_place_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint, error) ||
+        !ace_train_checkpoint_kind(peft_in_place_dir.string(), migrated_checkpoint_kind, error) ||
+        migrated_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL ||
+        !std::filesystem::is_regular_file(peft_in_place_dir / "adapter_model.safetensors") ||
+        !std::filesystem::is_regular_file(peft_in_place_dir / "adapter_config.json")) {
+        std::fprintf(stderr, "FAIL: in-place PEFT checkpoint publication: %s\n", error.c_str());
+        std::filesystem::remove_all(peft_in_place_dir);
+        std::filesystem::remove_all(training_checkpoint_dir);
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    std::filesystem::remove_all(peft_in_place_dir);
     std::filesystem::path second_generation;
     if (ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
         !ace_save_train_checkpoint(
