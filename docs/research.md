@@ -148,7 +148,7 @@ selection, LoRA or DoRA-row configuration, PEFT weight resume, variable-size bat
 accumulation, warmup plus constant/linear/cosine scheduling, epoch checkpoints, and final PEFT output.
 Native checkpoints also persist and restore every AdamW first/second moment tensor, optimizer step, and
 completed epoch. A PEFT-only directory remains a valid weight-only resume. The remaining trainer surface
-is real-checkpoint end-to-end training/inference validation.
+has passed real-checkpoint end-to-end training and inference on Metal.
 
 ## Real-data acceptance
 
@@ -158,9 +158,22 @@ The first acceptance run should use a tiny fixed slice, prove loss reduction and
 compare base and adapted generations with fixed prompts and seeds. Lyrics remain input data and are not
 copied into this repository.
 
-One supplied pair has also passed the executable dataset journey: the 31.7 MB WAV decoded as 8,313,677
-stereo samples at 48 kHz, its sidecar metadata parsed, and the validator measured 2.89 minutes. The full
-13-song corpus is intentionally deferred until model-backed training can run from the chosen Sawhee layout.
+One supplied pair passed the executable dataset journey: the 31.7 MB WAV decoded as 8,313,677 stereo
+samples at 48 kHz, its sidecar metadata parsed, and the validator measured 2.89 minutes. A deterministic
+ten-second slice of that pair then completed native DoRA-row training against the official
+`acestep-v15-turbo-Q8_0.gguf`, `Qwen3-Embedding-0.6B-Q8_0.gguf`, and `vae-BF16.gguf` files on an Apple
+M3 Max. The first three optimizer steps reported losses of 1.138885, 1.495292, and 1.583906. Resuming the
+full native checkpoint restored epoch and optimizer state, completed step four, and reported 1.027149.
+The stochastic sequence is not claimed as monotonic convergence, but the resumed observation is below
+the initial loss and proves continued optimization rather than a weight-only restart.
+
+The resulting PEFT directory contains 576 adapter tensors. Fixed-seed inference loaded them, merged 192
+LoRA pairs with 192 DoRA-row magnitudes and zero skips, and generated a ten-second 48 kHz stereo WAV. Its
+SHA-256 digest differs from the otherwise identical base generation, and their sample difference has an
+overall RMS level of -13.03 dB with no NaNs, infinities, or denormals. This establishes native adapter
+reload and a material output change; subjective audio quality remains an ear-test decision rather than an
+automated claim. The complete 13-song training run is intentionally deferred because the acceptance goal
+only requires a bounded real-data overfit and reload journey.
 
 ## Repository layout
 
