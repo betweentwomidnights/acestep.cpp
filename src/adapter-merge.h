@@ -33,6 +33,7 @@
 // DoRA rescale all run on the backend.
 // PendingCopy lookup is O(1) via hashmap.
 
+#include "adapter-checkpoint-directory.h"
 #include "adapter-config.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -467,15 +468,21 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
                                const GGUFModel &   gf,
                                const STFile &      st,
                                const std::string & cfg_dir,
+                               bool                peft_directory,
                                float               scale,
                                ggml_backend_t      backend) {
     adapter_config config;
-    adapter_read_config(cfg_dir.c_str(), config);
+    const bool config_loaded = adapter_read_config(cfg_dir.c_str(), config);
+    if (peft_directory && !config_loaded) {
+        fprintf(stderr, "[Adapter] PEFT adapter_config.json is missing or invalid\n");
+        return false;
+    }
 
     // group lora_A and lora_B entries by their GGUF base tensor name.
     // also collect per tensor alpha scalars (ComfyUI baked format).
     std::map<std::string, const STEntry *> a_map, b_map, magnitude_map;
     std::map<std::string, float>           alpha_map;
+    bool                                   duplicate_entry = false;
     for (const auto & e : st.entries) {
         // per tensor alpha: "base_model.model.layers.0.self_attn.q_proj.alpha"
         // scalar F32 with shape [] containing the baked alpha value
@@ -488,7 +495,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             if (!base.empty()) {
                 float val = 0.0f;
                 memcpy(&val, st_data(st, e), sizeof(float));
-                alpha_map[base] = val;
+                duplicate_entry = !alpha_map.emplace(base, val).second || duplicate_entry;
             }
             continue;
         }
@@ -498,18 +505,98 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             continue;
         }
         if (lora_is_magnitude(e.name)) {
-            magnitude_map[base] = &e;
+            duplicate_entry = !magnitude_map.emplace(base, &e).second || duplicate_entry;
         } else if (lora_is_a(e.name)) {
-            a_map[base] = &e;
+            duplicate_entry = !a_map.emplace(base, &e).second || duplicate_entry;
         } else if (lora_is_b(e.name)) {
-            b_map[base] = &e;
+            duplicate_entry = !b_map.emplace(base, &e).second || duplicate_entry;
         }
+    }
+
+    if (duplicate_entry) {
+        fprintf(stderr, "[Adapter] adapter contains duplicate tensor aliases\n");
+        return false;
     }
 
     std::unordered_map<const void *, size_t> pending_idx;
     pending_idx.reserve(wctx->pending.size());
     for (size_t i = 0; i < wctx->pending.size(); i++) {
         pending_idx[wctx->pending[i].src] = i;
+    }
+
+    if (peft_directory) {
+        if (a_map.empty() || a_map.size() != b_map.size() ||
+            (config.use_dora ? magnitude_map.size() != a_map.size() : !magnitude_map.empty()) ||
+            config.target_modules.empty()) {
+            fprintf(stderr, "[Adapter] PEFT adapter tensor inventory does not match adapter_config.json\n");
+            return false;
+        }
+        for (const auto & entry : b_map) {
+            if (a_map.count(entry.first) == 0) {
+                fprintf(stderr, "[Adapter] PEFT adapter contains lora_B without lora_A for %s\n", entry.first.c_str());
+                return false;
+            }
+        }
+        for (const auto & entry : magnitude_map) {
+            if (a_map.count(entry.first) == 0) {
+                fprintf(stderr, "[Adapter] PEFT adapter contains magnitude without factors for %s\n", entry.first.c_str());
+                return false;
+            }
+        }
+        for (const auto & entry : a_map) {
+            const std::string & gguf_name = entry.first;
+            const STEntry *     a = entry.second;
+            auto                b = b_map.find(gguf_name);
+            auto                magnitude = magnitude_map.find(gguf_name);
+            if (b == b_map.end() || (config.use_dora && magnitude == magnitude_map.end()) || a->n_dims != 2 ||
+                b->second->n_dims != 2 || a->shape[0] <= 0 || a->shape[1] <= 0 || b->second->shape[0] <= 0 ||
+                b->second->shape[1] != a->shape[0] ||
+                a->shape[0] != adapter_config_value_for_weight(config.rank_pattern, gguf_name, config.rank) ||
+                (config.use_dora && (magnitude->second->n_dims != 1 || magnitude->second->shape[0] != b->second->shape[0]))) {
+                fprintf(stderr, "[Adapter] PEFT adapter tensor shapes are invalid for %s\n", gguf_name.c_str());
+                return false;
+            }
+            std::string module = gguf_name;
+            if (module.compare(0, 8, "decoder.") == 0) {
+                module.erase(0, 8);
+            }
+            if (module.size() >= 7 && module.compare(module.size() - 7, 7, ".weight") == 0) {
+                module.resize(module.size() - 7);
+            }
+            bool target_matches = false;
+            for (const std::string & target : config.target_modules) {
+                target_matches = target_matches || adapter_module_matches_pattern(module, target);
+            }
+            int64_t tensor_index = gguf_find_tensor(gf.gguf, gguf_name.c_str());
+            struct ggml_tensor * tensor = tensor_index >= 0 ? ggml_get_tensor(gf.meta, gguf_name.c_str()) : nullptr;
+            if (!target_matches || !tensor || tensor->ne[0] != a->shape[1] || tensor->ne[1] != b->second->shape[0]) {
+                fprintf(stderr, "[Adapter] PEFT adapter target does not match GGUF tensor %s\n", gguf_name.c_str());
+                return false;
+            }
+            const size_t offset = gguf_get_tensor_offset(gf.gguf, tensor_index);
+            const void * base = gf.mapping + gf.data_offset + offset;
+            if (pending_idx.count(base) == 0) {
+                fprintf(stderr, "[Adapter] PEFT adapter target is not staged for merge: %s\n", gguf_name.c_str());
+                return false;
+            }
+        }
+        for (const std::string & target : config.target_modules) {
+            bool target_present = false;
+            for (const auto & entry : a_map) {
+                std::string module = entry.first;
+                if (module.compare(0, 8, "decoder.") == 0) {
+                    module.erase(0, 8);
+                }
+                if (module.size() >= 7 && module.compare(module.size() - 7, 7, ".weight") == 0) {
+                    module.resize(module.size() - 7);
+                }
+                target_present = target_present || adapter_module_matches_pattern(module, target);
+            }
+            if (!target_present) {
+                fprintf(stderr, "[Adapter] PEFT target module has no serialized tensors: %s\n", target.c_str());
+                return false;
+            }
+        }
     }
 
     int merged     = 0;
@@ -978,36 +1065,35 @@ static bool adapter_merge(WeightCtx *       wctx,
                           const char *      adapter_path,
                           float             scale,
                           ggml_backend_t    backend) {
-    std::string sf_path;
-    std::string cfg_dir;
+    std::string           sf_path;
+    std::string           cfg_dir;
+    bool                  peft_directory = false;
+    std::filesystem::path resolved_path;
+    std::string           directory_error;
+    if (!adapter_checkpoint_directory(adapter_path, resolved_path, directory_error)) {
+        fprintf(stderr, "[Adapter] %s\n", directory_error.c_str());
+        return false;
+    }
+    const std::string resolved_adapter_path = resolved_path.string();
 
     struct stat sb;
-    if (stat(adapter_path, &sb) != 0) {
+    if (stat(resolved_adapter_path.c_str(), &sb) != 0) {
         fprintf(stderr, "[Adapter] path does not exist: %s\n", adapter_path);
         return false;
     }
 
     if (S_ISDIR(sb.st_mode)) {
-        // PEFT directory: adapter_model.safetensors is mandatory
-        sf_path = std::string(adapter_path) + "/adapter_model.safetensors";
-        cfg_dir = adapter_path;
+        peft_directory = true;
+        sf_path = resolved_adapter_path + "/adapter_model.safetensors";
+        cfg_dir = resolved_adapter_path;
         if (stat(sf_path.c_str(), &sb) != 0) {
             fprintf(stderr, "[Adapter] directory %s is not a PEFT layout, missing adapter_model.safetensors\n",
                     adapter_path);
             return false;
         }
-        // warn if adapter_config.json is missing, alpha lives there for PEFT so
-        // the merge silently falls back to alpha=rank (scaling=1) otherwise
-        std::string cfg_path = cfg_dir + "/adapter_config.json";
-        if (stat(cfg_path.c_str(), &sb) != 0) {
-            fprintf(stderr,
-                    "[Adapter] WARNING: PEFT directory %s missing adapter_config.json, alpha falls back to rank "
-                    "(scaling=1.0). If training used lora_alpha != rank, the merge will be under or over scaled.\n",
-                    adapter_path);
-        }
     } else {
         // LyCORIS flat file, LoRA or LoKr
-        sf_path    = adapter_path;
+        sf_path    = resolved_adapter_path;
         size_t sep = sf_path.find_last_of("/\\");
         cfg_dir    = (sep != std::string::npos) ? sf_path.substr(0, sep) : ".";
     }
@@ -1019,9 +1105,9 @@ static bool adapter_merge(WeightCtx *       wctx,
 
     bool ok;
     if (adapter_detect_lokr(st)) {
-        ok = adapter_merge_lokr(wctx, gf, st, scale, backend);
+        ok = !peft_directory && adapter_merge_lokr(wctx, gf, st, scale, backend);
     } else {
-        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, scale, backend);
+        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, peft_directory, scale, backend);
     }
 
     st_close(&st);

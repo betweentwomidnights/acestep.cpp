@@ -351,19 +351,23 @@ int main() {
     };
     const std::filesystem::path truncated_tensor = checkpoint_dir / "truncated.safetensors";
     const std::filesystem::path mismatched_tensor = checkpoint_dir / "mismatched.safetensors";
+    const std::filesystem::path unterminated_header = checkpoint_dir / "unterminated-header.safetensors";
     STFile malformed_file;
     if (!write_safetensors_fixture(
             truncated_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}", 4) ||
         st_open(&malformed_file, truncated_tensor.string().c_str()) ||
         !write_safetensors_fixture(
             mismatched_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4) ||
-        st_open(&malformed_file, mismatched_tensor.string().c_str())) {
+        st_open(&malformed_file, mismatched_tensor.string().c_str()) ||
+        !write_safetensors_fixture(unterminated_header, "{\"x\"", 0) ||
+        st_open(&malformed_file, unterminated_header.string().c_str())) {
         std::filesystem::remove_all(checkpoint_dir);
         ggml_free(ctx);
         return fail("safetensors parser must reject invalid tensor byte spans");
     }
     std::filesystem::remove(truncated_tensor);
     std::filesystem::remove(mismatched_tensor);
+    std::filesystem::remove(unterminated_header);
 
     ACETrainAdapterState incompatible_config = state;
     incompatible_config.base_alpha            = 64;
@@ -650,6 +654,24 @@ int main() {
         ggml_free(ctx);
         return 1;
     }
+    std::filesystem::path first_generation;
+    const std::filesystem::path interrupted_generation =
+        training_checkpoint_dir / ".checkpoint-generations" / "generation-interrupted";
+    std::filesystem::create_directories(interrupted_generation);
+    ACETrainCheckpointKind retained_checkpoint_kind;
+    if (!adapter_checkpoint_directory(training_checkpoint_dir, first_generation, error) ||
+        first_generation == training_checkpoint_dir ||
+        !std::filesystem::is_symlink(training_checkpoint_dir / "checkpoint.current") ||
+        !std::filesystem::is_symlink(training_checkpoint_dir / "adapter_model.safetensors") ||
+        !ace_train_checkpoint_kind(training_checkpoint_dir.string(), retained_checkpoint_kind, error) ||
+        retained_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL) {
+        std::filesystem::remove_all(training_checkpoint_dir);
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("checkpoint publication must retain the selected immutable generation");
+    }
     ACETrainCheckpointKind full_checkpoint_kind;
     ACETrainAdapterState rejected_base_state;
     ACETrainAdapterOptimizer rejected_base_optimizer;
@@ -681,11 +703,14 @@ int main() {
         optimizer_file.seekp(-1, std::ios::end);
         optimizer_file.write(&value, 1);
     }
+    std::filesystem::path second_generation;
     if (ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
         !ace_save_train_checkpoint(
             training_checkpoint_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint, error) ||
         !ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
-        full_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL) {
+        full_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL ||
+        !adapter_checkpoint_directory(training_checkpoint_dir, second_generation, error) ||
+        second_generation == first_generation || !std::filesystem::is_directory(first_generation)) {
         std::filesystem::remove_all(training_checkpoint_dir);
         ace_free_train_dit_graph(tiny_training);
         ggml_backend_free(tiny.backend);

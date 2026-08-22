@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <string>
 #include <utility>
@@ -243,8 +244,67 @@ int main() {
             }
         }
     }
+
+    const std::filesystem::path published = directory.path / "published";
+    const std::filesystem::path published_generation =
+        published / ".checkpoint-generations" / "generation-test";
+    std::filesystem::create_directories(published_generation, filesystem_error);
+    std::filesystem::copy_file(directory.path / "base.gguf", published / "base.gguf", filesystem_error);
+    std::filesystem::copy_file(directory.path / "adapter_config.json",
+                               published_generation / "adapter_config.json",
+                               filesystem_error);
+    std::filesystem::copy_file(directory.path / "adapter_model.safetensors",
+                               published_generation / "adapter_model.safetensors",
+                               filesystem_error);
+    std::filesystem::create_directories(
+        published / ".checkpoint-generations" / "generation-interrupted", filesystem_error);
+    std::filesystem::create_directory_symlink(
+        std::filesystem::path(".checkpoint-generations") / "generation-test",
+        published / "checkpoint.current",
+        filesystem_error);
+    std::vector<float> published_q;
+    std::vector<float> published_v;
+    if (filesystem_error || !reload_adapter(published, 1.0f, published_q, published_v)) {
+        std::fputs("native adapter reload did not honor the selected checkpoint generation\n", stderr);
+        return 1;
+    }
     if (!rejects_partial_merge(directory.path)) {
         std::fputs("native adapter reload accepted a partial merge\n", stderr);
+        return 1;
+    }
+
+    const std::filesystem::path incomplete = directory.path / "incomplete";
+    std::filesystem::create_directories(incomplete, filesystem_error);
+    std::filesystem::copy_file(directory.path / "base.gguf", incomplete / "base.gguf", filesystem_error);
+    std::filesystem::copy_file(
+        directory.path / "adapter_config.json", incomplete / "adapter_config.json", filesystem_error);
+    const std::string q_module = ace_checkpoint_module_path(state.params[0].target.weight_name);
+    const std::string v_module = ace_checkpoint_module_path(state.params[1].target.weight_name);
+    std::vector<ACETrainCheckpointTensor> incomplete_tensors = {
+        { q_module + ".lora_A.weight", { 1, 2 }, &state.params[0].a },
+        { q_module + ".lora_B.weight", { 2, 1 }, &state.params[0].b },
+        { q_module + ".lora_magnitude_vector", { 2 }, &state.params[0].magnitude },
+        { v_module + ".lora_A.weight", { 2, 2 }, &state.params[1].a },
+        { v_module + ".lora_B.weight", { 2, 2 }, &state.params[1].b },
+    };
+    if (filesystem_error ||
+        !ace_write_safetensors(incomplete / "adapter_model.safetensors", incomplete_tensors, error) ||
+        !rejects_partial_merge(incomplete)) {
+        std::fputs("native PEFT reload accepted a missing DoRA magnitude\n", stderr);
+        return 1;
+    }
+
+    const std::filesystem::path invalid_config = directory.path / "invalid-config";
+    std::filesystem::create_directories(invalid_config, filesystem_error);
+    std::filesystem::copy_file(directory.path / "base.gguf", invalid_config / "base.gguf", filesystem_error);
+    std::filesystem::copy_file(directory.path / "adapter_model.safetensors",
+                               invalid_config / "adapter_model.safetensors",
+                               filesystem_error);
+    std::ofstream invalid_config_file(invalid_config / "adapter_config.json", std::ios::trunc);
+    invalid_config_file << "{\n";
+    invalid_config_file.close();
+    if (filesystem_error || !invalid_config_file.good() || !rejects_partial_merge(invalid_config)) {
+        std::fputs("native PEFT reload accepted an invalid adapter configuration\n", stderr);
         return 1;
     }
 

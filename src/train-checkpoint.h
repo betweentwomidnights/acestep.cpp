@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "adapter-checkpoint-directory.h"
 #include "train-adapter-checkpoint.h"
 #include "train-adapter-optimizer.h"
 
@@ -13,6 +14,13 @@
 #include <random>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#    include <windows.h>
+#else
+#    include <fcntl.h>
+#    include <unistd.h>
+#endif
 
 enum ACETrainCheckpointKind {
     ACE_TRAIN_CHECKPOINT_ADAPTER,
@@ -60,6 +68,113 @@ static const char * const ace_train_checkpoint_files[] = {
     "optimizer_state.safetensors",
     "trainer_state.json",
 };
+
+static bool ace_sync_checkpoint_path(const std::filesystem::path & path,
+                                     bool                          directory,
+                                     std::string &                 error) {
+#ifdef _WIN32
+    if (directory) {
+        return true;
+    }
+    const DWORD flags = directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
+    HANDLE handle = CreateFileW(path.wstring().c_str(),
+                                GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr,
+                                OPEN_EXISTING,
+                                flags,
+                                nullptr);
+    if (handle == INVALID_HANDLE_VALUE || !FlushFileBuffers(handle)) {
+        if (handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+        }
+        error = "cannot make checkpoint path durable: " + path.string();
+        return false;
+    }
+    CloseHandle(handle);
+#else
+    const int descriptor = open(path.c_str(), O_RDONLY);
+    if (descriptor < 0 || fsync(descriptor) != 0) {
+        if (descriptor >= 0) {
+            close(descriptor);
+        }
+        error = "cannot make checkpoint path durable: " + path.string();
+        return false;
+    }
+    close(descriptor);
+#endif
+    return true;
+}
+
+static bool ace_create_train_checkpoint_links(const std::filesystem::path & directory,
+                                              const std::string &           token,
+                                              std::string &                 error) {
+    std::vector<std::string> names;
+    for (const char * name : ace_train_checkpoint_files) {
+        names.emplace_back(name);
+    }
+    names.emplace_back("checkpoint_manifest.json");
+    for (const std::string & name : names) {
+        const std::filesystem::path link = directory / name;
+        const std::filesystem::path target = std::filesystem::path("checkpoint.current") / name;
+        std::error_code filesystem_error;
+        const std::filesystem::file_status status = std::filesystem::symlink_status(link, filesystem_error);
+        if (filesystem_error == std::make_error_code(std::errc::no_such_file_or_directory)) {
+            filesystem_error.clear();
+        }
+        if (filesystem_error) {
+            error = "cannot inspect checkpoint publication link " + name + ": " + filesystem_error.message();
+            return false;
+        }
+        if (std::filesystem::exists(status)) {
+            if (!std::filesystem::is_symlink(status) ||
+                std::filesystem::read_symlink(link, filesystem_error) != target || filesystem_error) {
+                error = "checkpoint directory contains a non-generational " + name;
+                return false;
+            }
+            continue;
+        }
+        const std::filesystem::path temporary = directory / (name + ".link-" + token);
+        std::filesystem::create_symlink(target, temporary, filesystem_error);
+        if (!filesystem_error) {
+            std::filesystem::rename(temporary, link, filesystem_error);
+        }
+        if (filesystem_error) {
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            error = "cannot create checkpoint publication link " + name + ": " + filesystem_error.message();
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ace_publish_train_checkpoint_generation(const std::filesystem::path & directory,
+                                                    const std::filesystem::path & relative_generation,
+                                                    const std::string &           token,
+                                                    std::string &                 error) {
+    const std::filesystem::path pointer = directory / "checkpoint.current";
+    const std::filesystem::path temporary = directory / ("checkpoint.current-" + token);
+    std::error_code filesystem_error;
+    std::filesystem::create_directory_symlink(relative_generation, temporary, filesystem_error);
+    if (filesystem_error) {
+        error = "cannot create checkpoint generation pointer: " + filesystem_error.message();
+        return false;
+    }
+#ifdef _WIN32
+    const bool published = MoveFileExW(temporary.wstring().c_str(),
+                                       pointer.wstring().c_str(),
+                                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    const bool published = ::rename(temporary.c_str(), pointer.c_str()) == 0;
+#endif
+    if (!published) {
+        std::filesystem::remove(temporary, filesystem_error);
+        error = "cannot publish checkpoint generation pointer";
+        return false;
+    }
+    return ace_sync_checkpoint_path(directory, true, error);
+}
 
 static bool ace_write_train_checkpoint_manifest(const std::filesystem::path & directory,
                                                 const std::string &           base_model_fingerprint,
@@ -136,9 +251,12 @@ static bool ace_validate_train_checkpoint_manifest(const std::filesystem::path &
 static bool ace_train_checkpoint_kind(const std::string &      directory,
                                       ACETrainCheckpointKind & kind,
                                       std::string &            error) {
-    const std::filesystem::path path(directory);
+    std::filesystem::path path;
+    if (!adapter_checkpoint_directory(directory, path, error)) {
+        return false;
+    }
     const bool has_manifest = std::filesystem::is_regular_file(path / "checkpoint_manifest.json");
-    const bool has_pending = std::filesystem::is_regular_file(path / "checkpoint.pending");
+    const bool has_pending = std::filesystem::is_regular_file(std::filesystem::path(directory) / "checkpoint.pending");
     const bool has_progress = std::filesystem::is_regular_file(path / "trainer_state.json");
     const bool has_optimizer = std::filesystem::is_regular_file(path / "optimizer_state.safetensors");
     if (has_manifest) {
@@ -207,11 +325,21 @@ static bool ace_save_train_checkpoint(const std::string &               director
     }
 
     const std::filesystem::path path(directory);
-    const std::filesystem::path parent = path.parent_path().empty() ? std::filesystem::path(".") : path.parent_path();
-    const std::filesystem::path staging =
-        parent / (path.filename().string() + ".checkpoint-stage-" + std::to_string(std::random_device {}()));
+    const std::string token = std::to_string(std::random_device {}()) + "-" +
+                              std::to_string(std::random_device {}());
+    const std::filesystem::path generations = path / ".checkpoint-generations";
+    const std::filesystem::path relative_generation =
+        std::filesystem::path(".checkpoint-generations") / ("generation-" + token);
+    const std::filesystem::path generation = path / relative_generation;
+    const std::filesystem::path staging = generations / (".stage-" + token);
     std::error_code filesystem_error;
-    std::filesystem::create_directories(staging, filesystem_error);
+    std::filesystem::create_directories(path, filesystem_error);
+    if (!filesystem_error) {
+        std::filesystem::create_directories(generations, filesystem_error);
+    }
+    if (!filesystem_error) {
+        std::filesystem::create_directory(staging, filesystem_error);
+    }
     if (filesystem_error) {
         error = "cannot create checkpoint staging directory: " + filesystem_error.message();
         return false;
@@ -243,50 +371,30 @@ static bool ace_save_train_checkpoint(const std::string &               director
         discard_staging();
         return false;
     }
-
-    std::filesystem::create_directories(path, filesystem_error);
-    if (filesystem_error) {
-        error = "cannot create checkpoint directory: " + filesystem_error.message();
-        discard_staging();
-        return false;
-    }
-    {
-        std::ofstream pending(path / "checkpoint.pending", std::ios::trunc);
-        pending << "1\n";
-        if (!pending.good()) {
-            error = "cannot create checkpoint publication marker";
-            discard_staging();
-            return false;
-        }
-    }
-    auto publish = [&](const char * name) {
-        std::error_code publish_error;
-        std::filesystem::remove(path / name, publish_error);
-        publish_error.clear();
-        std::filesystem::rename(staging / name, path / name, publish_error);
-        if (publish_error) {
-            error = "cannot publish checkpoint file " + std::string(name) + ": " + publish_error.message();
-            return false;
-        }
-        return true;
-    };
     for (const char * name : ace_train_checkpoint_files) {
-        if (!publish(name)) {
+        if (!ace_sync_checkpoint_path(staging / name, false, error)) {
             discard_staging();
             return false;
         }
     }
-    if (!publish("checkpoint_manifest.json")) {
+    if (!ace_sync_checkpoint_path(staging / "checkpoint_manifest.json", false, error) ||
+        !ace_sync_checkpoint_path(staging, true, error)) {
         discard_staging();
         return false;
     }
-    std::filesystem::remove(path / "checkpoint.pending", filesystem_error);
-    if (filesystem_error) {
-        error = "cannot finalize checkpoint publication: " + filesystem_error.message();
+    std::filesystem::rename(staging, generation, filesystem_error);
+    if (filesystem_error || !ace_sync_checkpoint_path(generations, true, error)) {
+        if (error.empty()) {
+            error = "cannot finalize checkpoint generation: " + filesystem_error.message();
+        }
         discard_staging();
         return false;
     }
-    discard_staging();
+    if (!ace_create_train_checkpoint_links(path, token, error) ||
+        !ace_sync_checkpoint_path(path, true, error) ||
+        !ace_publish_train_checkpoint_generation(path, relative_generation, token, error)) {
+        return false;
+    }
     return true;
 }
 
@@ -302,13 +410,16 @@ static bool ace_load_train_checkpoint(const std::string &                    dir
     optimizer = {};
     completed_epochs = 0;
     error.clear();
-    const std::filesystem::path path(directory);
+    std::filesystem::path path;
     if (expected_base_fingerprint.empty()) {
         error = "expected base model fingerprint is missing";
         return false;
     }
+    if (!adapter_checkpoint_directory(directory, path, error)) {
+        return false;
+    }
     if (!ace_validate_train_checkpoint_manifest(path, expected_base_fingerprint, error) ||
-        !ace_load_train_adapter_checkpoint(directory, targets, state, error, expected_adapter_type)) {
+        !ace_load_train_adapter_checkpoint(path.string(), targets, state, error, expected_adapter_type)) {
         return false;
     }
 
