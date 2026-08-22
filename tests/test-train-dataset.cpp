@@ -1,8 +1,8 @@
 // ABOUTME: Tests ACE-Step training dataset discovery against real temporary files.
 // ABOUTME: Verifies structured metadata, multiline lyrics, stable ordering, and pair validation.
 
-#include "train-dataset.h"
 #include "pipeline-train.h"
+#include "train-dataset.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -39,16 +39,14 @@ int main() {
         "[Verse]\r\n"
         "Synthetic test words only\r\n";
 
-    if (!write_file(directory / "second.wav", "RIFFtest") ||
-        !write_file(directory / "second.txt", metadata) ||
-        !write_file(directory / "first.wav", "RIFFtest") ||
-        !write_file(directory / "first.txt", metadata)) {
+    if (!write_file(directory / "second.wav", "RIFFtest") || !write_file(directory / "second.txt", metadata) ||
+        !write_file(directory / "first.wav", "RIFFtest") || !write_file(directory / "first.txt", metadata)) {
         std::filesystem::remove_all(directory);
         return fail("could not create the temporary training dataset");
     }
 
     std::vector<ACETrainingExample> examples;
-    std::string error;
+    std::string                     error;
     if (!ace_training_load_dataset(directory, examples, error)) {
         std::filesystem::remove_all(directory);
         return fail(error.c_str());
@@ -67,7 +65,7 @@ int main() {
     }
 
     ACETrainPreprocessConfig preprocess;
-    AceRequest request = ace_training_request(examples[0], 42.5f, preprocess);
+    AceRequest               request = ace_training_request(examples[0], 42.5f, preprocess);
     if (request.caption != "reference_voice, sparse electronic pop" || request.lyrics != parsed.lyrics ||
         request.bpm != 70 || request.keyscale != "E minor" || request.timesignature != "4" ||
         request.duration != 42.5f || request.seed != -1 || request.lm_batch_size != 1 ||
@@ -75,9 +73,9 @@ int main() {
         std::filesystem::remove_all(directory);
         return fail("default training request must match Gary's prepended-tag caption semantics");
     }
-    preprocess.use_genre = true;
+    preprocess.use_genre    = true;
     preprocess.tag_position = ACE_TRAIN_TAG_APPEND;
-    request = ace_training_request(examples[0], 42.5f, preprocess);
+    request                 = ace_training_request(examples[0], 42.5f, preprocess);
     if (request.caption != "alternative pop, reference_voice") {
         std::filesystem::remove_all(directory);
         return fail("training request must support Gary's genre and appended-tag prompt mode");

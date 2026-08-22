@@ -19,11 +19,11 @@ int main() {
         return fail("VAE posterior scale must use numerically stable softplus plus epsilon");
     }
 
-    const int temporal_length = 2;
+    const int          temporal_length = 2;
     std::vector<float> raw((size_t) 128 * temporal_length);
     for (int channel = 0; channel < 64; ++channel) {
         for (int time = 0; time < temporal_length; ++time) {
-            raw[(size_t) channel * temporal_length + time] = (float) (channel * 10 + time);
+            raw[(size_t) channel * temporal_length + time]        = (float) (channel * 10 + time);
             raw[(size_t) (64 + channel) * temporal_length + time] = -100.0f;
         }
     }
@@ -41,15 +41,12 @@ int main() {
     VAEEncLatentSampler first(42);
     VAEEncLatentSampler replay(42);
     VAEEncLatentSampler different(43);
-    std::vector<float> sampled_a(means.size());
-    std::vector<float> sampled_b(means.size());
-    std::vector<float> sampled_c(means.size());
-    vae_enc_extract_latents(
-        raw.data(), temporal_length, 0, temporal_length, sampled_a.data(), 0, &first);
-    vae_enc_extract_latents(
-        raw.data(), temporal_length, 0, temporal_length, sampled_b.data(), 0, &replay);
-    vae_enc_extract_latents(
-        raw.data(), temporal_length, 0, temporal_length, sampled_c.data(), 0, &different);
+    std::vector<float>  sampled_a(means.size());
+    std::vector<float>  sampled_b(means.size());
+    std::vector<float>  sampled_c(means.size());
+    vae_enc_extract_latents(raw.data(), temporal_length, 0, temporal_length, sampled_a.data(), 0, &first);
+    vae_enc_extract_latents(raw.data(), temporal_length, 0, temporal_length, sampled_b.data(), 0, &replay);
+    vae_enc_extract_latents(raw.data(), temporal_length, 0, temporal_length, sampled_c.data(), 0, &different);
     if (sampled_a != sampled_b || sampled_a == sampled_c || sampled_a == means) {
         return fail("VAE posterior sampling must be seed-deterministic and seed-sensitive");
     }

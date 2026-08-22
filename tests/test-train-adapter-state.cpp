@@ -32,11 +32,7 @@ static ggml_tensor * make_weight(ggml_context * ctx, const char * name, int64_t 
     return weight;
 }
 
-static ggml_tensor * make_matrix(ggml_context * ctx,
-                                 const char *   name,
-                                 int64_t        in,
-                                 int64_t        out,
-                                 float          value) {
+static ggml_tensor * make_matrix(ggml_context * ctx, const char * name, int64_t in, int64_t out, float value) {
     ggml_tensor * tensor = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in, out);
     ggml_set_name(tensor, name);
     float * data = static_cast<float *>(tensor->data);
@@ -66,18 +62,18 @@ static bool abort_backend_compute(void *) {
 }
 
 int main() {
-    using TrainingLoader = bool (*)(DiTGGML *, const char *, const char *, float, bool);
+    using TrainingLoader           = bool (*)(DiTGGML *, const char *, const char *, float, bool);
     TrainingLoader training_loader = dit_ggml_load;
     (void) training_loader;
-    using TrainingGraphBuilder = ggml_cgraph * (*)(
-        DiTGGML *, ggml_context *, int, int, int, ggml_tensor **, ggml_tensor **, bool);
+    using TrainingGraphBuilder =
+        ggml_cgraph * (*) (DiTGGML *, ggml_context *, int, int, int, ggml_tensor **, ggml_tensor **, bool);
     TrainingGraphBuilder training_graph_builder = dit_ggml_build_graph;
     (void) training_graph_builder;
 
     const std::filesystem::path missing_model =
-        std::filesystem::temp_directory_path() / ("missing-dit-" + std::to_string(std::random_device {}()) + ".gguf");
+        std::filesystem::temp_directory_path() / ("missing-dit-" + std::to_string(std::random_device{}()) + ".gguf");
     const int backend_references = g_backend_refs;
-    DiTGGML failed_model = {};
+    DiTGGML   failed_model       = {};
     if (dit_ggml_load(&failed_model, missing_model.string().c_str()) || g_backend_refs != backend_references ||
         failed_model.backend || failed_model.cpu_backend || failed_model.sched || failed_model.wctx.ctx) {
         return fail("failed DiT loads must release all partial model resources");
@@ -93,22 +89,22 @@ int main() {
         return fail("failed to create ggml context");
     }
 
-    DiTGGML model = {};
-    model.cfg.n_layers = 1;
+    DiTGGML model        = {};
+    model.cfg.n_layers   = 1;
     DiTGGMLLayer & layer = model.layers[0];
-    layer.sa_q_proj = make_weight(ctx, "decoder.layers.0.self_attn.q_proj.weight", 128, 256);
-    layer.sa_k_proj = make_weight(ctx, "decoder.layers.0.self_attn.k_proj.weight", 128, 256);
-    layer.sa_v_proj = make_weight(ctx, "decoder.layers.0.self_attn.v_proj.weight", 128, 256);
-    layer.sa_o_proj = make_weight(ctx, "decoder.layers.0.self_attn.o_proj.weight", 128, 256);
-    layer.ca_q_proj = make_weight(ctx, "decoder.layers.0.cross_attn.q_proj.weight", 128, 256);
-    layer.ca_k_proj = make_weight(ctx, "decoder.layers.0.cross_attn.k_proj.weight", 128, 256);
-    layer.ca_v_proj = make_weight(ctx, "decoder.layers.0.cross_attn.v_proj.weight", 128, 256);
-    layer.ca_o_proj = make_weight(ctx, "decoder.layers.0.cross_attn.o_proj.weight", 128, 256);
-    layer.gate_proj = make_weight(ctx, "decoder.layers.0.mlp.gate_proj.weight", 128, 256);
-    layer.up_proj = make_weight(ctx, "decoder.layers.0.mlp.up_proj.weight", 128, 256);
-    layer.down_proj = make_weight(ctx, "decoder.layers.0.mlp.down_proj.weight", 128, 256);
+    layer.sa_q_proj      = make_weight(ctx, "decoder.layers.0.self_attn.q_proj.weight", 128, 256);
+    layer.sa_k_proj      = make_weight(ctx, "decoder.layers.0.self_attn.k_proj.weight", 128, 256);
+    layer.sa_v_proj      = make_weight(ctx, "decoder.layers.0.self_attn.v_proj.weight", 128, 256);
+    layer.sa_o_proj      = make_weight(ctx, "decoder.layers.0.self_attn.o_proj.weight", 128, 256);
+    layer.ca_q_proj      = make_weight(ctx, "decoder.layers.0.cross_attn.q_proj.weight", 128, 256);
+    layer.ca_k_proj      = make_weight(ctx, "decoder.layers.0.cross_attn.k_proj.weight", 128, 256);
+    layer.ca_v_proj      = make_weight(ctx, "decoder.layers.0.cross_attn.v_proj.weight", 128, 256);
+    layer.ca_o_proj      = make_weight(ctx, "decoder.layers.0.cross_attn.o_proj.weight", 128, 256);
+    layer.gate_proj      = make_weight(ctx, "decoder.layers.0.mlp.gate_proj.weight", 128, 256);
+    layer.up_proj        = make_weight(ctx, "decoder.layers.0.mlp.up_proj.weight", 128, 256);
+    layer.down_proj      = make_weight(ctx, "decoder.layers.0.mlp.down_proj.weight", 128, 256);
 
-    std::string error;
+    std::string                        error;
     std::vector<ACETrainAdapterTarget> attention;
     if (!ace_train_adapter_targets(model, "attention", 64, 128, attention, error)) {
         std::fprintf(stderr, "FAIL: attention target enumeration: %s\n", error.c_str());
@@ -133,10 +129,7 @@ int main() {
     }
     for (size_t i = 0; i < balanced.size(); ++i) {
         if (balanced[i].rank != expected_ranks[i] || balanced[i].alpha != expected_ranks[i] * 2) {
-            std::fprintf(stderr,
-                         "FAIL: balanced profile rank/alpha at %zu: got %d/%d\n",
-                         i,
-                         balanced[i].rank,
+            std::fprintf(stderr, "FAIL: balanced profile rank/alpha at %zu: got %d/%d\n", i, balanced[i].rank,
                          balanced[i].alpha);
             ggml_free(ctx);
             return 1;
@@ -184,7 +177,7 @@ int main() {
         /*.mem_buffer =*/nullptr,
         /*.no_alloc   =*/false,
     };
-    ggml_context * graph_ctx = ggml_init(graph_params);
+    ggml_context *            graph_ctx = ggml_init(graph_params);
     ACETrainAdapterGraphState graph_state;
     if (!ace_build_train_adapter_graph_state(graph_ctx, state, graph_state, error)) {
         std::fprintf(stderr, "FAIL: adapter graph state: %s\n", error.c_str());
@@ -201,8 +194,7 @@ int main() {
     const ACETrainAdapterGraphParam & first_graph = graph_state.params.front();
     if (first_graph.a->ne[0] != 128 || first_graph.a->ne[1] != 16 || first_graph.b->ne[0] != 16 ||
         first_graph.b->ne[1] != 256 || !(first_graph.a->flags & GGML_TENSOR_FLAG_PARAM) ||
-        !(first_graph.b->flags & GGML_TENSOR_FLAG_PARAM) ||
-        !(first_graph.magnitude->flags & GGML_TENSOR_FLAG_PARAM)) {
+        !(first_graph.b->flags & GGML_TENSOR_FLAG_PARAM) || !(first_graph.magnitude->flags & GGML_TENSOR_FLAG_PARAM)) {
         ggml_free(graph_ctx);
         ggml_free(ctx);
         return fail("adapter graph tensor shapes or parameter flags are incorrect");
@@ -225,29 +217,25 @@ int main() {
     ggml_free(graph_ctx);
 
     const std::filesystem::path checkpoint_dir =
-        std::filesystem::temp_directory_path() /
-        ("ace-adapter-checkpoint-" + std::to_string(std::random_device {}()));
+        std::filesystem::temp_directory_path() / ("ace-adapter-checkpoint-" + std::to_string(std::random_device{}()));
     if (!ace_save_train_adapter_checkpoint(checkpoint_dir.string(), state, error)) {
         std::fprintf(stderr, "FAIL: save PEFT checkpoint: %s\n", error.c_str());
         ggml_free(ctx);
         return 1;
     }
-    STFile saved_adapter;
+    STFile                      saved_adapter;
     const std::filesystem::path adapter_path = checkpoint_dir / "adapter_model.safetensors";
     if (!st_open(&saved_adapter, adapter_path.string().c_str()) || saved_adapter.entries.size() != 33) {
         std::filesystem::remove_all(checkpoint_dir);
         ggml_free(ctx);
         return fail("saved DoRA checkpoint must contain A, B, and magnitude for every target");
     }
-    const std::string expected_a_key =
-        "base_model.model.layers.0.self_attn.q_proj.lora_A.weight";
-    const std::string expected_b_key =
-        "base_model.model.layers.0.self_attn.q_proj.lora_B.weight";
-    const std::string expected_magnitude_key =
-        "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector";
-    const STEntry * saved_a = nullptr;
-    const STEntry * saved_b = nullptr;
-    const STEntry * saved_magnitude = nullptr;
+    const std::string expected_a_key         = "base_model.model.layers.0.self_attn.q_proj.lora_A.weight";
+    const std::string expected_b_key         = "base_model.model.layers.0.self_attn.q_proj.lora_B.weight";
+    const std::string expected_magnitude_key = "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector";
+    const STEntry *   saved_a                = nullptr;
+    const STEntry *   saved_b                = nullptr;
+    const STEntry *   saved_magnitude        = nullptr;
     for (const STEntry & entry : saved_adapter.entries) {
         if (entry.name == expected_a_key) {
             saved_a = &entry;
@@ -257,9 +245,9 @@ int main() {
             saved_magnitude = &entry;
         }
     }
-    if (!saved_a || saved_a->n_dims != 2 || saved_a->shape[0] != 16 || saved_a->shape[1] != 128 ||
-        !saved_b || saved_b->n_dims != 2 || saved_b->shape[0] != 256 || saved_b->shape[1] != 16 ||
-        !saved_magnitude || saved_magnitude->n_dims != 1 || saved_magnitude->shape[0] != 256 ||
+    if (!saved_a || saved_a->n_dims != 2 || saved_a->shape[0] != 16 || saved_a->shape[1] != 128 || !saved_b ||
+        saved_b->n_dims != 2 || saved_b->shape[0] != 256 || saved_b->shape[1] != 16 || !saved_magnitude ||
+        saved_magnitude->n_dims != 1 || saved_magnitude->shape[0] != 256 ||
         static_cast<const float *>(st_data(saved_adapter, *saved_a))[0] != first.a[0]) {
         st_close(&saved_adapter);
         std::filesystem::remove_all(checkpoint_dir);
@@ -272,11 +260,9 @@ int main() {
         std::set<std::string>(config.target_modules.begin(), config.target_modules.end()).size() != 11 ||
         config.rank_pattern["self_attn.q_proj"] != 16 || config.rank_pattern["self_attn.v_proj"] != 80 ||
         config.alpha_pattern["self_attn.q_proj"] != 32 || config.alpha_pattern["self_attn.v_proj"] != 160 ||
-        adapter_config_value_for_weight(config.alpha_pattern,
-                                        "decoder.layers.0.self_attn.q_proj.weight",
+        adapter_config_value_for_weight(config.alpha_pattern, "decoder.layers.0.self_attn.q_proj.weight",
                                         config.lora_alpha) != 32 ||
-        adapter_config_value_for_weight(config.alpha_pattern,
-                                        "decoder.layers.0.self_attn.v_proj.weight",
+        adapter_config_value_for_weight(config.alpha_pattern, "decoder.layers.0.self_attn.v_proj.weight",
                                         config.lora_alpha) != 160) {
         std::filesystem::remove_all(checkpoint_dir);
         ggml_free(ctx);
@@ -335,9 +321,9 @@ int main() {
     std::filesystem::remove(checkpoint_dir / "trainer_state.json");
 
     const std::filesystem::path extra_checkpoint_dir = checkpoint_dir.string() + "-extra";
-    ACETrainAdapterState extra_state = state;
-    ACETrainAdapterParam extra_parameter = state.params.front();
-    extra_parameter.target.weight_name = "decoder.layers.1.self_attn.q_proj.weight";
+    ACETrainAdapterState        extra_state          = state;
+    ACETrainAdapterParam        extra_parameter      = state.params.front();
+    extra_parameter.target.weight_name               = "decoder.layers.1.self_attn.q_proj.weight";
     extra_state.params.push_back(std::move(extra_parameter));
     ACETrainAdapterState rejected_inventory;
     if (!ace_save_train_adapter_checkpoint(extra_checkpoint_dir.string(), extra_state, error) ||
@@ -349,49 +335,46 @@ int main() {
     }
     std::filesystem::remove_all(extra_checkpoint_dir);
 
-    auto write_safetensors_fixture = [&](const std::filesystem::path & file_path,
-                                         std::string                   header,
-                                         size_t                        data_bytes) {
+    auto write_safetensors_fixture = [&](const std::filesystem::path & file_path, std::string header,
+                                         size_t data_bytes) {
         while (header.size() % 8 != 0) {
             header.push_back(' ');
         }
-        std::ofstream output(file_path, std::ios::binary | std::ios::trunc);
-        const uint64_t header_size = (uint64_t) header.size();
+        std::ofstream           output(file_path, std::ios::binary | std::ios::trunc);
+        const uint64_t          header_size = (uint64_t) header.size();
         const std::vector<char> data(data_bytes, 0);
         output.write(reinterpret_cast<const char *>(&header_size), sizeof(header_size));
         output.write(header.data(), (std::streamsize) header.size());
         output.write(data.data(), (std::streamsize) data.size());
         return output.good();
     };
-    const std::filesystem::path truncated_tensor = checkpoint_dir / "truncated.safetensors";
-    const std::filesystem::path mismatched_tensor = checkpoint_dir / "mismatched.safetensors";
+    const std::filesystem::path truncated_tensor    = checkpoint_dir / "truncated.safetensors";
+    const std::filesystem::path mismatched_tensor   = checkpoint_dir / "mismatched.safetensors";
     const std::filesystem::path unterminated_header = checkpoint_dir / "unterminated-header.safetensors";
     const std::filesystem::path overlapping_tensors = checkpoint_dir / "overlapping.safetensors";
-    const std::filesystem::path gapped_tensors = checkpoint_dir / "gapped.safetensors";
-    const std::filesystem::path trailing_data = checkpoint_dir / "trailing-data.safetensors";
-    STFile malformed_file;
-    if (!write_safetensors_fixture(
-            truncated_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}", 4) ||
+    const std::filesystem::path gapped_tensors      = checkpoint_dir / "gapped.safetensors";
+    const std::filesystem::path trailing_data       = checkpoint_dir / "trailing-data.safetensors";
+    STFile                      malformed_file;
+    if (!write_safetensors_fixture(truncated_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}",
+                                   4) ||
         st_open(&malformed_file, truncated_tensor.string().c_str()) ||
-        !write_safetensors_fixture(
-            mismatched_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4) ||
+        !write_safetensors_fixture(mismatched_tensor,
+                                   "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4) ||
         st_open(&malformed_file, mismatched_tensor.string().c_str()) ||
         !write_safetensors_fixture(unterminated_header, "{\"x\"", 0) ||
         st_open(&malformed_file, unterminated_header.string().c_str()) ||
-        !write_safetensors_fixture(
-            overlapping_tensors,
-            "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},"
-            "\"y\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}",
-            4) ||
+        !write_safetensors_fixture(overlapping_tensors,
+                                   "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},"
+                                   "\"y\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}",
+                                   4) ||
         st_open(&malformed_file, overlapping_tensors.string().c_str()) ||
-        !write_safetensors_fixture(
-            gapped_tensors,
-            "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},"
-            "\"y\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[8,12]}}",
-            12) ||
+        !write_safetensors_fixture(gapped_tensors,
+                                   "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},"
+                                   "\"y\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[8,12]}}",
+                                   12) ||
         st_open(&malformed_file, gapped_tensors.string().c_str()) ||
-        !write_safetensors_fixture(
-            trailing_data, "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}", 8) ||
+        !write_safetensors_fixture(trailing_data, "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}",
+                                   8) ||
         st_open(&malformed_file, trailing_data.string().c_str())) {
         std::filesystem::remove_all(checkpoint_dir);
         ggml_free(ctx);
@@ -405,7 +388,7 @@ int main() {
     std::filesystem::remove(trailing_data);
 
     ACETrainAdapterState incompatible_config = state;
-    incompatible_config.base_alpha            = 64;
+    incompatible_config.base_alpha           = 64;
     for (ACETrainAdapterParam & param : incompatible_config.params) {
         param.target.alpha = std::max(1, param.target.alpha / 2);
     }
@@ -423,41 +406,41 @@ int main() {
         /*.mem_buffer =*/nullptr,
         /*.no_alloc   =*/false,
     };
-    ggml_context * tiny_ctx = ggml_init(tiny_params);
-    DiTGGML tiny = {};
-    tiny.cfg.hidden_size = 4;
+    ggml_context * tiny_ctx    = ggml_init(tiny_params);
+    DiTGGML        tiny        = {};
+    tiny.cfg.hidden_size       = 4;
     tiny.cfg.intermediate_size = 8;
-    tiny.cfg.n_heads = 1;
-    tiny.cfg.n_kv_heads = 1;
-    tiny.cfg.head_dim = 4;
-    tiny.cfg.n_layers = 1;
-    tiny.cfg.in_channels = 4;
-    tiny.cfg.out_channels = 2;
-    tiny.cfg.patch_size = 1;
-    tiny.cfg.sliding_window = 2;
-    tiny.cfg.rope_theta = 10000.0f;
-    tiny.cfg.rms_norm_eps = 1e-5f;
-    tiny.backend = ggml_backend_cpu_init();
-    tiny.cpu_backend = tiny.backend;
-    tiny.use_flash_attn = true;
+    tiny.cfg.n_heads           = 1;
+    tiny.cfg.n_kv_heads        = 1;
+    tiny.cfg.head_dim          = 4;
+    tiny.cfg.n_layers          = 1;
+    tiny.cfg.in_channels       = 4;
+    tiny.cfg.out_channels      = 2;
+    tiny.cfg.patch_size        = 1;
+    tiny.cfg.sliding_window    = 2;
+    tiny.cfg.rope_theta        = 10000.0f;
+    tiny.cfg.rms_norm_eps      = 1e-5f;
+    tiny.backend               = ggml_backend_cpu_init();
+    tiny.cpu_backend           = tiny.backend;
+    tiny.use_flash_attn        = true;
 
     ggml_init_params encoder_params = {
         /*.mem_size   =*/2 * ggml_tensor_overhead(),
         /*.mem_buffer =*/nullptr,
         /*.no_alloc   =*/true,
     };
-    ggml_context * encoder_ctx = ggml_init(encoder_params);
-    Qwen3GGML encoder = {};
-    encoder.cfg.hidden_size = 2;
-    encoder.embed_tokens = ggml_new_tensor_2d(encoder_ctx, GGML_TYPE_F32, 2, 4);
-    ggml_backend_buffer_t encoder_buffer = ggml_backend_alloc_ctx_tensors(encoder_ctx, tiny.backend);
-    const float encoder_weights[] = { 0.25f, -0.5f, 0.5f, -0.25f, 0.75f, -0.75f, 1.0f, -1.0f };
+    ggml_context * encoder_ctx              = ggml_init(encoder_params);
+    Qwen3GGML      encoder                  = {};
+    encoder.cfg.hidden_size                 = 2;
+    encoder.embed_tokens                    = ggml_new_tensor_2d(encoder_ctx, GGML_TYPE_F32, 2, 4);
+    ggml_backend_buffer_t encoder_buffer    = ggml_backend_alloc_ctx_tensors(encoder_ctx, tiny.backend);
+    const float           encoder_weights[] = { 0.25f, -0.5f, 0.5f, -0.25f, 0.75f, -0.75f, 1.0f, -1.0f };
     ggml_backend_tensor_set(encoder.embed_tokens, encoder_weights, 0, sizeof(encoder_weights));
     ggml_backend_t encoder_backends[] = { tiny.backend };
-    encoder.sched = ggml_backend_sched_new(encoder_backends, nullptr, 1, 32, false, true);
+    encoder.sched                     = ggml_backend_sched_new(encoder_backends, nullptr, 1, 32, false, true);
     ggml_backend_cpu_set_abort_callback(tiny.backend, abort_backend_compute, nullptr);
-    const int encoder_token = 1;
-    float encoder_output[] = { 123.0f, 456.0f };
+    const int  encoder_token     = 1;
+    float      encoder_output[]  = { 123.0f, 456.0f };
     const bool encoder_succeeded = qwen3_embed_lookup(&encoder, &encoder_token, 1, encoder_output);
     ggml_backend_cpu_set_abort_callback(tiny.backend, nullptr, nullptr);
     ggml_backend_sched_free(encoder.sched);
@@ -472,47 +455,47 @@ int main() {
 
     auto set_timestep_weights = [&](DiTGGMLTembWeights & weights, const char * prefix) {
         const std::string p(prefix);
-        weights.linear_1_w = make_matrix(tiny_ctx, (p + ".linear_1.weight").c_str(), 256, 4, 0.01f);
-        weights.linear_1_b = make_vector(tiny_ctx, (p + ".linear_1.bias").c_str(), 4, 0.0f);
-        weights.linear_2_w = make_matrix(tiny_ctx, (p + ".linear_2.weight").c_str(), 4, 4, 0.01f);
-        weights.linear_2_b = make_vector(tiny_ctx, (p + ".linear_2.bias").c_str(), 4, 0.0f);
+        weights.linear_1_w  = make_matrix(tiny_ctx, (p + ".linear_1.weight").c_str(), 256, 4, 0.01f);
+        weights.linear_1_b  = make_vector(tiny_ctx, (p + ".linear_1.bias").c_str(), 4, 0.0f);
+        weights.linear_2_w  = make_matrix(tiny_ctx, (p + ".linear_2.weight").c_str(), 4, 4, 0.01f);
+        weights.linear_2_b  = make_vector(tiny_ctx, (p + ".linear_2.bias").c_str(), 4, 0.0f);
         weights.time_proj_w = make_matrix(tiny_ctx, (p + ".time_proj.weight").c_str(), 4, 24, 0.01f);
         weights.time_proj_b = make_vector(tiny_ctx, (p + ".time_proj.bias").c_str(), 24, 0.0f);
     };
     set_timestep_weights(tiny.time_embed, "decoder.time_embed");
     set_timestep_weights(tiny.time_embed_r, "decoder.time_embed_r");
-    tiny.proj_in_w = make_matrix(tiny_ctx, "decoder.proj_in.1.weight", 4, 4, 0.01f);
-    tiny.proj_in_b = make_vector(tiny_ctx, "decoder.proj_in.1.bias", 4, 0.0f);
+    tiny.proj_in_w  = make_matrix(tiny_ctx, "decoder.proj_in.1.weight", 4, 4, 0.01f);
+    tiny.proj_in_b  = make_vector(tiny_ctx, "decoder.proj_in.1.bias", 4, 0.0f);
     tiny.cond_emb_w = make_matrix(tiny_ctx, "decoder.condition_embedder.weight", 4, 4, 0.01f);
     tiny.cond_emb_b = make_vector(tiny_ctx, "decoder.condition_embedder.bias", 4, 0.0f);
 
-    DiTGGMLLayer & tiny_layer = tiny.layers[0];
-    tiny_layer.self_attn_norm = make_vector(tiny_ctx, "tiny.self_attn_norm", 4, 1.0f);
-    tiny_layer.sa_q_proj = make_matrix(tiny_ctx, "decoder.layers.0.self_attn.q_proj.weight", 4, 4, 0.01f);
-    tiny_layer.sa_k_proj = make_matrix(tiny_ctx, "decoder.layers.0.self_attn.k_proj.weight", 4, 4, 0.01f);
-    tiny_layer.sa_v_proj = make_matrix(tiny_ctx, "decoder.layers.0.self_attn.v_proj.weight", 4, 4, 0.01f);
-    tiny_layer.sa_q_norm = make_vector(tiny_ctx, "tiny.self_attn.q_norm", 4, 1.0f);
-    tiny_layer.sa_k_norm = make_vector(tiny_ctx, "tiny.self_attn.k_norm", 4, 1.0f);
-    tiny_layer.sa_o_proj = make_matrix(tiny_ctx, "decoder.layers.0.self_attn.o_proj.weight", 4, 4, 0.01f);
-    tiny_layer.cross_attn_norm = make_vector(tiny_ctx, "tiny.cross_attn_norm", 4, 1.0f);
-    tiny_layer.ca_q_proj = make_matrix(tiny_ctx, "decoder.layers.0.cross_attn.q_proj.weight", 4, 4, 0.01f);
-    tiny_layer.ca_k_proj = make_matrix(tiny_ctx, "decoder.layers.0.cross_attn.k_proj.weight", 4, 4, 0.01f);
-    tiny_layer.ca_v_proj = make_matrix(tiny_ctx, "decoder.layers.0.cross_attn.v_proj.weight", 4, 4, 0.01f);
-    tiny_layer.ca_q_norm = make_vector(tiny_ctx, "tiny.cross_attn.q_norm", 4, 1.0f);
-    tiny_layer.ca_k_norm = make_vector(tiny_ctx, "tiny.cross_attn.k_norm", 4, 1.0f);
-    tiny_layer.ca_o_proj = make_matrix(tiny_ctx, "decoder.layers.0.cross_attn.o_proj.weight", 4, 4, 0.01f);
-    tiny_layer.mlp_norm = make_vector(tiny_ctx, "tiny.mlp_norm", 4, 1.0f);
-    tiny_layer.gate_proj = make_matrix(tiny_ctx, "decoder.layers.0.mlp.gate_proj.weight", 4, 8, 0.01f);
-    tiny_layer.up_proj = make_matrix(tiny_ctx, "decoder.layers.0.mlp.up_proj.weight", 4, 8, 0.01f);
-    tiny_layer.down_proj = make_matrix(tiny_ctx, "decoder.layers.0.mlp.down_proj.weight", 8, 4, 0.01f);
+    DiTGGMLLayer & tiny_layer    = tiny.layers[0];
+    tiny_layer.self_attn_norm    = make_vector(tiny_ctx, "tiny.self_attn_norm", 4, 1.0f);
+    tiny_layer.sa_q_proj         = make_matrix(tiny_ctx, "decoder.layers.0.self_attn.q_proj.weight", 4, 4, 0.01f);
+    tiny_layer.sa_k_proj         = make_matrix(tiny_ctx, "decoder.layers.0.self_attn.k_proj.weight", 4, 4, 0.01f);
+    tiny_layer.sa_v_proj         = make_matrix(tiny_ctx, "decoder.layers.0.self_attn.v_proj.weight", 4, 4, 0.01f);
+    tiny_layer.sa_q_norm         = make_vector(tiny_ctx, "tiny.self_attn.q_norm", 4, 1.0f);
+    tiny_layer.sa_k_norm         = make_vector(tiny_ctx, "tiny.self_attn.k_norm", 4, 1.0f);
+    tiny_layer.sa_o_proj         = make_matrix(tiny_ctx, "decoder.layers.0.self_attn.o_proj.weight", 4, 4, 0.01f);
+    tiny_layer.cross_attn_norm   = make_vector(tiny_ctx, "tiny.cross_attn_norm", 4, 1.0f);
+    tiny_layer.ca_q_proj         = make_matrix(tiny_ctx, "decoder.layers.0.cross_attn.q_proj.weight", 4, 4, 0.01f);
+    tiny_layer.ca_k_proj         = make_matrix(tiny_ctx, "decoder.layers.0.cross_attn.k_proj.weight", 4, 4, 0.01f);
+    tiny_layer.ca_v_proj         = make_matrix(tiny_ctx, "decoder.layers.0.cross_attn.v_proj.weight", 4, 4, 0.01f);
+    tiny_layer.ca_q_norm         = make_vector(tiny_ctx, "tiny.cross_attn.q_norm", 4, 1.0f);
+    tiny_layer.ca_k_norm         = make_vector(tiny_ctx, "tiny.cross_attn.k_norm", 4, 1.0f);
+    tiny_layer.ca_o_proj         = make_matrix(tiny_ctx, "decoder.layers.0.cross_attn.o_proj.weight", 4, 4, 0.01f);
+    tiny_layer.mlp_norm          = make_vector(tiny_ctx, "tiny.mlp_norm", 4, 1.0f);
+    tiny_layer.gate_proj         = make_matrix(tiny_ctx, "decoder.layers.0.mlp.gate_proj.weight", 4, 8, 0.01f);
+    tiny_layer.up_proj           = make_matrix(tiny_ctx, "decoder.layers.0.mlp.up_proj.weight", 4, 8, 0.01f);
+    tiny_layer.down_proj         = make_matrix(tiny_ctx, "decoder.layers.0.mlp.down_proj.weight", 8, 4, 0.01f);
     tiny_layer.scale_shift_table = make_matrix(tiny_ctx, "tiny.scale_shift", 4, 6, 0.0f);
-    tiny_layer.layer_type = 0;
+    tiny_layer.layer_type        = 0;
 
-    tiny.norm_out = make_vector(tiny_ctx, "decoder.norm_out.weight", 4, 1.0f);
+    tiny.norm_out        = make_vector(tiny_ctx, "decoder.norm_out.weight", 4, 1.0f);
     tiny.out_scale_shift = make_matrix(tiny_ctx, "decoder.scale_shift_table", 4, 2, 0.0f);
-    tiny.proj_out_w = make_matrix(tiny_ctx, "decoder.proj_out.1.weight", 4, 2, 0.01f);
-    tiny.proj_out_b = make_vector(tiny_ctx, "decoder.proj_out.1.bias", 2, 0.0f);
-    tiny.scalar_one = make_vector(tiny_ctx, "scalar_one", 1, 1.0f);
+    tiny.proj_out_w      = make_matrix(tiny_ctx, "decoder.proj_out.1.weight", 4, 2, 0.01f);
+    tiny.proj_out_b      = make_vector(tiny_ctx, "decoder.proj_out.1.bias", 2, 0.0f);
+    tiny.scalar_one      = make_vector(tiny_ctx, "scalar_one", 1, 1.0f);
 
     std::vector<ACETrainAdapterTarget> tiny_targets;
     if (!ace_train_adapter_targets(tiny, "balanced", 1, 1, tiny_targets, error)) {
@@ -546,15 +529,15 @@ int main() {
         return fail("training graph must preserve the model flash-attention setting");
     }
 
-    const float latent_data[] = { 0.1f, -0.2f, 0.3f, -0.4f, 0.2f, 0.1f, -0.1f, 0.4f };
-    const float encoder_data[] = { 0.2f, -0.1f, 0.05f, 0.3f };
-    const float target_data[] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    const int32_t position_data[] = { 0, 1 };
-    const ggml_fp16_t self_mask[] = { ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f),
-                                      ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f) };
-    const ggml_fp16_t cross_mask[] = { ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f) };
-    const float timestep = 0.5f;
-    const float loss_weights[] = { 0.5f, 0.5f };
+    const float       latent_data[]   = { 0.1f, -0.2f, 0.3f, -0.4f, 0.2f, 0.1f, -0.1f, 0.4f };
+    const float       encoder_data[]  = { 0.2f, -0.1f, 0.05f, 0.3f };
+    const float       target_data[]   = { 0.0f, 0.0f, 0.0f, 0.0f };
+    const int32_t     position_data[] = { 0, 1 };
+    const ggml_fp16_t self_mask[]     = { ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f),
+                                          ggml_fp32_to_fp16(0.0f) };
+    const ggml_fp16_t cross_mask[]    = { ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f) };
+    const float       timestep        = 0.5f;
+    const float       loss_weights[]  = { 0.5f, 0.5f };
     ggml_backend_tensor_set(tiny_training.input_latents, latent_data, 0, sizeof(latent_data));
     ggml_backend_tensor_set(tiny_training.encoder_hidden, encoder_data, 0, sizeof(encoder_data));
     ggml_backend_tensor_set(tiny_training.target_velocity, target_data, 0, sizeof(target_data));
@@ -578,12 +561,9 @@ int main() {
     for (const ACETrainAdapterGraphParam & param : tiny_training.adapters.params) {
         ggml_tensor * trainable[] = { param.b, param.magnitude };
         for (ggml_tensor * tensor : trainable) {
-            ggml_tensor * gradient = ggml_graph_get_grad(tiny_training.graph, tensor);
+            ggml_tensor *      gradient = ggml_graph_get_grad(tiny_training.graph, tensor);
             std::vector<float> gradient_data((size_t) ggml_nelements(gradient));
-            ggml_backend_tensor_get(gradient,
-                                    gradient_data.data(),
-                                    0,
-                                    gradient_data.size() * sizeof(float));
+            ggml_backend_tensor_get(gradient, gradient_data.data(), 0, gradient_data.size() * sizeof(float));
             for (float value : gradient_data) {
                 largest_gradient = std::max(largest_gradient, std::fabs(value));
             }
@@ -605,9 +585,9 @@ int main() {
         parameters_before.insert(parameters_before.end(), param.magnitude.begin(), param.magnitude.end());
     }
     ACETrainAdapterOptimizer optimizer;
-    ACETrainAdamWConfig optimizer_config;
-    optimizer_config.learning_rate = 1e-3f;
-    optimizer_config.weight_decay = 0.01f;
+    ACETrainAdamWConfig      optimizer_config;
+    optimizer_config.learning_rate     = 1e-3f;
+    optimizer_config.weight_decay      = 0.01f;
     optimizer_config.max_gradient_norm = 1.0f;
     if (std::fabs(ace_train_learning_rate(1e-3f, 0, 10, 2, ACE_TRAIN_SCHEDULE_COSINE) - 1e-4f) > 1e-8f ||
         std::fabs(ace_train_learning_rate(1e-3f, 2, 10, 2, ACE_TRAIN_SCHEDULE_COSINE) - 1e-3f) > 1e-8f ||
@@ -621,8 +601,7 @@ int main() {
     ACETrainAdapterGradientAccumulator accumulated_gradients;
     if (!ace_train_adapter_accumulate_gradients(tiny_training, accumulated_gradients, 2, error) ||
         !ace_train_adapter_accumulate_gradients(tiny_training, accumulated_gradients, 1, error) ||
-        accumulated_gradients.microbatch_count != 2 ||
-        accumulated_gradients.example_count != 3) {
+        accumulated_gradients.microbatch_count != 2 || accumulated_gradients.example_count != 3) {
         std::fprintf(stderr, "FAIL: native gradient accumulation: %s\n", error.c_str());
         ace_free_train_dit_graph(tiny_training);
         ggml_backend_free(tiny.backend);
@@ -644,7 +623,7 @@ int main() {
         std::vector<float> values(sum.size());
         ggml_backend_tensor_get(gradient, values.data(), 0, values.size() * sizeof(float));
         for (size_t i = 0; i < values.size(); ++i) {
-            const float expected = values[i] * 3.0f;
+            const float expected  = values[i] * 3.0f;
             const float tolerance = std::max(1e-7f, std::fabs(expected) * 1e-5f);
             if (std::fabs(sum[i] - expected) > tolerance) {
                 return false;
@@ -654,14 +633,15 @@ int main() {
     };
     bool weighted_accumulation = true;
     for (size_t i = 0; i < tiny_training.adapters.params.size(); ++i) {
-        const ACETrainAdapterGraphParam & graph_param = tiny_training.adapters.params[i];
-        const ACETrainAdapterGradientParam & sum = accumulated_gradients.params[i];
+        const ACETrainAdapterGraphParam &    graph_param = tiny_training.adapters.params[i];
+        const ACETrainAdapterGradientParam & sum         = accumulated_gradients.params[i];
         weighted_accumulation = weighted_accumulation && matches_weighted_gradient(graph_param.a, sum.a) &&
                                 matches_weighted_gradient(graph_param.b, sum.b) &&
                                 matches_weighted_gradient(graph_param.magnitude, sum.magnitude);
     }
-    if (!weighted_accumulation || !ace_train_adapter_adamw_step_accumulated(
-            tiny_training, tiny_state, optimizer, optimizer_config, accumulated_gradients, error) ||
+    if (!weighted_accumulation ||
+        !ace_train_adapter_adamw_step_accumulated(tiny_training, tiny_state, optimizer, optimizer_config,
+                                                  accumulated_gradients, error) ||
         optimizer.step != 1 || accumulated_gradients.microbatch_count != 0 ||
         accumulated_gradients.example_count != 0) {
         std::fprintf(stderr, "FAIL: native AdamW step: %s\n", error.c_str());
@@ -678,9 +658,7 @@ int main() {
         parameters_after.insert(parameters_after.end(), param.magnitude.begin(), param.magnitude.end());
     }
     float uploaded_magnitude = 0.0f;
-    ggml_backend_tensor_get(tiny_training.adapters.params[0].magnitude,
-                            &uploaded_magnitude,
-                            0,
+    ggml_backend_tensor_get(tiny_training.adapters.params[0].magnitude, &uploaded_magnitude, 0,
                             sizeof(uploaded_magnitude));
     if (parameters_before == parameters_after || uploaded_magnitude != tiny_state.params[0].magnitude[0]) {
         ace_free_train_dit_graph(tiny_training);
@@ -690,22 +668,15 @@ int main() {
         return fail("AdamW must update host parameters and upload them for the next graph replay");
     }
     const std::filesystem::path training_checkpoint_dir =
-        std::filesystem::temp_directory_path() /
-        ("ace-training-checkpoint-" + std::to_string(std::random_device {}()));
-    ACETrainAdapterState resumed_training_state;
+        std::filesystem::temp_directory_path() / ("ace-training-checkpoint-" + std::to_string(std::random_device{}()));
+    ACETrainAdapterState     resumed_training_state;
     ACETrainAdapterOptimizer resumed_optimizer;
-    int resumed_epochs = 0;
-    const std::string base_model_fingerprint = "fnv1a64:0123456789abcdef:4096";
-    if (!ace_save_train_checkpoint(
-            training_checkpoint_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint, error) ||
-        !ace_load_train_checkpoint(training_checkpoint_dir.string(),
-                                   tiny_targets,
-                                   resumed_training_state,
-                                   resumed_optimizer,
-                                   resumed_epochs,
-                                   base_model_fingerprint,
-                                   "dora-rows",
+    int                      resumed_epochs         = 0;
+    const std::string        base_model_fingerprint = "fnv1a64:0123456789abcdef:4096";
+    if (!ace_save_train_checkpoint(training_checkpoint_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint,
                                    error) ||
+        !ace_load_train_checkpoint(training_checkpoint_dir.string(), tiny_targets, resumed_training_state,
+                                   resumed_optimizer, resumed_epochs, base_model_fingerprint, "dora-rows", error) ||
         resumed_epochs != 3 || resumed_optimizer.step != optimizer.step ||
         resumed_training_state.params[0].magnitude != tiny_state.params[0].magnitude ||
         resumed_optimizer.params[0].b.first_moment != optimizer.params[0].b.first_moment ||
@@ -718,27 +689,24 @@ int main() {
         ggml_free(ctx);
         return 1;
     }
-    std::filesystem::path first_generation;
+    std::filesystem::path       first_generation;
     const std::filesystem::path interrupted_generation =
         training_checkpoint_dir / ".checkpoint-generations" / "generation-interrupted";
     std::filesystem::create_directories(interrupted_generation);
     ACETrainCheckpointKind retained_checkpoint_kind;
 #ifdef _WIN32
-    const bool publication_layout = std::filesystem::is_regular_file(training_checkpoint_dir / "checkpoint.current") &&
-                                    std::filesystem::is_regular_file(training_checkpoint_dir /
-                                                                     "adapter_model.safetensors") &&
-                                    std::filesystem::is_regular_file(training_checkpoint_dir /
-                                                                     "adapter_config.json");
+    const bool publication_layout =
+        std::filesystem::is_regular_file(training_checkpoint_dir / "checkpoint.current") &&
+        std::filesystem::is_regular_file(training_checkpoint_dir / "adapter_model.safetensors") &&
+        std::filesystem::is_regular_file(training_checkpoint_dir / "adapter_config.json");
 #else
-    const bool publication_layout = std::filesystem::is_symlink(training_checkpoint_dir / "checkpoint.current") &&
-                                    std::filesystem::is_regular_file(training_checkpoint_dir /
-                                                                     "adapter_model.safetensors") &&
-                                    std::filesystem::is_regular_file(training_checkpoint_dir /
-                                                                     "adapter_config.json");
+    const bool publication_layout =
+        std::filesystem::is_symlink(training_checkpoint_dir / "checkpoint.current") &&
+        std::filesystem::is_regular_file(training_checkpoint_dir / "adapter_model.safetensors") &&
+        std::filesystem::is_regular_file(training_checkpoint_dir / "adapter_config.json");
 #endif
     if (!adapter_checkpoint_directory(training_checkpoint_dir, first_generation, error) ||
-        first_generation == training_checkpoint_dir ||
-        !publication_layout ||
+        first_generation == training_checkpoint_dir || !publication_layout ||
         !ace_train_checkpoint_kind(training_checkpoint_dir.string(), retained_checkpoint_kind, error) ||
         retained_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL) {
         std::filesystem::remove_all(training_checkpoint_dir);
@@ -748,20 +716,15 @@ int main() {
         ggml_free(ctx);
         return fail("checkpoint publication must retain the selected immutable generation");
     }
-    ACETrainCheckpointKind full_checkpoint_kind;
-    ACETrainAdapterState rejected_base_state;
+    ACETrainCheckpointKind   full_checkpoint_kind;
+    ACETrainAdapterState     rejected_base_state;
     ACETrainAdapterOptimizer rejected_base_optimizer;
-    int rejected_base_epochs = 0;
+    int                      rejected_base_epochs = 0;
     if (!ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
         full_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL ||
-        ace_load_train_checkpoint(training_checkpoint_dir.string(),
-                                  tiny_targets,
-                                  rejected_base_state,
-                                  rejected_base_optimizer,
-                                  rejected_base_epochs,
-                                  "fnv1a64:fedcba9876543210:4096",
-                                  "dora-rows",
-                                  error)) {
+        ace_load_train_checkpoint(training_checkpoint_dir.string(), tiny_targets, rejected_base_state,
+                                  rejected_base_optimizer, rejected_base_epochs, "fnv1a64:fedcba9876543210:4096",
+                                  "dora-rows", error)) {
         std::filesystem::remove_all(training_checkpoint_dir);
         ace_free_train_dit_graph(tiny_training);
         ggml_backend_free(tiny.backend);
@@ -780,14 +743,13 @@ int main() {
         optimizer_file.write(&value, 1);
     }
     const std::filesystem::path peft_in_place_dir =
-        std::filesystem::temp_directory_path() /
-        ("ace-peft-in-place-" + std::to_string(std::random_device {}()));
+        std::filesystem::temp_directory_path() / ("ace-peft-in-place-" + std::to_string(std::random_device{}()));
     ACETrainCheckpointKind migrated_checkpoint_kind;
     if (!ace_save_train_adapter_checkpoint(peft_in_place_dir.string(), tiny_state, error) ||
         !ace_train_checkpoint_kind(peft_in_place_dir.string(), migrated_checkpoint_kind, error) ||
         migrated_checkpoint_kind != ACE_TRAIN_CHECKPOINT_ADAPTER ||
-        !ace_save_train_checkpoint(
-            peft_in_place_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint, error) ||
+        !ace_save_train_checkpoint(peft_in_place_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint,
+                                   error) ||
         !ace_train_checkpoint_kind(peft_in_place_dir.string(), migrated_checkpoint_kind, error) ||
         migrated_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL ||
         !std::filesystem::is_regular_file(peft_in_place_dir / "adapter_model.safetensors") ||
@@ -804,8 +766,8 @@ int main() {
     std::filesystem::remove_all(peft_in_place_dir);
     std::filesystem::path second_generation;
     if (ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
-        !ace_save_train_checkpoint(
-            training_checkpoint_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint, error) ||
+        !ace_save_train_checkpoint(training_checkpoint_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint,
+                                   error) ||
         !ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
         full_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL ||
         !adapter_checkpoint_directory(training_checkpoint_dir, second_generation, error) ||
@@ -821,29 +783,23 @@ int main() {
     ace_free_train_dit_graph(tiny_training);
 
     std::vector<ACETrainDiffusionExample> examples(2);
-    examples[0].target_latents = { 0.1f, -0.2f };
-    examples[0].context_latents = { 0.5f, 0.6f };
-    examples[0].encoder_hidden = { 0.2f, -0.1f, 0.05f, 0.3f };
-    examples[0].real_encoder_sequence_length = 1;
-    examples[0].real_temporal_length = 1;
-    examples[1].target_latents = { -0.4f, 0.3f, -0.2f, 0.1f };
-    examples[1].context_latents = { -0.8f, -0.7f, -0.6f, -0.5f };
-    examples[1].encoder_hidden = { -0.3f, 0.05f, -0.1f, 0.2f };
-    examples[1].real_encoder_sequence_length = 1;
-    examples[1].real_temporal_length = 2;
-    const std::vector<float> null_condition = { 0.9f, 0.8f, 0.7f, 0.6f };
-    const std::vector<float> silence_latents = { 0.01f, 0.02f, 0.03f, 0.04f };
+    examples[0].target_latents                            = { 0.1f, -0.2f };
+    examples[0].context_latents                           = { 0.5f, 0.6f };
+    examples[0].encoder_hidden                            = { 0.2f, -0.1f, 0.05f, 0.3f };
+    examples[0].real_encoder_sequence_length              = 1;
+    examples[0].real_temporal_length                      = 1;
+    examples[1].target_latents                            = { -0.4f, 0.3f, -0.2f, 0.1f };
+    examples[1].context_latents                           = { -0.8f, -0.7f, -0.6f, -0.5f };
+    examples[1].encoder_hidden                            = { -0.3f, 0.05f, -0.1f, 0.2f };
+    examples[1].real_encoder_sequence_length              = 1;
+    examples[1].real_temporal_length                      = 2;
+    const std::vector<float>              null_condition  = { 0.9f, 0.8f, 0.7f, 0.6f };
+    const std::vector<float>              silence_latents = { 0.01f, 0.02f, 0.03f, 0.04f };
     std::vector<ACETrainDiffusionExample> collated_examples;
-    int collated_temporal_length = 0;
-    int collated_encoder_sequence_length = 0;
-    if (!ace_collate_training_examples(tiny,
-                                       examples,
-                                       silence_latents,
-                                       null_condition,
-                                       collated_examples,
-                                       collated_temporal_length,
-                                       collated_encoder_sequence_length,
-                                       error) ||
+    int                                   collated_temporal_length         = 0;
+    int                                   collated_encoder_sequence_length = 0;
+    if (!ace_collate_training_examples(tiny, examples, silence_latents, null_condition, collated_examples,
+                                       collated_temporal_length, collated_encoder_sequence_length, error) ||
         collated_temporal_length != 2 || collated_encoder_sequence_length != 1 ||
         collated_examples[0].target_latents != std::vector<float>({ 0.1f, -0.2f, 0.0f, 0.0f }) ||
         collated_examples[0].context_latents != std::vector<float>({ 0.5f, 0.6f, 0.03f, 0.04f })) {
@@ -856,9 +812,9 @@ int main() {
     examples = std::move(collated_examples);
     ACETrainDiffusionConfig diffusion_config;
     diffusion_config.timestep_mean = 0.0f;
-    diffusion_config.timestep_std = 0.0f;
-    diffusion_config.cfg_dropout = 1.0f;
-    diffusion_config.min_snr = true;
+    diffusion_config.timestep_std  = 0.0f;
+    diffusion_config.cfg_dropout   = 1.0f;
+    diffusion_config.min_snr       = true;
     diffusion_config.min_snr_gamma = 5.0f;
     if (std::fabs(ace_train_timestep_from_logits(-2.0f, 1.0f) - ace_train_sigmoid(1.0f)) > 1e-7f) {
         ggml_backend_free(tiny.backend);
@@ -868,24 +824,15 @@ int main() {
     }
     const float expected_low_t_weight = 5.0f / 81.0f;
     if (std::fabs(ace_train_flow_min_snr_weight(0.1f, 5.0f) - expected_low_t_weight) > 1e-6f ||
-        ace_train_flow_min_snr_weight(0.5f, 5.0f) != 1.0f ||
-        ace_train_flow_min_snr_weight(0.9f, 5.0f) != 1.0f) {
+        ace_train_flow_min_snr_weight(0.5f, 5.0f) != 1.0f || ace_train_flow_min_snr_weight(0.9f, 5.0f) != 1.0f) {
         ggml_backend_free(tiny.backend);
         ggml_free(tiny_ctx);
         ggml_free(ctx);
         return fail("flow Min-SNR weights do not match Gary's timestep convention");
     }
     ACETrainDiffusionBatch batch;
-    if (!ace_prepare_train_diffusion_batch(
-            tiny,
-            examples,
-            collated_temporal_length,
-            collated_encoder_sequence_length,
-            null_condition,
-            1234,
-            diffusion_config,
-            batch,
-            error)) {
+    if (!ace_prepare_train_diffusion_batch(tiny, examples, collated_temporal_length, collated_encoder_sequence_length,
+                                           null_condition, 1234, diffusion_config, batch, error)) {
         std::fprintf(stderr, "FAIL: prepare diffusion batch: %s\n", error.c_str());
         ggml_backend_free(tiny.backend);
         ggml_free(tiny_ctx);
@@ -917,16 +864,16 @@ int main() {
         return fail("self attention must hide padded keys without creating an all-masked padded query");
     }
     const int saved_sliding_window = tiny.cfg.sliding_window;
-    tiny.cfg.sliding_window = 1;
+    tiny.cfg.sliding_window        = 1;
     ACETrainDiffusionExample window_example;
-    window_example.target_latents = { 0.1f, -0.2f, 0.2f, -0.1f, 0.3f, -0.3f };
-    window_example.context_latents = { 0.4f, 0.5f, 0.5f, 0.6f, 0.6f, 0.7f };
-    window_example.encoder_hidden = { 0.2f, -0.1f, 0.05f, 0.3f };
+    window_example.target_latents               = { 0.1f, -0.2f, 0.2f, -0.1f, 0.3f, -0.3f };
+    window_example.context_latents              = { 0.4f, 0.5f, 0.5f, 0.6f, 0.6f, 0.7f };
+    window_example.encoder_hidden               = { 0.2f, -0.1f, 0.05f, 0.3f };
     window_example.real_encoder_sequence_length = 1;
-    window_example.real_temporal_length = 3;
+    window_example.real_temporal_length         = 3;
     ACETrainDiffusionBatch window_batch;
-    if (!ace_prepare_train_diffusion_batch(
-            tiny, { window_example }, 3, 1, null_condition, 1234, diffusion_config, window_batch, error) ||
+    if (!ace_prepare_train_diffusion_batch(tiny, { window_example }, 3, 1, null_condition, 1234, diffusion_config,
+                                           window_batch, error) ||
         !std::isinf(ggml_fp16_to_fp32(window_batch.self_attention_mask[2])) ||
         ggml_fp16_to_fp32(window_batch.full_self_attention_mask[2]) != 0.0f) {
         std::fprintf(stderr, "FAIL: distinct self attention masks: %s\n", error.c_str());
@@ -936,7 +883,7 @@ int main() {
         return 1;
     }
     tiny.cfg.sliding_window = saved_sliding_window;
-    tiny_layer.layer_type = 1;
+    tiny_layer.layer_type   = 1;
     ACETrainDiTGraph full_attention_training;
     if (!ace_build_train_dit_graph(tiny, tiny_state, 2, 1, 1, full_attention_training, error) ||
         !full_attention_training.full_self_attention_mask || full_attention_training.self_attention_mask) {
@@ -951,7 +898,7 @@ int main() {
     tiny_layer.layer_type = 0;
     for (size_t sample = 0; sample < examples.size(); ++sample) {
         for (int time = 0; time < 2; ++time) {
-            const size_t input_offset = sample * 8 + (size_t) time * 4;
+            const size_t input_offset  = sample * 8 + (size_t) time * 4;
             const size_t latent_offset = sample * 4 + (size_t) time * 2;
             if (batch.input_latents[input_offset] != examples[sample].context_latents[(size_t) time * 2] ||
                 batch.input_latents[input_offset + 1] != examples[sample].context_latents[(size_t) time * 2 + 1]) {
@@ -962,17 +909,13 @@ int main() {
             }
             for (int channel = 0; channel < 2; ++channel) {
                 const size_t local_index = (size_t) time * 2 + channel;
-                const size_t index = latent_offset + (size_t) channel;
-                const float expected_xt =
+                const size_t index       = latent_offset + (size_t) channel;
+                const float  expected_xt =
                     examples[sample].target_latents[local_index] + 0.5f * batch.target_velocity[index];
                 if (std::fabs(batch.input_latents[input_offset + 2 + channel] - expected_xt) > 1e-6f) {
                     std::fprintf(stderr,
                                  "FAIL: interpolation sample=%zu time=%d channel=%d input=%f expected=%f velocity=%f\n",
-                                 sample,
-                                 time,
-                                 channel,
-                                 batch.input_latents[input_offset + 2 + channel],
-                                 expected_xt,
+                                 sample, time, channel, batch.input_latents[input_offset + 2 + channel], expected_xt,
                                  batch.target_velocity[index]);
                     ggml_backend_free(tiny.backend);
                     ggml_free(tiny_ctx);
@@ -991,8 +934,8 @@ int main() {
         }
     }
     ACETrainDiffusionBatch replay;
-    if (!ace_prepare_train_diffusion_batch(
-            tiny, examples, 2, 1, null_condition, 1234, diffusion_config, replay, error) ||
+    if (!ace_prepare_train_diffusion_batch(tiny, examples, 2, 1, null_condition, 1234, diffusion_config, replay,
+                                           error) ||
         replay.input_latents != batch.input_latents || replay.target_velocity != batch.target_velocity) {
         ggml_backend_free(tiny.backend);
         ggml_free(tiny_ctx);
@@ -1018,13 +961,8 @@ int main() {
         return 1;
     }
     ACETrainAdapterOptimizer batch_optimizer;
-    float batch_loss = 0.0f;
-    if (!ace_train_adapter_step(batch_training,
-                                tiny_state,
-                                batch_optimizer,
-                                optimizer_config,
-                                batch,
-                                batch_loss,
+    float                    batch_loss = 0.0f;
+    if (!ace_train_adapter_step(batch_training, tiny_state, batch_optimizer, optimizer_config, batch, batch_loss,
                                 error) ||
         batch_optimizer.step != 1 || !std::isfinite(batch_loss)) {
         std::fprintf(stderr, "FAIL: prepared native training step: %s loss=%f\n", error.c_str(), batch_loss);
@@ -1038,8 +976,8 @@ int main() {
     ggml_backend_free(tiny.backend);
     ggml_free(tiny_ctx);
 
-    DiTGGML fused = {};
-    fused.cfg.n_layers = 1;
+    DiTGGML fused          = {};
+    fused.cfg.n_layers     = 1;
     fused.layers[0].sa_qkv = make_weight(ctx, "", 128, 768);
     std::vector<ACETrainAdapterTarget> rejected;
     if (ace_train_adapter_targets(fused, "balanced", 64, 128, rejected, error) ||

@@ -59,10 +59,9 @@ static bool parse_weight_type(const char * name, ggml_type & type) {
 
 int main(int argc, char ** argv) {
     const char * backend_name = argc > 1 ? argv[1] : "CPU";
-    ggml_type weight_type = GGML_TYPE_F32;
+    ggml_type    weight_type  = GGML_TYPE_F32;
     if (argc > 2 && !parse_weight_type(argv[2], weight_type)) {
-        std::fprintf(stderr,
-                     "unsupported DoRA test weight type: %s (expected F32, Q8_0, Q4_K, Q5_K, or Q6_K)\n",
+        std::fprintf(stderr, "unsupported DoRA test weight type: %s (expected F32, Q8_0, Q4_K, Q5_K, or Q6_K)\n",
                      argv[2]);
         return 1;
     }
@@ -85,12 +84,12 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    const int64_t input_width = weight_type == GGML_TYPE_F32 ? 2 : ggml_blck_size(weight_type);
-    ggml_tensor * weight = ggml_new_tensor_2d(ctx, weight_type, input_width, 2);
-    ggml_tensor * input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, input_width, 1);
-    ggml_tensor * adapter_a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, input_width, 1);
-    ggml_tensor * adapter_b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 2);
-    ggml_tensor * magnitude = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2);
+    const int64_t input_width  = weight_type == GGML_TYPE_F32 ? 2 : ggml_blck_size(weight_type);
+    ggml_tensor * weight       = ggml_new_tensor_2d(ctx, weight_type, input_width, 2);
+    ggml_tensor * input        = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, input_width, 1);
+    ggml_tensor * adapter_a    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, input_width, 1);
+    ggml_tensor * adapter_b    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 2);
+    ggml_tensor * magnitude    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2);
     ggml_tensor * base_norm_sq = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2);
     ggml_set_input(weight);
     ggml_set_input(input);
@@ -103,16 +102,16 @@ int main(int argc, char ** argv) {
     ggml_set_input(magnitude);
 
     DiTAdapterTransform adapters;
-    adapters.params.emplace(weight, DiTAdapterParam {
-        /*.a =*/adapter_a,
-        /*.b =*/adapter_b,
-        /*.magnitude =*/magnitude,
-        /*.base_norm_sq =*/base_norm_sq,
-        /*.scale =*/0.5f,
-        /*.dora_rows =*/true,
-    });
+    adapters.params.emplace(weight, DiTAdapterParam{
+                                        /*.a =*/adapter_a,
+                                        /*.b =*/adapter_b,
+                                        /*.magnitude =*/magnitude,
+                                        /*.base_norm_sq =*/base_norm_sq,
+                                        /*.scale =*/0.5f,
+                                        /*.dora_rows =*/true,
+                                    });
     ggml_tensor * transformed = dit_adapter_linear_transform(ctx, &adapters, weight, input);
-    ggml_tensor * loss = ggml_sum(ctx, ggml_sqr(ctx, transformed));
+    ggml_tensor * loss        = ggml_sum(ctx, ggml_sqr(ctx, transformed));
     ggml_set_loss(loss);
     ggml_set_output(transformed);
     ggml_set_output(loss);
@@ -150,15 +149,15 @@ int main(int argc, char ** argv) {
     std::vector<float> adapter_b_data = { 2.0f, -0.5f };
     std::vector<float> magnitude_data = { 1.0f, 2.0f };
     if (weight_type == GGML_TYPE_F32) {
-        weight_data = { 1.0f, 2.0f, 3.0f, 4.0f };
-        input_data = { 2.0f, -1.0f };
+        weight_data    = { 1.0f, 2.0f, 3.0f, 4.0f };
+        input_data     = { 2.0f, -1.0f };
         adapter_a_data = { 0.5f, -1.0f };
     } else {
         for (int64_t i = 0; i < input_width; ++i) {
-            input_data[(size_t) i] = 0.125f * (float) ((i * 7) % 13 - 6);
+            input_data[(size_t) i]     = 0.125f * (float) ((i * 7) % 13 - 6);
             adapter_a_data[(size_t) i] = 0.0625f * (float) ((i * 5) % 17 - 8);
             for (int64_t row = 0; row < 2; ++row) {
-                const int64_t index = row * input_width + i;
+                const int64_t index         = row * input_width + i;
                 weight_data[(size_t) index] = 0.1f * (float) ((index * 11 + row * 3) % 23 - 11);
             }
         }
@@ -166,23 +165,16 @@ int main(int argc, char ** argv) {
         magnitude_data = { 1.25f, 0.9f };
     }
 
-    std::vector<float> stored_weight_data = weight_data;
+    std::vector<float>   stored_weight_data = weight_data;
     std::vector<uint8_t> quantized_weight_data;
     if (ggml_is_quantized(weight_type)) {
         const size_t row_size = ggml_row_size(weight_type, input_width);
         quantized_weight_data.resize(row_size * 2);
-        ggml_quantize_chunk(weight_type,
-                            weight_data.data(),
-                            quantized_weight_data.data(),
-                            0,
-                            2,
-                            input_width,
-                            nullptr);
+        ggml_quantize_chunk(weight_type, weight_data.data(), quantized_weight_data.data(), 0, 2, input_width, nullptr);
         const auto * traits = ggml_get_type_traits(weight_type);
         for (int64_t row = 0; row < 2; ++row) {
             traits->to_float(quantized_weight_data.data() + row * row_size,
-                             stored_weight_data.data() + row * input_width,
-                             input_width);
+                             stored_weight_data.data() + row * input_width, input_width);
         }
         ggml_backend_tensor_set(weight, quantized_weight_data.data(), 0, quantized_weight_data.size());
     } else {
@@ -214,7 +206,7 @@ int main(int argc, char ** argv) {
 
     float expected_loss = 0.0f;
     for (int64_t row = 0; row < 2; ++row) {
-        float effective_dot = 0.0f;
+        float effective_dot     = 0.0f;
         float effective_norm_sq = 0.0f;
         for (int64_t i = 0; i < input_width; ++i) {
             const float effective_weight = stored_weight_data[(size_t) (row * input_width + i)] +
@@ -228,10 +220,7 @@ int main(int argc, char ** argv) {
     float actual_loss = 0.0f;
     ggml_backend_tensor_get(loss, &actual_loss, 0, sizeof(actual_loss));
     if (!nearly_equal(actual_loss, expected_loss)) {
-        std::fprintf(stderr,
-                     "DoRA loss mismatch on %s: got %f, expected %f\n",
-                     backend_name,
-                     actual_loss,
+        std::fprintf(stderr, "DoRA loss mismatch on %s: got %f, expected %f\n", backend_name, actual_loss,
                      expected_loss);
         ggml_gallocr_free(allocator);
         ggml_free(ctx);
@@ -262,8 +251,7 @@ int main(int argc, char ** argv) {
         }
     }
 
-    std::printf("DoRA-row backend forward/backward: OK (%s, %s frozen weight)\n",
-                ggml_backend_name(backend),
+    std::printf("DoRA-row backend forward/backward: OK (%s, %s frozen weight)\n", ggml_backend_name(backend),
                 ggml_type_name(weight_type));
     ggml_gallocr_free(allocator);
     ggml_free(ctx);
