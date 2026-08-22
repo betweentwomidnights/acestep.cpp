@@ -289,7 +289,7 @@ int main() {
     tiny.cfg.rms_norm_eps = 1e-5f;
     tiny.backend = ggml_backend_cpu_init();
     tiny.cpu_backend = tiny.backend;
-    tiny.use_flash_attn = false;
+    tiny.use_flash_attn = true;
 
     auto set_timestep_weights = [&](DiTGGMLTembWeights & weights, const char * prefix) {
         const std::string p(prefix);
@@ -358,6 +358,13 @@ int main() {
         ggml_free(tiny_ctx);
         ggml_free(ctx);
         return 1;
+    }
+    if (!tiny.use_flash_attn) {
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("training graph must preserve the model flash-attention setting");
     }
 
     const float latent_data[] = { 0.1f, -0.2f, 0.3f, -0.4f, 0.2f, 0.1f, -0.1f, 0.4f };

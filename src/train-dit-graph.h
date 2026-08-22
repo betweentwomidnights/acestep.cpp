@@ -79,8 +79,10 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
 
     DiTGGMLLinearTransform saved_transform = model.linear_transform;
     void *                 saved_data      = model.linear_transform_data;
+    const bool             saved_flash_attention = model.use_flash_attn;
     model.linear_transform                 = dit_adapter_linear_transform;
     model.linear_transform_data            = &training.adapters.transform;
+    model.use_flash_attn                    = false;
     training.graph = dit_ggml_build_graph(&model,
                                           training.ctx,
                                           temporal_length,
@@ -91,6 +93,7 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
                                           true);
     model.linear_transform      = saved_transform;
     model.linear_transform_data = saved_data;
+    model.use_flash_attn        = saved_flash_attention;
     if (!training.graph || !training.velocity) {
         error = "failed to build DiT forward graph";
         ace_free_train_dit_graph(training);
