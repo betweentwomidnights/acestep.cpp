@@ -60,7 +60,7 @@ static void usage(const char * program) {
                  "Dataset check:\n"
                  "  --validate-dataset         Validate --dataset pairs without loading models\n\n"
                  "Adapter:\n"
-                 "  --adapter-type <name>      lora or dora-rows (default: dora-rows)\n"
+                 "  --adapter-type <name>      lora or dora-rows; must match --resume (default: dora-rows)\n"
                  "  --profile <name>           attention or balanced (default: balanced)\n"
                  "  --rank <N>                 Base rank (default: 64)\n"
                  "  --alpha <N>                Base alpha (default: 128)\n"
@@ -324,6 +324,10 @@ static bool train_adapter(const ACETrainCommand &                   command,
                           const std::vector<float> &                silence_latents,
                           const std::vector<float> &                null_condition,
                           std::string &                             error) {
+    std::string base_model_fingerprint;
+    if (!ace_file_fingerprint(dit_entry.path, base_model_fingerprint, error)) {
+        return false;
+    }
     DiTGGML model = {};
     if (!dit_ggml_load(&model, dit_entry.path.c_str(), nullptr, 1.0f, false)) {
         error = "could not load the unfused DiT training model";
@@ -351,8 +355,11 @@ static bool train_adapter(const ACETrainCommand &                   command,
                                                           state,
                                                           optimizer,
                                                           completed_epochs,
+                                                          base_model_fingerprint,
+                                                          command.adapter_type,
                                                           error) :
-                                ace_load_train_adapter_checkpoint(command.resume_dir, targets, state, error);
+                                ace_load_train_adapter_checkpoint(
+                                    command.resume_dir, targets, state, error, command.adapter_type);
         if (!loaded) {
             dit_ggml_free(&model);
             return false;
@@ -473,7 +480,8 @@ static bool train_adapter(const ACETrainCommand &                   command,
         }
         const std::string checkpoint =
             std::string(command.output_dir) + "/checkpoint-epoch-" + std::to_string(epoch + 1);
-        if (!ace_save_train_checkpoint(checkpoint, state, optimizer, epoch + 1, error)) {
+        if (!ace_save_train_checkpoint(
+                checkpoint, state, optimizer, epoch + 1, base_model_fingerprint, error)) {
             dit_ggml_free(&model);
             return false;
         }
@@ -484,7 +492,8 @@ static bool train_adapter(const ACETrainCommand &                   command,
                      checkpoint.c_str());
     }
 
-    const bool saved = ace_save_train_checkpoint(command.output_dir, state, optimizer, command.epochs, error);
+    const bool saved = ace_save_train_checkpoint(
+        command.output_dir, state, optimizer, command.epochs, base_model_fingerprint, error);
     dit_ggml_free(&model);
     return saved;
 }

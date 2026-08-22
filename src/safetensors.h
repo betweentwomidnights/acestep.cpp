@@ -1,3 +1,5 @@
+// ABOUTME: Parses memory-mapped safetensors files and exposes validated tensor entries.
+// ABOUTME: Rejects malformed shapes, dtypes, offsets, and byte spans before data access.
 #pragma once
 // safetensors.h: minimal read only safetensors parser
 //
@@ -184,12 +186,15 @@ static bool st_parse(STFile * st, const char * hdr, size_t len) {
                     if (hdr[p] == ']') {
                         break;
                     }
+                    if (e.n_dims >= 4) {
+                        return false;
+                    }
                     char * end;
                     e.shape[e.n_dims++] = strtoll(hdr + p, &end, 10);
-                    p                   = (size_t) (end - hdr);
-                    if (e.n_dims >= 4) {
-                        break;
+                    if (end == hdr + p) {
+                        return false;
                     }
+                    p                   = (size_t) (end - hdr);
                 }
                 if (p < len && hdr[p] == ']') {
                     p++;
@@ -223,6 +228,42 @@ static bool st_parse(STFile * st, const char * hdr, size_t len) {
 }
 
 static void st_close(STFile * st);
+
+static size_t st_dtype_size(const std::string & dtype) {
+    if (dtype == "F32") {
+        return 4;
+    }
+    if (dtype == "BF16" || dtype == "F16") {
+        return 2;
+    }
+    return 0;
+}
+
+static bool st_validate_entries(const STFile & st) {
+    const size_t data_size = st.file_size - st.data_offset;
+    for (const STEntry & entry : st.entries) {
+        const size_t element_size = st_dtype_size(entry.dtype);
+        if (entry.name.empty() || element_size == 0 || entry.n_dims < 0 || entry.n_dims > 4 ||
+            entry.data_start > entry.data_end || entry.data_end > data_size) {
+            return false;
+        }
+        size_t elements = 1;
+        for (int dimension = 0; dimension < entry.n_dims; ++dimension) {
+            if (entry.shape[dimension] < 0) {
+                return false;
+            }
+            const size_t extent = (size_t) entry.shape[dimension];
+            if (extent != 0 && elements > SIZE_MAX / extent) {
+                return false;
+            }
+            elements *= extent;
+        }
+        if (elements > SIZE_MAX / element_size || entry.data_end - entry.data_start != elements * element_size) {
+            return false;
+        }
+    }
+    return true;
+}
 
 static bool st_open(STFile * st, const char * path) {
     *st = {};
@@ -273,17 +314,21 @@ static bool st_open(STFile * st, const char * path) {
     }
     uint64_t hdr_len;
     memcpy(&hdr_len, st->mapping, 8);
-    st->data_offset = 8 + (size_t) hdr_len;
-
-    if (st->data_offset > st->file_size) {
+    if (hdr_len > (uint64_t) (st->file_size - 8)) {
         fprintf(stderr, "[Safetensors] Header overflows file %s\n", path);
         st_close(st);
         return false;
     }
+    st->data_offset = 8 + (size_t) hdr_len;
 
     // parse JSON header
     if (!st_parse(st, (const char *) st->mapping + 8, (size_t) hdr_len)) {
         fprintf(stderr, "[Safetensors] Failed to parse header %s\n", path);
+        st_close(st);
+        return false;
+    }
+    if (!st_validate_entries(*st)) {
+        fprintf(stderr, "[Safetensors] Invalid tensor entry %s\n", path);
         st_close(st);
         return false;
     }

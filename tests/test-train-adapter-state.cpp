@@ -269,7 +269,7 @@ int main() {
         return fail("adapter_config.json must preserve semantic DoRA rank and alpha metadata");
     }
     ACETrainAdapterState resumed;
-    if (!ace_load_train_adapter_checkpoint(checkpoint_dir.string(), balanced, resumed, error) ||
+    if (!ace_load_train_adapter_checkpoint(checkpoint_dir.string(), balanced, resumed, error, "dora-rows") ||
         resumed.adapter_type != "dora-rows" || resumed.params.size() != state.params.size() ||
         resumed.params[0].a != state.params[0].a || resumed.params[0].b != state.params[0].b ||
         resumed.params[0].magnitude != state.params[0].magnitude ||
@@ -278,6 +278,12 @@ int main() {
         std::filesystem::remove_all(checkpoint_dir);
         ggml_free(ctx);
         return 1;
+    }
+    ACETrainAdapterState rejected_type;
+    if (ace_load_train_adapter_checkpoint(checkpoint_dir.string(), balanced, rejected_type, error, "lora")) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("checkpoint resume must reject a different adapter type");
     }
 
     ACETrainAdapterState rejected_profile;
@@ -294,6 +300,16 @@ int main() {
         return fail("PEFT-only checkpoint must remain eligible for weight-only resume");
     }
     {
+        std::ofstream pending(checkpoint_dir / "checkpoint.pending");
+        pending << "1\n";
+    }
+    if (ace_train_checkpoint_kind(checkpoint_dir.string(), checkpoint_kind, error)) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("checkpoint resume must reject interrupted full checkpoint publication");
+    }
+    std::filesystem::remove(checkpoint_dir / "checkpoint.pending");
+    {
         std::ofstream progress(checkpoint_dir / "trainer_state.json");
         progress << "{}\n";
     }
@@ -303,6 +319,51 @@ int main() {
         return fail("checkpoint resume must reject a single native companion file");
     }
     std::filesystem::remove(checkpoint_dir / "trainer_state.json");
+
+    const std::filesystem::path extra_checkpoint_dir = checkpoint_dir.string() + "-extra";
+    ACETrainAdapterState extra_state = state;
+    ACETrainAdapterParam extra_parameter = state.params.front();
+    extra_parameter.target.weight_name = "decoder.layers.1.self_attn.q_proj.weight";
+    extra_state.params.push_back(std::move(extra_parameter));
+    ACETrainAdapterState rejected_inventory;
+    if (!ace_save_train_adapter_checkpoint(extra_checkpoint_dir.string(), extra_state, error) ||
+        ace_load_train_adapter_checkpoint(extra_checkpoint_dir.string(), balanced, rejected_inventory, error)) {
+        std::filesystem::remove_all(extra_checkpoint_dir);
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("checkpoint resume must reject extra recognized adapter tensors");
+    }
+    std::filesystem::remove_all(extra_checkpoint_dir);
+
+    auto write_safetensors_fixture = [&](const std::filesystem::path & file_path,
+                                         std::string                   header,
+                                         size_t                        data_bytes) {
+        while (header.size() % 8 != 0) {
+            header.push_back(' ');
+        }
+        std::ofstream output(file_path, std::ios::binary | std::ios::trunc);
+        const uint64_t header_size = (uint64_t) header.size();
+        const float data = 1.0f;
+        output.write(reinterpret_cast<const char *>(&header_size), sizeof(header_size));
+        output.write(header.data(), (std::streamsize) header.size());
+        output.write(reinterpret_cast<const char *>(&data), (std::streamsize) data_bytes);
+        return output.good();
+    };
+    const std::filesystem::path truncated_tensor = checkpoint_dir / "truncated.safetensors";
+    const std::filesystem::path mismatched_tensor = checkpoint_dir / "mismatched.safetensors";
+    STFile malformed_file;
+    if (!write_safetensors_fixture(
+            truncated_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}", 4) ||
+        st_open(&malformed_file, truncated_tensor.string().c_str()) ||
+        !write_safetensors_fixture(
+            mismatched_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4) ||
+        st_open(&malformed_file, mismatched_tensor.string().c_str())) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("safetensors parser must reject invalid tensor byte spans");
+    }
+    std::filesystem::remove(truncated_tensor);
+    std::filesystem::remove(mismatched_tensor);
 
     ACETrainAdapterState incompatible_config = state;
     incompatible_config.base_alpha            = 64;
@@ -566,13 +627,16 @@ int main() {
     ACETrainAdapterState resumed_training_state;
     ACETrainAdapterOptimizer resumed_optimizer;
     int resumed_epochs = 0;
+    const std::string base_model_fingerprint = "fnv1a64:0123456789abcdef:4096";
     if (!ace_save_train_checkpoint(
-            training_checkpoint_dir.string(), tiny_state, optimizer, 3, error) ||
+            training_checkpoint_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint, error) ||
         !ace_load_train_checkpoint(training_checkpoint_dir.string(),
                                    tiny_targets,
                                    resumed_training_state,
                                    resumed_optimizer,
                                    resumed_epochs,
+                                   base_model_fingerprint,
+                                   "dora-rows",
                                    error) ||
         resumed_epochs != 3 || resumed_optimizer.step != optimizer.step ||
         resumed_training_state.params[0].magnitude != tiny_state.params[0].magnitude ||
@@ -585,6 +649,49 @@ int main() {
         ggml_free(tiny_ctx);
         ggml_free(ctx);
         return 1;
+    }
+    ACETrainCheckpointKind full_checkpoint_kind;
+    ACETrainAdapterState rejected_base_state;
+    ACETrainAdapterOptimizer rejected_base_optimizer;
+    int rejected_base_epochs = 0;
+    if (!ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
+        full_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL ||
+        ace_load_train_checkpoint(training_checkpoint_dir.string(),
+                                  tiny_targets,
+                                  rejected_base_state,
+                                  rejected_base_optimizer,
+                                  rejected_base_epochs,
+                                  "fnv1a64:fedcba9876543210:4096",
+                                  "dora-rows",
+                                  error)) {
+        std::filesystem::remove_all(training_checkpoint_dir);
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("full checkpoint must validate its generation and frozen base model");
+    }
+    {
+        std::fstream optimizer_file(training_checkpoint_dir / "optimizer_state.safetensors",
+                                    std::ios::binary | std::ios::in | std::ios::out);
+        optimizer_file.seekg(-1, std::ios::end);
+        char value = 0;
+        optimizer_file.read(&value, 1);
+        value ^= 1;
+        optimizer_file.seekp(-1, std::ios::end);
+        optimizer_file.write(&value, 1);
+    }
+    if (ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
+        !ace_save_train_checkpoint(
+            training_checkpoint_dir.string(), tiny_state, optimizer, 3, base_model_fingerprint, error) ||
+        !ace_train_checkpoint_kind(training_checkpoint_dir.string(), full_checkpoint_kind, error) ||
+        full_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL) {
+        std::filesystem::remove_all(training_checkpoint_dir);
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("full checkpoint manifest must reject mixed or corrupt generations");
     }
     std::filesystem::remove_all(training_checkpoint_dir);
     ace_free_train_dit_graph(tiny_training);

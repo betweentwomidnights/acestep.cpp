@@ -8,6 +8,7 @@
 #include "train-adapter-state.h"
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -30,6 +31,34 @@ static std::string ace_checkpoint_module_path(const std::string & weight_name) {
         path.resize(path.size() - 7);
     }
     return "base_model.model." + path;
+}
+
+static bool ace_checkpoint_key_ends_with(const std::string & key, const char * suffix) {
+    const size_t length = std::strlen(suffix);
+    return key.size() >= length && key.compare(key.size() - length, length, suffix) == 0;
+}
+
+static std::string ace_checkpoint_adapter_key(const std::string & key) {
+    struct KeySuffix {
+        const char * serialized;
+        const char * canonical;
+    };
+    static const KeySuffix suffixes[] = {
+        { ".lora_A.default.weight", ".lora_A.weight" },
+        { ".lora_A.weight", ".lora_A.weight" },
+        { ".lora_B.default.weight", ".lora_B.weight" },
+        { ".lora_B.weight", ".lora_B.weight" },
+        { ".lora_magnitude_vector.default.weight", ".lora_magnitude_vector" },
+        { ".lora_magnitude_vector.default", ".lora_magnitude_vector" },
+        { ".lora_magnitude_vector.weight", ".lora_magnitude_vector" },
+        { ".lora_magnitude_vector", ".lora_magnitude_vector" },
+    };
+    for (const KeySuffix & suffix : suffixes) {
+        if (ace_checkpoint_key_ends_with(key, suffix.serialized)) {
+            return key.substr(0, key.size() - std::strlen(suffix.serialized)) + suffix.canonical;
+        }
+    }
+    return "";
 }
 
 static bool ace_write_safetensors(const std::filesystem::path &              path,
@@ -184,7 +213,8 @@ static bool ace_save_train_adapter_checkpoint(const std::string &          direc
 static bool ace_load_train_adapter_checkpoint(const std::string &                    directory,
                                               const std::vector<ACETrainAdapterTarget> & targets,
                                               ACETrainAdapterState &                   state,
-                                              std::string &                            error) {
+                                              std::string &                            error,
+                                              const std::string & expected_adapter_type = "") {
     state = {};
     error.clear();
     if (targets.empty()) {
@@ -199,6 +229,12 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
     }
     if (config.rank != targets.front().base_rank || config.lora_alpha != targets.front().base_alpha) {
         error = "checkpoint base rank or alpha does not match the requested training configuration";
+        return false;
+    }
+    if (!expected_adapter_type.empty() &&
+        ((expected_adapter_type == "dora-rows") != config.use_dora ||
+         (expected_adapter_type != "lora" && expected_adapter_type != "dora-rows"))) {
+        error = "checkpoint adapter type does not match the requested adapter type";
         return false;
     }
     const std::set<std::string> saved_modules(config.target_modules.begin(), config.target_modules.end());
@@ -224,6 +260,29 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
     STFile file;
     if (!st_open(&file, (path / "adapter_model.safetensors").string().c_str())) {
         error = "cannot open adapter_model.safetensors";
+        return false;
+    }
+    std::set<std::string> expected_keys;
+    for (const ACETrainAdapterTarget & target : targets) {
+        const std::string module = ace_checkpoint_module_path(target.weight_name);
+        expected_keys.insert(module + ".lora_A.weight");
+        expected_keys.insert(module + ".lora_B.weight");
+        if (config.use_dora) {
+            expected_keys.insert(module + ".lora_magnitude_vector");
+        }
+    }
+    std::set<std::string> serialized_keys;
+    for (const STEntry & entry : file.entries) {
+        const std::string key = ace_checkpoint_adapter_key(entry.name);
+        if (!key.empty() && !serialized_keys.insert(key).second) {
+            error = "checkpoint contains duplicate adapter tensor aliases";
+            st_close(&file);
+            return false;
+        }
+    }
+    if (serialized_keys != expected_keys) {
+        error = "checkpoint adapter tensor inventory does not match the requested model";
+        st_close(&file);
         return false;
     }
     auto find_entry = [&](const std::string & name) -> const STEntry * {

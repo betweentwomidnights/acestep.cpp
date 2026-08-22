@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -18,17 +19,140 @@ enum ACETrainCheckpointKind {
     ACE_TRAIN_CHECKPOINT_FULL,
 };
 
+static bool ace_file_fingerprint(const std::filesystem::path & path,
+                                 std::string &                 fingerprint,
+                                 std::string &                 error) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        error = "cannot open file for fingerprinting: " + path.string();
+        return false;
+    }
+    uint64_t          hash = 14695981039346656037ULL;
+    uint64_t          size = 0;
+    std::vector<char> buffer(1024 * 1024);
+    while (input) {
+        input.read(buffer.data(), (std::streamsize) buffer.size());
+        const std::streamsize count = input.gcount();
+        for (std::streamsize i = 0; i < count; ++i) {
+            hash ^= (uint8_t) buffer[(size_t) i];
+            hash *= 1099511628211ULL;
+        }
+        size += (uint64_t) count;
+    }
+    if (!input.eof()) {
+        error = "cannot read file for fingerprinting: " + path.string();
+        return false;
+    }
+    char value[64];
+    std::snprintf(value,
+                  sizeof(value),
+                  "fnv1a64:%016llx:%llu",
+                  (unsigned long long) hash,
+                  (unsigned long long) size);
+    fingerprint = value;
+    error.clear();
+    return true;
+}
+
+static const char * const ace_train_checkpoint_files[] = {
+    "adapter_model.safetensors",
+    "adapter_config.json",
+    "optimizer_state.safetensors",
+    "trainer_state.json",
+};
+
+static bool ace_write_train_checkpoint_manifest(const std::filesystem::path & directory,
+                                                const std::string &           base_model_fingerprint,
+                                                std::string &                 error) {
+    error.clear();
+    std::vector<std::string> fingerprints;
+    for (const char * name : ace_train_checkpoint_files) {
+        std::string fingerprint;
+        if (!ace_file_fingerprint(directory / name, fingerprint, error)) {
+            return false;
+        }
+        fingerprints.push_back(std::move(fingerprint));
+    }
+    std::ofstream output(directory / "checkpoint_manifest.json", std::ios::trunc);
+    if (!output) {
+        error = "cannot create checkpoint_manifest.json";
+        return false;
+    }
+    output << "{\"format_version\":1,\"base_model_fingerprint\":\"" << base_model_fingerprint
+           << "\",\"files\":{";
+    for (size_t i = 0; i < fingerprints.size(); ++i) {
+        output << (i == 0 ? "" : ",") << "\"" << ace_train_checkpoint_files[i] << "\":\""
+               << fingerprints[i] << "\"";
+    }
+    output << "}}\n";
+    if (!output.good()) {
+        error = "cannot write checkpoint_manifest.json";
+        return false;
+    }
+    return true;
+}
+
+static bool ace_validate_train_checkpoint_manifest(const std::filesystem::path & directory,
+                                                   const std::string &           expected_base_fingerprint,
+                                                   std::string &                 error) {
+    error.clear();
+    std::ifstream input(directory / "checkpoint_manifest.json");
+    if (!input) {
+        error = "checkpoint_manifest.json is missing";
+        return false;
+    }
+    const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    yyjson_doc * document = yyjson_read(contents.data(), contents.size(), 0);
+    yyjson_val * root = document ? yyjson_doc_get_root(document) : nullptr;
+    yyjson_val * version = root ? yyjson_obj_get(root, "format_version") : nullptr;
+    yyjson_val * base = root ? yyjson_obj_get(root, "base_model_fingerprint") : nullptr;
+    yyjson_val * files = root ? yyjson_obj_get(root, "files") : nullptr;
+    if (!yyjson_is_obj(root) || !yyjson_is_int(version) || yyjson_get_int(version) != 1 || !yyjson_is_str(base) ||
+        !*yyjson_get_str(base) ||
+        !yyjson_is_obj(files) || (!expected_base_fingerprint.empty() && expected_base_fingerprint != yyjson_get_str(base))) {
+        if (document) {
+            yyjson_doc_free(document);
+        }
+        error = "checkpoint manifest is invalid or belongs to a different base model";
+        return false;
+    }
+    for (const char * name : ace_train_checkpoint_files) {
+        yyjson_val * saved = yyjson_obj_get(files, name);
+        std::string current;
+        if (!yyjson_is_str(saved) || !ace_file_fingerprint(directory / name, current, error) ||
+            current != yyjson_get_str(saved)) {
+            yyjson_doc_free(document);
+            if (error.empty()) {
+                error = "checkpoint generation is incomplete or corrupt";
+            }
+            return false;
+        }
+    }
+    yyjson_doc_free(document);
+    error.clear();
+    return true;
+}
+
 static bool ace_train_checkpoint_kind(const std::string &      directory,
                                       ACETrainCheckpointKind & kind,
                                       std::string &            error) {
     const std::filesystem::path path(directory);
+    const bool has_manifest = std::filesystem::is_regular_file(path / "checkpoint_manifest.json");
+    const bool has_pending = std::filesystem::is_regular_file(path / "checkpoint.pending");
     const bool has_progress = std::filesystem::is_regular_file(path / "trainer_state.json");
     const bool has_optimizer = std::filesystem::is_regular_file(path / "optimizer_state.safetensors");
-    if (has_progress != has_optimizer) {
+    if (has_manifest) {
+        if (!ace_validate_train_checkpoint_manifest(path, "", error)) {
+            return false;
+        }
+        kind = ACE_TRAIN_CHECKPOINT_FULL;
+        return true;
+    }
+    if (has_pending || has_progress || has_optimizer) {
         error = "training checkpoint is incomplete";
         return false;
     }
-    kind = has_progress ? ACE_TRAIN_CHECKPOINT_FULL : ACE_TRAIN_CHECKPOINT_ADAPTER;
+    kind = ACE_TRAIN_CHECKPOINT_ADAPTER;
     error.clear();
     return true;
 }
@@ -43,14 +167,12 @@ static bool ace_save_train_checkpoint(const std::string &               director
                                       const ACETrainAdapterState &      state,
                                       const ACETrainAdapterOptimizer &  optimizer,
                                       int                               completed_epochs,
+                                      const std::string &               base_model_fingerprint,
                                       std::string &                     error) {
     error.clear();
     if (completed_epochs < 0 || optimizer.step < 0 || optimizer.params.size() != state.params.size() ||
-        state.params.empty()) {
+        state.params.empty() || base_model_fingerprint.empty()) {
         error = "adapter and optimizer state cannot form a complete training checkpoint";
-        return false;
-    }
-    if (!ace_save_train_adapter_checkpoint(directory, state, error)) {
         return false;
     }
 
@@ -85,19 +207,86 @@ static bool ace_save_train_checkpoint(const std::string &               director
     }
 
     const std::filesystem::path path(directory);
-    if (!ace_write_safetensors(path / "optimizer_state.safetensors", tensors, error)) {
+    const std::filesystem::path parent = path.parent_path().empty() ? std::filesystem::path(".") : path.parent_path();
+    const std::filesystem::path staging =
+        parent / (path.filename().string() + ".checkpoint-stage-" + std::to_string(std::random_device {}()));
+    std::error_code filesystem_error;
+    std::filesystem::create_directories(staging, filesystem_error);
+    if (filesystem_error) {
+        error = "cannot create checkpoint staging directory: " + filesystem_error.message();
         return false;
     }
-    std::ofstream progress(path / "trainer_state.json", std::ios::trunc);
+    auto discard_staging = [&]() {
+        std::error_code ignored;
+        std::filesystem::remove_all(staging, ignored);
+    };
+    if (!ace_save_train_adapter_checkpoint(staging.string(), state, error) ||
+        !ace_write_safetensors(staging / "optimizer_state.safetensors", tensors, error)) {
+        discard_staging();
+        return false;
+    }
+    std::ofstream progress(staging / "trainer_state.json", std::ios::trunc);
     if (!progress) {
         error = "cannot create trainer_state.json";
+        discard_staging();
         return false;
     }
-    progress << "{\"completed_epochs\":" << completed_epochs << ",\"optimizer_step\":" << optimizer.step << "}\n";
+    progress << "{\"completed_epochs\":" << completed_epochs << ",\"optimizer_step\":" << optimizer.step
+             << ",\"base_model_fingerprint\":\"" << base_model_fingerprint << "\"}\n";
+    progress.close();
     if (!progress.good()) {
         error = "cannot write trainer_state.json";
+        discard_staging();
         return false;
     }
+    if (!ace_write_train_checkpoint_manifest(staging, base_model_fingerprint, error)) {
+        discard_staging();
+        return false;
+    }
+
+    std::filesystem::create_directories(path, filesystem_error);
+    if (filesystem_error) {
+        error = "cannot create checkpoint directory: " + filesystem_error.message();
+        discard_staging();
+        return false;
+    }
+    {
+        std::ofstream pending(path / "checkpoint.pending", std::ios::trunc);
+        pending << "1\n";
+        if (!pending.good()) {
+            error = "cannot create checkpoint publication marker";
+            discard_staging();
+            return false;
+        }
+    }
+    auto publish = [&](const char * name) {
+        std::error_code publish_error;
+        std::filesystem::remove(path / name, publish_error);
+        publish_error.clear();
+        std::filesystem::rename(staging / name, path / name, publish_error);
+        if (publish_error) {
+            error = "cannot publish checkpoint file " + std::string(name) + ": " + publish_error.message();
+            return false;
+        }
+        return true;
+    };
+    for (const char * name : ace_train_checkpoint_files) {
+        if (!publish(name)) {
+            discard_staging();
+            return false;
+        }
+    }
+    if (!publish("checkpoint_manifest.json")) {
+        discard_staging();
+        return false;
+    }
+    std::filesystem::remove(path / "checkpoint.pending", filesystem_error);
+    if (filesystem_error) {
+        error = "cannot finalize checkpoint publication: " + filesystem_error.message();
+        discard_staging();
+        return false;
+    }
+    discard_staging();
     return true;
 }
 
@@ -106,16 +295,23 @@ static bool ace_load_train_checkpoint(const std::string &                    dir
                                       ACETrainAdapterState &                   state,
                                       ACETrainAdapterOptimizer &               optimizer,
                                       int &                                    completed_epochs,
+                                      const std::string &                      expected_base_fingerprint,
+                                      const std::string &                      expected_adapter_type,
                                       std::string &                            error) {
     state = {};
     optimizer = {};
     completed_epochs = 0;
     error.clear();
-    if (!ace_load_train_adapter_checkpoint(directory, targets, state, error)) {
+    const std::filesystem::path path(directory);
+    if (expected_base_fingerprint.empty()) {
+        error = "expected base model fingerprint is missing";
+        return false;
+    }
+    if (!ace_validate_train_checkpoint_manifest(path, expected_base_fingerprint, error) ||
+        !ace_load_train_adapter_checkpoint(directory, targets, state, error, expected_adapter_type)) {
         return false;
     }
 
-    const std::filesystem::path path(directory);
     std::ifstream progress(path / "trainer_state.json");
     if (!progress) {
         state = {};
@@ -123,15 +319,25 @@ static bool ace_load_train_checkpoint(const std::string &                    dir
         return false;
     }
     const std::string contents((std::istreambuf_iterator<char>(progress)), std::istreambuf_iterator<char>());
-    int optimizer_step = 0;
-    if (std::sscanf(contents.c_str(), "{\"completed_epochs\":%d,\"optimizer_step\":%d}",
-                    &completed_epochs, &optimizer_step) != 2 ||
-        completed_epochs < 0 || optimizer_step < 0) {
+    yyjson_doc * document = yyjson_read(contents.data(), contents.size(), 0);
+    yyjson_val * root = document ? yyjson_doc_get_root(document) : nullptr;
+    yyjson_val * epochs = root ? yyjson_obj_get(root, "completed_epochs") : nullptr;
+    yyjson_val * step = root ? yyjson_obj_get(root, "optimizer_step") : nullptr;
+    yyjson_val * fingerprint = root ? yyjson_obj_get(root, "base_model_fingerprint") : nullptr;
+    if (!yyjson_is_obj(root) || !yyjson_is_int(epochs) || !yyjson_is_int(step) || !yyjson_is_str(fingerprint) ||
+        yyjson_get_int(epochs) < 0 || yyjson_get_int(step) < 0 ||
+        expected_base_fingerprint != yyjson_get_str(fingerprint)) {
+        if (document) {
+            yyjson_doc_free(document);
+        }
         state = {};
         completed_epochs = 0;
         error = "trainer_state.json is missing or invalid";
         return false;
     }
+    completed_epochs = (int) yyjson_get_int(epochs);
+    const int optimizer_step = (int) yyjson_get_int(step);
+    yyjson_doc_free(document);
 
     STFile file;
     if (!st_open(&file, (path / "optimizer_state.safetensors").string().c_str())) {
