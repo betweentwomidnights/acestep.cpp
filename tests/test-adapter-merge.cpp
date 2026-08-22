@@ -143,6 +143,25 @@ static bool reload_adapter(const std::filesystem::path & directory,
     return true;
 }
 
+static bool rejects_partial_merge(const std::filesystem::path & directory) {
+    GGUFModel model = {};
+    if (!gf_load(&model, (directory / "base.gguf").string().c_str())) {
+        return false;
+    }
+
+    WeightCtx weights = {};
+    wctx_init(&weights, 1);
+    gf_load_tensor(&weights, model, "decoder.layers.0.self_attn.q_proj.weight");
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    const bool rejected = backend && !adapter_merge(&weights, model, directory.string().c_str(), 1.0f, backend);
+    wctx_free(&weights);
+    if (backend) {
+        ggml_backend_free(backend);
+    }
+    gf_close(&model);
+    return rejected;
+}
+
 int main() {
     temporary_directory directory {
         std::filesystem::temp_directory_path() /
@@ -171,16 +190,16 @@ int main() {
                                       "self_attn.q_proj",
                                       1,
                                       2,
-                                      { 0.5f, -1.0f },
-                                      { 2.0f, -0.5f },
-                                      { 1.0f, 2.0f }));
+                                      { 0.123456f, -0.654321f },
+                                      { 0.333333f, -0.222222f },
+                                      { 1.234567f, 2.345678f }));
     state.params.push_back(make_param("decoder.layers.0.self_attn.v_proj.weight",
                                       "self_attn.v_proj",
                                       2,
                                       6,
-                                      { 1.0f, 0.0f, 0.0f, 1.0f },
-                                      { 1.0f, 1.0f, 0.5f, -1.0f },
-                                      { 1.0f, 2.0f }));
+                                      { 0.712345f, -0.134567f, 0.245678f, 0.856789f },
+                                      { 0.934567f, 0.312345f, -0.456789f, 0.623456f },
+                                      { 1.456789f, 2.567891f }));
 
     std::string error;
     if (!ace_save_train_adapter_checkpoint(directory.path.string(), state, error)) {
@@ -223,6 +242,10 @@ int main() {
                 return 1;
             }
         }
+    }
+    if (!rejects_partial_merge(directory.path)) {
+        std::fputs("native adapter reload accepted a partial merge\n", stderr);
+        return 1;
     }
 
     std::puts("PEFT DoRA native save/reload parity: OK");

@@ -224,19 +224,25 @@ int main() {
         return fail("saved DoRA checkpoint must contain A, B, and magnitude for every target");
     }
     const std::string expected_a_key =
-        "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight";
+        "base_model.model.layers.0.self_attn.q_proj.lora_A.weight";
+    const std::string expected_b_key =
+        "base_model.model.layers.0.self_attn.q_proj.lora_B.weight";
     const std::string expected_magnitude_key =
-        "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector.default";
+        "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector.weight";
     const STEntry * saved_a = nullptr;
+    const STEntry * saved_b = nullptr;
     const STEntry * saved_magnitude = nullptr;
     for (const STEntry & entry : saved_adapter.entries) {
         if (entry.name == expected_a_key) {
             saved_a = &entry;
+        } else if (entry.name == expected_b_key) {
+            saved_b = &entry;
         } else if (entry.name == expected_magnitude_key) {
             saved_magnitude = &entry;
         }
     }
     if (!saved_a || saved_a->n_dims != 2 || saved_a->shape[0] != 16 || saved_a->shape[1] != 128 ||
+        !saved_b || saved_b->n_dims != 2 || saved_b->shape[0] != 256 || saved_b->shape[1] != 16 ||
         !saved_magnitude || saved_magnitude->n_dims != 1 || saved_magnitude->shape[0] != 256 ||
         static_cast<const float *>(st_data(saved_adapter, *saved_a))[0] != first.a[0]) {
         st_close(&saved_adapter);
@@ -246,7 +252,7 @@ int main() {
     }
     st_close(&saved_adapter);
     adapter_config config;
-    if (!adapter_read_config(checkpoint_dir.string().c_str(), config) || !config.use_dora ||
+    if (!adapter_read_config(checkpoint_dir.string().c_str(), config) || config.rank != 64 || !config.use_dora ||
         config.rank_pattern["self_attn.q_proj"] != 16 || config.rank_pattern["self_attn.v_proj"] != 80 ||
         config.alpha_pattern["self_attn.q_proj"] != 32 || config.alpha_pattern["self_attn.v_proj"] != 160 ||
         adapter_config_value_for_weight(config.alpha_pattern,
@@ -269,6 +275,19 @@ int main() {
         std::filesystem::remove_all(checkpoint_dir);
         ggml_free(ctx);
         return 1;
+    }
+
+    ACETrainAdapterState incompatible_config = state;
+    incompatible_config.base_alpha            = 64;
+    for (ACETrainAdapterParam & param : incompatible_config.params) {
+        param.target.alpha = std::max(1, param.target.alpha / 2);
+    }
+    ACETrainAdapterState rejected_resume;
+    if (!ace_write_adapter_config(checkpoint_dir / "adapter_config.json", incompatible_config, error) ||
+        ace_load_train_adapter_checkpoint(checkpoint_dir.string(), balanced, rejected_resume, error)) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("checkpoint resume must reject rank or alpha configuration drift");
     }
     std::filesystem::remove_all(checkpoint_dir);
 
