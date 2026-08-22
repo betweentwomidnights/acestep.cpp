@@ -6,6 +6,7 @@
 #include "train-adapter-checkpoint.h"
 #include "train-adapter-optimizer.h"
 #include "train-adapter-state.h"
+#include "train-checkpoint.h"
 #include "train-diffusion.h"
 #include "train-dit-graph.h"
 
@@ -463,6 +464,33 @@ int main() {
         ggml_free(ctx);
         return fail("AdamW must update host parameters and upload them for the next graph replay");
     }
+    const std::filesystem::path training_checkpoint_dir =
+        std::filesystem::temp_directory_path() /
+        ("ace-training-checkpoint-" + std::to_string(std::random_device {}()));
+    ACETrainAdapterState resumed_training_state;
+    ACETrainAdapterOptimizer resumed_optimizer;
+    int resumed_epochs = 0;
+    if (!ace_save_train_checkpoint(
+            training_checkpoint_dir.string(), tiny_state, optimizer, 3, error) ||
+        !ace_load_train_checkpoint(training_checkpoint_dir.string(),
+                                   tiny_targets,
+                                   resumed_training_state,
+                                   resumed_optimizer,
+                                   resumed_epochs,
+                                   error) ||
+        resumed_epochs != 3 || resumed_optimizer.step != optimizer.step ||
+        resumed_training_state.params[0].magnitude != tiny_state.params[0].magnitude ||
+        resumed_optimizer.params[0].b.first_moment != optimizer.params[0].b.first_moment ||
+        resumed_optimizer.params[0].magnitude.second_moment != optimizer.params[0].magnitude.second_moment) {
+        std::fprintf(stderr, "FAIL: full native training checkpoint: %s\n", error.c_str());
+        std::filesystem::remove_all(training_checkpoint_dir);
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    std::filesystem::remove_all(training_checkpoint_dir);
     ace_free_train_dit_graph(tiny_training);
 
     std::vector<ACETrainDiffusionExample> examples(2);

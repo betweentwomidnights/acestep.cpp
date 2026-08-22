@@ -6,7 +6,7 @@
 #include "model-store.h"
 #include "pipeline-synth.h"
 #include "pipeline-train.h"
-#include "train-adapter-checkpoint.h"
+#include "train-checkpoint.h"
 #include "train-diffusion.h"
 #include "version.h"
 
@@ -64,7 +64,7 @@ static void usage(const char * program) {
                  "  --profile <name>           attention or balanced (default: balanced)\n"
                  "  --rank <N>                 Base rank (default: 64)\n"
                  "  --alpha <N>                Base alpha (default: 128)\n"
-                 "  --resume <dir>             Resume adapter weights from a PEFT directory\n\n"
+                 "  --resume <dir>             Resume full native state or PEFT weights\n\n"
                  "Training:\n"
                  "  --epochs <N>               Epoch count (default: 10)\n"
                  "  --batch-size <N>            Microbatch size (default: 1)\n"
@@ -337,8 +337,22 @@ static bool train_adapter(const ACETrainCommand &                   command,
         return false;
     }
     ACETrainAdapterState state;
+    ACETrainAdapterOptimizer optimizer;
+    int completed_epochs = 0;
     if (command.resume_dir) {
-        if (!ace_load_train_adapter_checkpoint(command.resume_dir, targets, state, error)) {
+        const std::filesystem::path resume_path(command.resume_dir);
+        const bool complete_checkpoint =
+            std::filesystem::is_regular_file(resume_path / "trainer_state.json") &&
+            std::filesystem::is_regular_file(resume_path / "optimizer_state.safetensors");
+        const bool loaded = complete_checkpoint ?
+                                ace_load_train_checkpoint(command.resume_dir,
+                                                          targets,
+                                                          state,
+                                                          optimizer,
+                                                          completed_epochs,
+                                                          error) :
+                                ace_load_train_adapter_checkpoint(command.resume_dir, targets, state, error);
+        if (!loaded) {
             dit_ggml_free(&model);
             return false;
         }
@@ -350,7 +364,11 @@ static bool train_adapter(const ACETrainCommand &                   command,
     const int batches_per_epoch = ((int) prepared.size() + command.batch_size - 1) / command.batch_size;
     const int updates_per_epoch = (batches_per_epoch + command.accumulation - 1) / command.accumulation;
     const int total_steps = updates_per_epoch * command.epochs;
-    ACETrainAdapterOptimizer optimizer;
+    if (completed_epochs > command.epochs) {
+        error = "resume checkpoint has completed more epochs than requested";
+        dit_ggml_free(&model);
+        return false;
+    }
     ACETrainAdapterGradientAccumulator accumulator;
     ACETrainAdamWConfig optimizer_config;
     optimizer_config.weight_decay = command.weight_decay;
@@ -362,7 +380,7 @@ static bool train_adapter(const ACETrainCommand &                   command,
 
     std::vector<size_t> order(prepared.size());
     std::iota(order.begin(), order.end(), 0);
-    for (int epoch = 0; epoch < command.epochs; ++epoch) {
+    for (int epoch = completed_epochs; epoch < command.epochs; ++epoch) {
         std::mt19937_64 shuffle(command.seed + (uint64_t) epoch);
         std::shuffle(order.begin(), order.end(), shuffle);
         double epoch_loss = 0.0;
@@ -454,7 +472,7 @@ static bool train_adapter(const ACETrainCommand &                   command,
         }
         const std::string checkpoint =
             std::string(command.output_dir) + "/checkpoint-epoch-" + std::to_string(epoch + 1);
-        if (!ace_save_train_adapter_checkpoint(checkpoint, state, error)) {
+        if (!ace_save_train_checkpoint(checkpoint, state, optimizer, epoch + 1, error)) {
             dit_ggml_free(&model);
             return false;
         }
@@ -465,7 +483,7 @@ static bool train_adapter(const ACETrainCommand &                   command,
                      checkpoint.c_str());
     }
 
-    const bool saved = ace_save_train_adapter_checkpoint(command.output_dir, state, error);
+    const bool saved = ace_save_train_checkpoint(command.output_dir, state, optimizer, command.epochs, error);
     dit_ggml_free(&model);
     return saved;
 }
