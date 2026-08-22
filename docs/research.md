@@ -14,9 +14,11 @@ the GGML training kernels from the SA3 fork.
 - SA3's `betweentwomidnights/ggml` submodule at `ba817aa16736bd7a5bca61e7e3ac446b26a266b0`
 - `betweentwomidnights/gary-localhost-installer` at `89ae662a37d875428e1a34fc7f13540e129dee5f`
 
-The two GGML histories share `524f974bb21a1013408f76d71c15732482c0c3fe` as their relevant base.
-Replacing ACE-Step's GGML with SA3's older pin would discard later ACE-Step backend work, so the spike
-rebased 17 focused training commits onto ACE-Step's newer GGML revision instead.
+The two GGML histories share
+`524f974bb21a1013408f76d71c15732482c0c3fe` as their relevant base.
+Replacing ACE-Step's GGML with SA3's older pin would discard later ACE-Step
+backend work, so the spike rebased 17 focused training commits onto ACE-Step's
+newer GGML revision instead.
 
 ## GGML capability port
 
@@ -113,9 +115,18 @@ backward in one graph. The Vulkan
 validation also caught an incomplete rebase resolution: SA3's expanded typed `OUT_PROD` implementation
 had been added beside upstream's later basic-F32 implementation. Removing only the stale duplicate
 registration and backend path restored one authoritative F32/F16/quantized implementation. The validated
-integration heads are GGML `7ccc6dfc08d7ec5952fa933a20b596c0d4f382d3` and ACE-Step
-`5a47b5b7108c106232ca64c79112124dd415ccc8`. CUDA remains unexecuted until matching hardware is
-available.
+integration heads are GGML
+`7ccc6dfc08d7ec5952fa933a20b596c0d4f382d3` and ACE-Step
+`5a47b5b7108c106232ca64c79112124dd415ccc8`. Sawhee merged the
+complete ACE-Step history at `3fc27a5`. CUDA remains unexecuted until matching
+hardware is available.
+
+Sawhee is a public personal-account repository with no registered self-hosted
+runner. Standard public GitHub-hosted runners are free but do not expose an
+NVIDIA GPU. GitHub's T4 runner is a paid larger runner restricted to Team and
+Enterprise organizations. The CI contract therefore performs a bounded CUDA
+12.6 compile on a free standard runner. It does not mislabel compilation as
+hardware execution.
 
 ## Gary compatibility target
 
@@ -151,12 +162,12 @@ One supplied pair has also passed the executable dataset journey: the 31.7 MB WA
 stereo samples at 48 kHz, its sidecar metadata parsed, and the validator measured 2.89 minutes. The full
 13-song corpus is intentionally deferred until model-backed training can run from the chosen Sawhee layout.
 
-## Pending decision
+## Repository layout
 
-Sawhee currently contains an AGPL-3.0 template license, while ACE-Step and SA3 are MIT-licensed. Before
-importing code, choose one repository shape:
-
-1. Make Sawhee a full MIT-licensed fork of ACE-Step at the repository root. This is the recommended
-   shape for a drop-in native executable and keeps upstream history easy to follow.
-2. Keep Sawhee as an AGPL meta-repository containing submodules and patch series. This preserves the
-   existing template license but makes builds, releases, and upstream rebases less direct.
+Sawhee is a full MIT-licensed ACE-Step fork at the repository root. The merge
+preserves the prior Sawhee research, Beads, and OpenSpec history alongside the
+complete upstream ACE-Step history. The rebased GGML branch is stored as the
+unrelated `ggml/acestep-training` branch in the same public repository, and the
+`ggml` submodule pins its exact tested commit. This keeps recursive clones
+reproducible without requiring write access to the SA3 GGML fork or creating a
+second repository.

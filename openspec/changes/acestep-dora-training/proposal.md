@@ -19,10 +19,10 @@ those capabilities while targeting Gary-compatible adapter outputs.
 
 ## Compatibility contract
 
-The trainer will emit `adapter_model.safetensors` and `adapter_config.json` with sufficient metadata for
-native reload and PEFT-compatible consumers. CLI details will be specified after the source layout is
-approved, but must cover adapter type, rank, alpha, module profile, seed, optimizer settings, checkpoint
-interval, resume, and output directory.
+The trainer emits `adapter_model.safetensors` and `adapter_config.json` with
+sufficient metadata for native reload and PEFT-compatible consumers. The
+`ace-train` CLI covers adapter type, rank, alpha, module profile, seed,
+optimizer settings, checkpoint resume, and output directory.
 
 ## Acceptance gates
 
@@ -32,12 +32,9 @@ interval, resume, and output directory.
 - End to end: a tiny real dataset slice overfits, exports, reloads, and changes fixed-seed inference.
 - Regression: the full ACE-Step build and existing inference checks remain green without adapters.
 
-## Decision required before implementation lands
+## Approved source layout
 
-Approve one source layout and its license handling:
-
-- **Recommended:** full ACE-Step fork at the Sawhee root, replacing the template AGPL license with MIT and
-  retaining upstream attribution/history.
-- AGPL meta-repository with ACE-Step and GGML as submodules plus maintained patch series.
-
-Approval of this proposal authorizes the OpenSpec delta and task list, followed by the TDD implementation.
+Sawhee is a full ACE-Step fork at the repository root under ACE-Step's MIT
+license. The repository retains both the original Sawhee project history and
+the upstream ACE-Step history. The exact rebased GGML commit is pinned as a
+submodule and published on the repository's `ggml/acestep-training` branch.

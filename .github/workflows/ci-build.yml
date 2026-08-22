@@ -1,9 +1,13 @@
-# Validate that the project builds on Ubuntu and macOS (no model download).
+# ABOUTME: Builds and smoke-tests Sawhee on its supported host platforms.
+# ABOUTME: Compiles the CUDA training path on a free, time-bounded runner.
 name: CI Build
 
 on:
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -75,3 +79,40 @@ jobs:
           --suppress=shiftNegativeLHS \
           -i ggml -i build -i .git -i mp3 \
           .
+
+  cuda-compile:
+    name: CUDA 12.6 compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    container:
+      image: nvidia/cuda:12.6.3-devel-ubuntu24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq build-essential cmake git pkg-config
+
+      - name: Configure CUDA
+        run: |
+          cmake -S . -B build-cuda \
+            -DGGML_CUDA=ON \
+            -DGGML_CUDA_GRAPHS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=75-virtual
+
+      - name: Build CUDA trainer and DoRA graph test
+        run: |
+          cmake --build build-cuda --config Release -j2 \
+            --target ace-train ace-synth test-dora-backend
+
+      - name: Run CPU-side DoRA contract from the CUDA build
+        run: |
+          ./build-cuda/test-dora-backend CPU F32
+          ./build-cuda/test-dora-backend CPU Q4_K
+          ./build-cuda/ace-train --help
