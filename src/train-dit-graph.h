@@ -10,6 +10,7 @@
 #include <string>
 
 struct ACETrainDiTGraph {
+    ggml_backend_t         backend;
     struct ggml_context *  ctx;
     ggml_gallocr_t         allocator;
     struct ggml_cgraph *   graph;
@@ -49,7 +50,8 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
         error = "DiT backend is not initialized";
         return false;
     }
-    if (temporal_length <= 0 || encoder_sequence_length <= 0 || batch_size <= 0 ||
+    training.backend = model.backend;
+    if (temporal_length <= 0 || encoder_sequence_length <= 0 || batch_size <= 0 || model.cfg.patch_size <= 0 ||
         temporal_length % model.cfg.patch_size != 0) {
         error = "invalid DiT training graph dimensions";
         return false;

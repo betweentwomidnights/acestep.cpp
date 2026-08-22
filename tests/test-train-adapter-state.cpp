@@ -6,6 +6,7 @@
 #include "train-adapter-checkpoint.h"
 #include "train-adapter-optimizer.h"
 #include "train-adapter-state.h"
+#include "train-diffusion.h"
 #include "train-dit-graph.h"
 
 #include <algorithm>
@@ -447,6 +448,131 @@ int main() {
         return fail("AdamW must update host parameters and upload them for the next graph replay");
     }
     ace_free_train_dit_graph(tiny_training);
+
+    std::vector<ACETrainDiffusionExample> examples(2);
+    examples[0].target_latents = { 0.1f, -0.2f, 0.3f, -0.4f };
+    examples[0].context_latents = { 0.5f, 0.6f, 0.7f, 0.8f };
+    examples[0].encoder_hidden = { 0.2f, -0.1f, 0.05f, 0.3f };
+    examples[0].real_encoder_sequence_length = 1;
+    examples[1].target_latents = { -0.4f, 0.3f, -0.2f, 0.1f };
+    examples[1].context_latents = { -0.8f, -0.7f, -0.6f, -0.5f };
+    examples[1].encoder_hidden = { -0.3f, 0.05f, -0.1f, 0.2f };
+    examples[1].real_encoder_sequence_length = 1;
+    const std::vector<float> null_condition = { 0.9f, 0.8f, 0.7f, 0.6f };
+    ACETrainDiffusionConfig diffusion_config;
+    diffusion_config.timestep_mean = 0.0f;
+    diffusion_config.timestep_std = 0.0f;
+    diffusion_config.cfg_dropout = 1.0f;
+    if (std::fabs(ace_train_timestep_from_logits(-2.0f, 1.0f) - ace_train_sigmoid(1.0f)) > 1e-7f) {
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("ACE-Step timestep sampling must keep the maximum of the sampled pair");
+    }
+    ACETrainDiffusionBatch batch;
+    if (!ace_prepare_train_diffusion_batch(
+            tiny, examples, 2, 1, null_condition, 1234, diffusion_config, batch, error)) {
+        std::fprintf(stderr, "FAIL: prepare diffusion batch: %s\n", error.c_str());
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    if (batch.timesteps.size() != 2 || batch.timesteps[0] != 0.5f || batch.timesteps[1] != 0.5f ||
+        batch.reference_timesteps != batch.timesteps || batch.input_latents.size() != 16 ||
+        batch.target_velocity.size() != 8 || batch.encoder_hidden.size() != 8 ||
+        batch.positions != std::vector<int32_t>({ 0, 1, 0, 1 })) {
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("prepared diffusion batch dimensions or fixed timesteps are incorrect");
+    }
+    for (size_t sample = 0; sample < examples.size(); ++sample) {
+        for (int time = 0; time < 2; ++time) {
+            const size_t input_offset = sample * 8 + (size_t) time * 4;
+            const size_t latent_offset = sample * 4 + (size_t) time * 2;
+            if (batch.input_latents[input_offset] != examples[sample].context_latents[(size_t) time * 2] ||
+                batch.input_latents[input_offset + 1] != examples[sample].context_latents[(size_t) time * 2 + 1]) {
+                ggml_backend_free(tiny.backend);
+                ggml_free(tiny_ctx);
+                ggml_free(ctx);
+                return fail("prepared diffusion input must pack context channels first");
+            }
+            for (int channel = 0; channel < 2; ++channel) {
+                const size_t local_index = (size_t) time * 2 + channel;
+                const size_t index = latent_offset + (size_t) channel;
+                const float expected_xt =
+                    examples[sample].target_latents[local_index] + 0.5f * batch.target_velocity[index];
+                if (std::fabs(batch.input_latents[input_offset + 2 + channel] - expected_xt) > 1e-6f) {
+                    std::fprintf(stderr,
+                                 "FAIL: interpolation sample=%zu time=%d channel=%d input=%f expected=%f velocity=%f\n",
+                                 sample,
+                                 time,
+                                 channel,
+                                 batch.input_latents[input_offset + 2 + channel],
+                                 expected_xt,
+                                 batch.target_velocity[index]);
+                    ggml_backend_free(tiny.backend);
+                    ggml_free(tiny_ctx);
+                    ggml_free(ctx);
+                    return fail("prepared noisy latent does not satisfy the flow-matching interpolation");
+                }
+            }
+        }
+        for (size_t i = 0; i < null_condition.size(); ++i) {
+            if (batch.encoder_hidden[sample * null_condition.size() + i] != null_condition[i]) {
+                ggml_backend_free(tiny.backend);
+                ggml_free(tiny_ctx);
+                ggml_free(ctx);
+                return fail("CFG dropout must replace the complete sample condition");
+            }
+        }
+    }
+    ACETrainDiffusionBatch replay;
+    if (!ace_prepare_train_diffusion_batch(
+            tiny, examples, 2, 1, null_condition, 1234, diffusion_config, replay, error) ||
+        replay.input_latents != batch.input_latents || replay.target_velocity != batch.target_velocity) {
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("diffusion batch preparation must be deterministic for a fixed seed");
+    }
+
+    ACETrainDiTGraph batch_training;
+    if (!ace_build_train_dit_graph(tiny, tiny_state, 2, 1, 2, batch_training, error)) {
+        std::fprintf(stderr, "FAIL: batched training graph: %s\n", error.c_str());
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    if (batch_training.timestep->ne[0] != 2 || batch_training.reference_timestep->ne[0] != 2 ||
+        !ace_upload_train_diffusion_batch(batch_training, batch, error)) {
+        std::fprintf(stderr, "FAIL: upload prepared diffusion batch: %s\n", error.c_str());
+        ace_free_train_dit_graph(batch_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    ACETrainAdapterOptimizer batch_optimizer;
+    float batch_loss = 0.0f;
+    if (!ace_train_adapter_step(batch_training,
+                                tiny_state,
+                                batch_optimizer,
+                                optimizer_config,
+                                batch,
+                                batch_loss,
+                                error) ||
+        batch_optimizer.step != 1 || !std::isfinite(batch_loss)) {
+        std::fprintf(stderr, "FAIL: prepared native training step: %s loss=%f\n", error.c_str(), batch_loss);
+        ace_free_train_dit_graph(batch_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    ace_free_train_dit_graph(batch_training);
     ggml_backend_free(tiny.backend);
     ggml_free(tiny_ctx);
 

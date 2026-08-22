@@ -57,22 +57,22 @@ static struct ggml_tensor * dit_ggml_linear_bias(struct ggml_context * ctx,
 
 // Helper: AdaLN modulate
 // out = norm * (1 + scale) + shift
-// norm: [H, S], scale: [H], shift: [H]
+// norm: [H, S, N], scale: [H, 1, N], shift: [H, 1, N]
 static struct ggml_tensor * dit_ggml_adaln(struct ggml_context * ctx,
                                            struct ggml_tensor *  norm,
                                            struct ggml_tensor *  scale,
                                            struct ggml_tensor *  shift,
                                            struct ggml_tensor *  one) {
     // norm * (1 + scale) + shift
-    // one is [1] = 1.0, broadcasts to [H]; avoids expensive [H,S,N] add
-    struct ggml_tensor * one_plus_s = ggml_add(ctx, scale, one);        // [H] + [1] -> [H]
+    // one is [1] = 1.0 and broadcasts without materializing a full activation tensor.
+    struct ggml_tensor * one_plus_s = ggml_add(ctx, scale, one);
     struct ggml_tensor * scaled     = ggml_mul(ctx, norm, one_plus_s);  // [H,S,N]
     return ggml_add(ctx, scaled, shift);                                // [H,S,N]
 }
 
 // Helper: Gated residual
 // out = residual + x * gate
-// residual: [H, S], x: [H, S], gate: [H]
+// residual: [H, S, N], x: [H, S, N], gate: [H, 1, N]
 // NOTE: no sigmoid, gate is a raw scaling factor (matches Python reference)
 static struct ggml_tensor * dit_ggml_gated_add(struct ggml_context * ctx,
                                                struct ggml_tensor *  residual,
@@ -83,7 +83,7 @@ static struct ggml_tensor * dit_ggml_gated_add(struct ggml_context * ctx,
 }
 
 // Build timestep embedding subgraph
-// t_scalar: [1] f32, returns temb [H] and *out_tproj [6H]
+// t_scalar: [N] f32, returns temb [H, N] and *out_tproj [6H, N]
 // suffix: "_t" or "_r" for naming intermediate tensors
 static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
                                                 DiTGGML *             model,
@@ -94,7 +94,7 @@ static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
     // scale timestep by 1000 (diffusion convention, matches Python)
     struct ggml_tensor * t_scaled = ggml_scale(ctx, t_scalar, 1000.0f);
 
-    // sinusoidal embedding: [1] -> [256]
+    // sinusoidal embedding: [N] -> [256, N]
     struct ggml_tensor * sinusoidal = ggml_timestep_embedding(ctx, t_scaled, 256, 10000);
     {
         char name[64];
@@ -103,7 +103,7 @@ static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
         ggml_set_output(sinusoidal);
     }
 
-    // linear1 + silu: [256] -> [H]
+    // linear1 + silu: [256, N] -> [H, N]
     struct ggml_tensor * h = dit_ggml_linear_bias(ctx, model, w->linear_1_w, w->linear_1_b, sinusoidal);
     {
         char name[64];
@@ -114,14 +114,14 @@ static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
 
     h = ggml_silu(ctx, h);
 
-    // linear2: [H] -> [H]
+    // linear2: [H, N] -> [H, N]
     struct ggml_tensor * temb = dit_ggml_linear_bias(ctx, model, w->linear_2_w, w->linear_2_b, h);
 
-    // silu + proj: [H] -> [6H]
+    // silu + proj: [H, N] -> [6H, N]
     struct ggml_tensor * h2 = ggml_silu(ctx, temb);
     *out_tproj              = dit_ggml_linear_bias(ctx, model, w->time_proj_w, w->time_proj_b, h2);
 
-    return temb;  // [H] (used for output adaln)
+    return temb;
 }
 
 // F32 manual attention (fallback when flash_attn_ext is not available or imprecise).
@@ -376,7 +376,7 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
                                                  DiTGGML *             m,
                                                  int                   layer_idx,
                                                  struct ggml_tensor *  hidden,     // [H, S, N]
-                                                 struct ggml_tensor *  tproj,      // [6H] f32 combined temb projection
+                                                 struct ggml_tensor *  tproj,      // [6H, N] f32 combined temb projection
                                                  struct ggml_tensor *  enc,        // [H, enc_S, N] or NULL
                                                  struct ggml_tensor *  positions,  // [S] int32
                                                  struct ggml_tensor *  sa_mask,    // [S, S, 1, N] or NULL
@@ -388,7 +388,7 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
     DiTGGMLLayer *  ly = &m->layers[layer_idx];
     int             H  = c.hidden_size;
 
-    // AdaLN: scale_shift_table [6, H] + tproj [6H] -> 6 vectors of [H]
+    // AdaLN: scale_shift_table [6, H] + tproj [6H, N] -> 6 tensors of [H, 1, N]
     // scale_shift_table is stored as bf16, cast to f32 for arithmetic
     struct ggml_tensor * ss = ly->scale_shift_table;
     if (ss->type != GGML_TYPE_F32) {
@@ -396,16 +396,16 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
     }
     // flatten [H, 6] -> [6H] (ggml ne[0]=H, ne[1]=6, contiguous = 6H floats)
     struct ggml_tensor * ss_flat = ggml_reshape_1d(ctx, ss, 6 * H);
-    struct ggml_tensor * adaln   = ggml_add(ctx, ss_flat, tproj);  // [6H] f32
+    struct ggml_tensor * adaln   = ggml_add(ctx, tproj, ss_flat);
 
-    // extract 6 modulation vectors [H] each
+    // Extract one strided [H, 1, N] modulation tensor from each sample column.
     size_t               Hb        = H * sizeof(float);
-    struct ggml_tensor * shift_sa  = ggml_view_1d(ctx, adaln, H, 0 * Hb);
-    struct ggml_tensor * scale_sa  = ggml_view_1d(ctx, adaln, H, 1 * Hb);
-    struct ggml_tensor * gate_sa   = ggml_view_1d(ctx, adaln, H, 2 * Hb);
-    struct ggml_tensor * shift_ffn = ggml_view_1d(ctx, adaln, H, 3 * Hb);
-    struct ggml_tensor * scale_ffn = ggml_view_1d(ctx, adaln, H, 4 * Hb);
-    struct ggml_tensor * gate_ffn  = ggml_view_1d(ctx, adaln, H, 5 * Hb);
+    struct ggml_tensor * shift_sa  = ggml_view_3d(ctx, adaln, H, 1, N, Hb, adaln->nb[1], 0 * Hb);
+    struct ggml_tensor * scale_sa  = ggml_view_3d(ctx, adaln, H, 1, N, Hb, adaln->nb[1], 1 * Hb);
+    struct ggml_tensor * gate_sa   = ggml_view_3d(ctx, adaln, H, 1, N, Hb, adaln->nb[1], 2 * Hb);
+    struct ggml_tensor * shift_ffn = ggml_view_3d(ctx, adaln, H, 1, N, Hb, adaln->nb[1], 3 * Hb);
+    struct ggml_tensor * scale_ffn = ggml_view_3d(ctx, adaln, H, 1, N, Hb, adaln->nb[1], 4 * Hb);
+    struct ggml_tensor * gate_ffn  = ggml_view_3d(ctx, adaln, H, 1, N, Hb, adaln->nb[1], 5 * Hb);
 
     // Self-attention with AdaLN + gated residual
     struct ggml_tensor * residual = hidden;
@@ -462,8 +462,8 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
 // Graph inputs (ggml [ne0, ne1, ne2] notation):
 //   "input_latents"   [in_channels, T, N]  concat(context_latents, xt) per sample
 //   "enc_hidden"      [H, enc_S, N]        text encoder hidden states (N copies)
-//   "t"               [1] f32              flow matching timestep (shared)
-//   "t_r"             [1] f32              reference timestep (shared)
+//   "t"               [N] f32              flow matching timestep per sample
+//   "t_r"             [N] f32              reference timestep per sample
 //   "positions"       [S*N] i32            position indices 0..S-1 repeated N times
 //   "sa_mask_sw"      [S, S, 1, N] f16     self-attn sliding window (ne0=KV, ne1=Q)
 //   "ca_mask"         [enc_S, S, 1, N] f16 cross-attn, enc padding  (ne0=KV, ne1=Q)
@@ -502,12 +502,12 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     ggml_set_name(enc_hidden, "enc_hidden");
     ggml_set_input(enc_hidden);
 
-    // Timesteps: scalars
-    struct ggml_tensor * t_val = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    // Timesteps: one scalar per sample.
+    struct ggml_tensor * t_val = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, N);
     ggml_set_name(t_val, "t");
     ggml_set_input(t_val);
 
-    struct ggml_tensor * tr_val = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    struct ggml_tensor * tr_val = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, N);
     ggml_set_name(tr_val, "t_r");
     ggml_set_input(tr_val);
 
@@ -556,7 +556,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
         ggml_set_name(temb_r, "temb_r");
         ggml_set_output(temb_r);
 
-        // combine: temb = temb_t + temb_r [H], tproj = tproj_t + tproj_r [6H]
+        // combine: temb = temb_t + temb_r [H, N], tproj = tproj_t + tproj_r [6H, N]
         temb = ggml_add(ctx, temb_t, temb_r);
         ggml_set_name(temb, "temb");
         ggml_set_output(temb);
@@ -600,11 +600,13 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     }
     struct ggml_tensor * oss_flat = ggml_reshape_1d(ctx, oss, 2 * H);
 
-    size_t               Hb        = H * sizeof(float);
-    struct ggml_tensor * out_shift = ggml_view_1d(ctx, oss_flat, H, 0);
-    struct ggml_tensor * out_scale = ggml_view_1d(ctx, oss_flat, H, Hb);
-    out_shift                      = ggml_add(ctx, out_shift, temb);
-    out_scale                      = ggml_add(ctx, out_scale, temb);
+    struct ggml_tensor * temb_pair = ggml_concat(ctx, temb, temb, 0);
+    struct ggml_tensor * out_modulation = ggml_add(ctx, temb_pair, oss_flat);
+    size_t               Hb             = H * sizeof(float);
+    struct ggml_tensor * out_shift =
+        ggml_view_3d(ctx, out_modulation, H, 1, N, Hb, out_modulation->nb[1], 0);
+    struct ggml_tensor * out_scale =
+        ggml_view_3d(ctx, out_modulation, H, 1, N, Hb, out_modulation->nb[1], Hb);
 
     struct ggml_tensor * norm_out = dit_ggml_rms_norm_weighted(ctx, hidden, m->norm_out, c.rms_norm_eps);
     norm_out                      = dit_ggml_adaln(ctx, norm_out, out_scale, out_shift, m->scalar_one);

@@ -394,6 +394,7 @@ static int dit_ggml_generate(DiTGGML *           model,
     ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
 
     struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
+    std::vector<float>   timestep_data(N_graph);
 
     // Solver dispatch. solver_name is the canonical key, resolved via the registry.
     const SolverInfo * solver_info = solver_lookup(solver_name);
@@ -464,11 +465,12 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
 
         // Set timestep (changes each step)
+        std::fill(timestep_data.begin(), timestep_data.end(), t_curr);
         if (t_t) {
-            ggml_backend_tensor_set(t_t, &t_curr, 0, sizeof(float));
+            ggml_backend_tensor_set(t_t, timestep_data.data(), 0, timestep_data.size() * sizeof(float));
         }
         if (t_tr) {
-            ggml_backend_tensor_set(t_tr, &t_curr, 0, sizeof(float));
+            ggml_backend_tensor_set(t_tr, timestep_data.data(), 0, timestep_data.size() * sizeof(float));
         }
 
         // Scheduler fallback inputs may be reused as scratch, so they refresh

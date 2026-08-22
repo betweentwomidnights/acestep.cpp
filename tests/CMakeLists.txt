@@ -24,6 +24,11 @@ add_executable(test-dit-linear-transform test-dit-linear-transform.cpp)
 target_link_libraries(test-dit-linear-transform PRIVATE acestep-core)
 link_ggml_backends(test-dit-linear-transform)
 
+# test-dora-backend: execute a real DoRA-row forward/backward graph on a selected backend.
+add_executable(test-dora-backend test-dora-backend.cpp)
+target_link_libraries(test-dora-backend PRIVATE acestep-core)
+link_ggml_backends(test-dora-backend)
+
 # test-train-adapter-state: verify Gary-compatible target profiles and initialization.
 add_executable(test-train-adapter-state test-train-adapter-state.cpp)
 target_link_libraries(test-train-adapter-state PRIVATE acestep-core)
