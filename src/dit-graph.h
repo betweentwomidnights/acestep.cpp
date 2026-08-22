@@ -1,3 +1,5 @@
+// ABOUTME: Builds ACE-Step diffusion-transformer inference and adapter-training graphs.
+// ABOUTME: Routes every trainable linear projection through the model transform hook.
 #pragma once
 // dit-graph.h: DiT compute graph construction (ggml)
 //
@@ -34,17 +36,22 @@ static struct ggml_tensor * dit_ggml_rms_norm_weighted(struct ggml_context * ctx
 // input:  [in, S]
 // output: [out, S]
 static struct ggml_tensor * dit_ggml_linear(struct ggml_context * ctx,
+                                            DiTGGML *             model,
                                             struct ggml_tensor *  weight,
                                             struct ggml_tensor *  input) {
+    if (model && model->linear_transform) {
+        return model->linear_transform(ctx, model->linear_transform_data, weight, input);
+    }
     return ggml_mul_mat(ctx, weight, input);
 }
 
 // Helper: Linear layer with bias
 static struct ggml_tensor * dit_ggml_linear_bias(struct ggml_context * ctx,
+                                                 DiTGGML *             model,
                                                  struct ggml_tensor *  weight,
                                                  struct ggml_tensor *  bias,
                                                  struct ggml_tensor *  input) {
-    struct ggml_tensor * out = ggml_mul_mat(ctx, weight, input);
+    struct ggml_tensor * out = dit_ggml_linear(ctx, model, weight, input);
     return ggml_add(ctx, out, dit_ggml_f32(ctx, bias));
 }
 
@@ -79,6 +86,7 @@ static struct ggml_tensor * dit_ggml_gated_add(struct ggml_context * ctx,
 // t_scalar: [1] f32, returns temb [H] and *out_tproj [6H]
 // suffix: "_t" or "_r" for naming intermediate tensors
 static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
+                                                DiTGGML *             model,
                                                 DiTGGMLTembWeights *  w,
                                                 struct ggml_tensor *  t_scalar,
                                                 struct ggml_tensor ** out_tproj,
@@ -96,7 +104,7 @@ static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
     }
 
     // linear1 + silu: [256] -> [H]
-    struct ggml_tensor * h = dit_ggml_linear_bias(ctx, w->linear_1_w, w->linear_1_b, sinusoidal);
+    struct ggml_tensor * h = dit_ggml_linear_bias(ctx, model, w->linear_1_w, w->linear_1_b, sinusoidal);
     {
         char name[64];
         snprintf(name, sizeof(name), "temb_lin1%s", suffix);
@@ -107,11 +115,11 @@ static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
     h = ggml_silu(ctx, h);
 
     // linear2: [H] -> [H]
-    struct ggml_tensor * temb = dit_ggml_linear_bias(ctx, w->linear_2_w, w->linear_2_b, h);
+    struct ggml_tensor * temb = dit_ggml_linear_bias(ctx, model, w->linear_2_w, w->linear_2_b, h);
 
     // silu + proj: [H] -> [6H]
     struct ggml_tensor * h2 = ggml_silu(ctx, temb);
-    *out_tproj              = dit_ggml_linear_bias(ctx, w->time_proj_w, w->time_proj_b, h2);
+    *out_tproj              = dit_ggml_linear_bias(ctx, model, w->time_proj_w, w->time_proj_b, h2);
 
     return temb;  // [H] (used for output adaln)
 }
@@ -156,20 +164,20 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     int                 q_dim  = Nh * D;
     int                 kv_dim = Nkv * D;
     if (ly->sa_qkv) {
-        struct ggml_tensor * qkv = dit_ggml_linear(ctx, ly->sa_qkv, norm_sa);
+        struct ggml_tensor * qkv = dit_ggml_linear(ctx, m, ly->sa_qkv, norm_sa);
         q                        = ggml_cont(ctx, ggml_view_3d(ctx, qkv, q_dim, S, N, qkv->nb[1], qkv->nb[2], 0));
         k = ggml_cont(ctx, ggml_view_3d(ctx, qkv, kv_dim, S, N, qkv->nb[1], qkv->nb[2], (size_t) q_dim * qkv->nb[0]));
         v = ggml_cont(
             ctx, ggml_view_3d(ctx, qkv, kv_dim, S, N, qkv->nb[1], qkv->nb[2], (size_t) (q_dim + kv_dim) * qkv->nb[0]));
     } else if (ly->sa_qk) {
-        struct ggml_tensor * qk = dit_ggml_linear(ctx, ly->sa_qk, norm_sa);
+        struct ggml_tensor * qk = dit_ggml_linear(ctx, m, ly->sa_qk, norm_sa);
         q                       = ggml_cont(ctx, ggml_view_3d(ctx, qk, q_dim, S, N, qk->nb[1], qk->nb[2], 0));
         k = ggml_cont(ctx, ggml_view_3d(ctx, qk, kv_dim, S, N, qk->nb[1], qk->nb[2], (size_t) q_dim * qk->nb[0]));
-        v = dit_ggml_linear(ctx, ly->sa_v_proj, norm_sa);
+        v = dit_ggml_linear(ctx, m, ly->sa_v_proj, norm_sa);
     } else {
-        q = dit_ggml_linear(ctx, ly->sa_q_proj, norm_sa);
-        k = dit_ggml_linear(ctx, ly->sa_k_proj, norm_sa);
-        v = dit_ggml_linear(ctx, ly->sa_v_proj, norm_sa);
+        q = dit_ggml_linear(ctx, m, ly->sa_q_proj, norm_sa);
+        k = dit_ggml_linear(ctx, m, ly->sa_k_proj, norm_sa);
+        v = dit_ggml_linear(ctx, m, ly->sa_v_proj, norm_sa);
     }
 
     // 2) Reshape to heads: [Nh*D, S, N] -> [D, Nh, S, N]
@@ -240,7 +248,7 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     }
 
     // 8) O projection: [Nh*D, S, N] -> [H, S, N]
-    struct ggml_tensor * out = dit_ggml_linear(ctx, ly->sa_o_proj, attn);
+    struct ggml_tensor * out = dit_ggml_linear(ctx, m, ly->sa_o_proj, attn);
     return out;
 }
 
@@ -255,17 +263,17 @@ static struct ggml_tensor * dit_ggml_build_mlp(struct ggml_context * ctx,
     struct ggml_tensor * ff;
     if (ly->gate_up) {
         // Fused: single matmul [H, 2*I] x [H, S, N] -> [2*I, S, N], then swiglu splits ne[0]
-        struct ggml_tensor * gu = dit_ggml_linear(ctx, ly->gate_up, norm_ffn);
+        struct ggml_tensor * gu = dit_ggml_linear(ctx, m, ly->gate_up, norm_ffn);
         ff                      = ggml_swiglu(ctx, gu);
     } else {
         // Separate: two matmuls + split swiglu
-        struct ggml_tensor * gate = dit_ggml_linear(ctx, ly->gate_proj, norm_ffn);
-        struct ggml_tensor * up   = dit_ggml_linear(ctx, ly->up_proj, norm_ffn);
+        struct ggml_tensor * gate = dit_ggml_linear(ctx, m, ly->gate_proj, norm_ffn);
+        struct ggml_tensor * up   = dit_ggml_linear(ctx, m, ly->up_proj, norm_ffn);
         ff                        = ggml_swiglu_split(ctx, gate, up);
     }
 
     // Down projection: [I, S] -> [H, S]
-    return dit_ggml_linear(ctx, ly->down_proj, ff);
+    return dit_ggml_linear(ctx, m, ly->down_proj, ff);
 }
 
 // Build cross-attention sub-graph for a single layer.
@@ -298,20 +306,20 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
         struct ggml_tensor * w_q  = ggml_view_2d(ctx, ly->ca_qkv, ly->ca_qkv->ne[0], q_dim, ly->ca_qkv->nb[1], 0);
         struct ggml_tensor * w_kv = ggml_view_2d(ctx, ly->ca_qkv, ly->ca_qkv->ne[0], 2 * kv_dim, ly->ca_qkv->nb[1],
                                                  (size_t) q_dim * ly->ca_qkv->nb[1]);
-        q                         = ggml_mul_mat(ctx, w_q, norm_ca);
-        struct ggml_tensor * kv   = ggml_mul_mat(ctx, w_kv, enc);
+        q                         = dit_ggml_linear(ctx, m, w_q, norm_ca);
+        struct ggml_tensor * kv   = dit_ggml_linear(ctx, m, w_kv, enc);
         k                         = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
         v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], (size_t) kv_dim * kv->nb[0]));
     } else if (ly->ca_kv) {
         // Q separate, K+V fused
-        q                       = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca);
-        struct ggml_tensor * kv = ggml_mul_mat(ctx, ly->ca_kv, enc);
+        q                       = dit_ggml_linear(ctx, m, ly->ca_q_proj, norm_ca);
+        struct ggml_tensor * kv = dit_ggml_linear(ctx, m, ly->ca_kv, enc);
         k                       = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
         v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], (size_t) kv_dim * kv->nb[0]));
     } else {
-        q = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca);
-        k = dit_ggml_linear(ctx, ly->ca_k_proj, enc);
-        v = dit_ggml_linear(ctx, ly->ca_v_proj, enc);
+        q = dit_ggml_linear(ctx, m, ly->ca_q_proj, norm_ca);
+        k = dit_ggml_linear(ctx, m, ly->ca_k_proj, enc);
+        v = dit_ggml_linear(ctx, m, ly->ca_v_proj, enc);
     }
 
     // reshape to [D, heads, seq, N] then permute to [D, seq, heads, N]
@@ -355,7 +363,7 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
     attn = ggml_reshape_3d(ctx, attn, Nh * D, S, N);
 
     // O projection
-    return dit_ggml_linear(ctx, ly->ca_o_proj, attn);
+    return dit_ggml_linear(ctx, m, ly->ca_o_proj, attn);
 }
 
 // Build one full DiT layer (AdaLN + self-attn + cross-attn + FFN + gated residuals)
@@ -535,7 +543,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
 
     {
         struct ggml_tensor * tproj_t;
-        struct ggml_tensor * temb_t = dit_ggml_build_temb(ctx, &m->time_embed, t_val, &tproj_t, "_t");
+        struct ggml_tensor * temb_t = dit_ggml_build_temb(ctx, m, &m->time_embed, t_val, &tproj_t, "_t");
         ggml_set_name(temb_t, "temb_t");
         ggml_set_output(temb_t);
 
@@ -543,7 +551,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
         // Python passes (t - t_r) to time_embed_r, not t_r directly
         // In turbo mode t = t_r, so input is 0
         struct ggml_tensor * t_diff = ggml_sub(ctx, t_val, tr_val);
-        struct ggml_tensor * temb_r = dit_ggml_build_temb(ctx, &m->time_embed_r, t_diff, &tproj_r, "_r");
+        struct ggml_tensor * temb_r = dit_ggml_build_temb(ctx, m, &m->time_embed_r, t_diff, &tproj_r, "_r");
         ggml_set_name(temb_r, "temb_r");
         ggml_set_output(temb_r);
 
@@ -560,12 +568,12 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     ggml_set_name(input, "proj_in_input");
     ggml_set_output(input);
     struct ggml_tensor * patched = ggml_reshape_3d(ctx, input, c.in_channels * P, S, N);
-    struct ggml_tensor * hidden  = dit_ggml_linear_bias(ctx, m->proj_in_w, m->proj_in_b, patched);
+    struct ggml_tensor * hidden  = dit_ggml_linear_bias(ctx, m, m->proj_in_w, m->proj_in_b, patched);
     ggml_set_name(hidden, "hidden_after_proj_in");
     ggml_set_output(hidden);
 
     // 3) Condition embedder: project encoder hidden states
-    struct ggml_tensor * enc = dit_ggml_linear_bias(ctx, m->cond_emb_w, m->cond_emb_b, enc_hidden);
+    struct ggml_tensor * enc = dit_ggml_linear_bias(ctx, m, m->cond_emb_w, m->cond_emb_b, enc_hidden);
     ggml_set_name(enc, "enc_after_cond_emb");
     ggml_set_output(enc);
 
@@ -601,7 +609,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     norm_out                      = dit_ggml_adaln(ctx, norm_out, out_scale, out_shift, m->scalar_one);
 
     // proj_out: weight pre-permuted+transposed at load time to [H, out_ch*P] F32
-    struct ggml_tensor * output = dit_ggml_linear_bias(ctx, m->proj_out_w, m->proj_out_b, norm_out);
+    struct ggml_tensor * output = dit_ggml_linear_bias(ctx, m, m->proj_out_w, m->proj_out_b, norm_out);
     output                      = ggml_reshape_3d(ctx, output, c.out_channels, T, N);
 
     ggml_set_name(output, "velocity");

@@ -1,3 +1,5 @@
+// ABOUTME: Defines ACE-Step's GGML diffusion transformer weights and runtime state.
+// ABOUTME: Loads the DiT model and exposes the optional functional linear transform hook.
 #pragma once
 // dit.h: ACE-Step DiT (Diffusion Transformer) via ggml compute graph
 // Ported from Python ACE-Step-1.5 reference. Same weights, loaded from GGUF.
@@ -84,6 +86,11 @@ struct DiTGGMLLayer {
 // Full model
 #define DIT_GGML_MAX_LAYERS 32
 
+using DiTGGMLLinearTransform = struct ggml_tensor * (*)(struct ggml_context * ctx,
+                                                        void *                data,
+                                                        struct ggml_tensor *  weight,
+                                                        struct ggml_tensor *  input);
+
 struct DiTGGML {
     DiTGGMLConfig cfg;
 
@@ -122,6 +129,10 @@ struct DiTGGML {
 
     // Pre-allocated constant for AdaLN (1+scale) fusion
     struct ggml_tensor * scalar_one;  // [1] = 1.0f, broadcast in ggml_add
+
+    // Optional functional transform for trainable adapters. Frozen inference leaves this unset.
+    DiTGGMLLinearTransform linear_transform;
+    void *                 linear_transform_data;
 };
 
 // Load timestep embedding weights
