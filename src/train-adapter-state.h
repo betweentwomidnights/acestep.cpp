@@ -68,12 +68,12 @@ static int ace_train_adapter_round(double value) {
     return (lower_integer % 2 == 0) ? lower_integer : lower_integer + 1;
 }
 
-static bool ace_train_adapter_targets(const DiTGGML &                    model,
-                                      const std::string &                profile,
-                                      int                                base_rank,
-                                      int                                base_alpha,
+static bool ace_train_adapter_targets(const DiTGGML &                      model,
+                                      const std::string &                  profile,
+                                      int                                  base_rank,
+                                      int                                  base_alpha,
                                       std::vector<ACETrainAdapterTarget> & targets,
-                                      std::string &                      error) {
+                                      std::string &                        error) {
     targets.clear();
     error.clear();
     if (profile != "attention" && profile != "balanced") {
@@ -115,15 +115,15 @@ static bool ace_train_adapter_targets(const DiTGGML &                    model,
             return false;
         }
         ACETrainAdapterTarget target;
-        target.weight      = weight;
-        target.weight_name = ggml_get_name(weight);
-        target.module_name = module_name;
-        target.in          = weight->ne[0];
-        target.out         = weight->ne[1];
-        target.rank        = profile_value(module_name, false);
-        target.alpha       = profile_value(module_name, true);
-        target.base_rank   = base_rank;
-        target.base_alpha  = base_alpha;
+        target.weight         = weight;
+        target.weight_name    = ggml_get_name(weight);
+        target.module_name    = module_name;
+        target.in             = weight->ne[0];
+        target.out            = weight->ne[1];
+        target.rank           = profile_value(module_name, false);
+        target.alpha          = profile_value(module_name, true);
+        target.base_rank      = base_rank;
+        target.base_alpha     = base_alpha;
         target.module_profile = profile;
         targets.push_back(std::move(target));
         return true;
@@ -136,14 +136,10 @@ static bool ace_train_adapter_targets(const DiTGGML &                    model,
             targets.clear();
             return false;
         }
-        if (!add_target(layer.sa_q_proj, "self_attn.q_proj") ||
-            !add_target(layer.sa_k_proj, "self_attn.k_proj") ||
-            !add_target(layer.sa_v_proj, "self_attn.v_proj") ||
-            !add_target(layer.sa_o_proj, "self_attn.o_proj") ||
-            !add_target(layer.ca_q_proj, "cross_attn.q_proj") ||
-            !add_target(layer.ca_k_proj, "cross_attn.k_proj") ||
-            !add_target(layer.ca_v_proj, "cross_attn.v_proj") ||
-            !add_target(layer.ca_o_proj, "cross_attn.o_proj")) {
+        if (!add_target(layer.sa_q_proj, "self_attn.q_proj") || !add_target(layer.sa_k_proj, "self_attn.k_proj") ||
+            !add_target(layer.sa_v_proj, "self_attn.v_proj") || !add_target(layer.sa_o_proj, "self_attn.o_proj") ||
+            !add_target(layer.ca_q_proj, "cross_attn.q_proj") || !add_target(layer.ca_k_proj, "cross_attn.k_proj") ||
+            !add_target(layer.ca_v_proj, "cross_attn.v_proj") || !add_target(layer.ca_o_proj, "cross_attn.o_proj")) {
             targets.clear();
             return false;
         }
@@ -157,9 +153,7 @@ static bool ace_train_adapter_targets(const DiTGGML &                    model,
     return true;
 }
 
-static bool ace_train_tensor_to_f32(struct ggml_tensor * tensor,
-                                    std::vector<float> & values,
-                                    std::string &        error) {
+static bool ace_train_tensor_to_f32(struct ggml_tensor * tensor, std::vector<float> & values, std::string & error) {
     const int64_t count = ggml_nelements(tensor);
     values.resize((size_t) count);
     if (tensor->type == GGML_TYPE_F32) {
@@ -174,7 +168,7 @@ static bool ace_train_tensor_to_f32(struct ggml_tensor * tensor,
         return true;
     }
 
-    const size_t bytes = ggml_nbytes(tensor);
+    const size_t               bytes = ggml_nbytes(tensor);
     std::vector<unsigned char> packed(bytes);
     if (tensor->buffer) {
         ggml_backend_tensor_get(tensor, packed.data(), 0, bytes);
@@ -194,18 +188,17 @@ static bool ace_train_tensor_to_f32(struct ggml_tensor * tensor,
     const int64_t rows         = count / row_elements;
     const size_t  row_bytes    = ggml_row_size(tensor->type, row_elements);
     for (int64_t row = 0; row < rows; ++row) {
-        traits->to_float(packed.data() + (size_t) row * row_bytes,
-                         values.data() + (size_t) row * row_elements,
+        traits->to_float(packed.data() + (size_t) row * row_bytes, values.data() + (size_t) row * row_elements,
                          row_elements);
     }
     return true;
 }
 
 static bool ace_init_train_adapter_state(const std::vector<ACETrainAdapterTarget> & targets,
-                                         const std::string &                       adapter_type,
-                                         unsigned long long                       seed,
-                                         ACETrainAdapterState &                    state,
-                                         std::string &                             error) {
+                                         const std::string &                        adapter_type,
+                                         unsigned long long                         seed,
+                                         ACETrainAdapterState &                     state,
+                                         std::string &                              error) {
     state = {};
     error.clear();
     if (adapter_type != "lora" && adapter_type != "dora-rows") {
@@ -230,7 +223,7 @@ static bool ace_init_train_adapter_state(const std::vector<ACETrainAdapterTarget
         param.target = target;
         param.a.resize((size_t) target.rank * target.in);
         param.b.assign((size_t) target.out * target.rank, 0.0f);
-        const float bound = 1.0f / std::sqrt((float) target.in);
+        const float                           bound = 1.0f / std::sqrt((float) target.in);
         std::uniform_real_distribution<float> distribution(-bound, bound);
         for (float & value : param.a) {
             value = distribution(random);
@@ -259,10 +252,10 @@ static bool ace_init_train_adapter_state(const std::vector<ACETrainAdapterTarget
     return true;
 }
 
-static bool ace_build_train_adapter_graph_state(struct ggml_context *            ctx,
-                                                const ACETrainAdapterState &      state,
-                                                ACETrainAdapterGraphState &       graph_state,
-                                                std::string &                     error) {
+static bool ace_build_train_adapter_graph_state(struct ggml_context *        ctx,
+                                                const ACETrainAdapterState & state,
+                                                ACETrainAdapterGraphState &  graph_state,
+                                                std::string &                error) {
     graph_state = {};
     error.clear();
     if (!ctx) {
@@ -277,23 +270,22 @@ static bool ace_build_train_adapter_graph_state(struct ggml_context *           
 
     for (const ACETrainAdapterParam & host : state.params) {
         const ACETrainAdapterTarget & target = host.target;
-        if (host.a.size() != (size_t) target.in * target.rank ||
-            host.b.size() != (size_t) target.out * target.rank) {
-            error = "adapter host tensor shape mismatch for " + target.weight_name;
+        if (host.a.size() != (size_t) target.in * target.rank || host.b.size() != (size_t) target.out * target.rank) {
+            error       = "adapter host tensor shape mismatch for " + target.weight_name;
             graph_state = {};
             return false;
         }
-        if (dora_rows && (host.magnitude.size() != (size_t) target.out ||
-                          host.base_norm_sq.size() != (size_t) target.out)) {
-            error = "DoRA host tensor shape mismatch for " + target.weight_name;
+        if (dora_rows &&
+            (host.magnitude.size() != (size_t) target.out || host.base_norm_sq.size() != (size_t) target.out)) {
+            error       = "DoRA host tensor shape mismatch for " + target.weight_name;
             graph_state = {};
             return false;
         }
 
         ACETrainAdapterGraphParam graph_param = {};
-        graph_param.target = target;
-        graph_param.a      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, target.in, target.rank);
-        graph_param.b      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, target.rank, target.out);
+        graph_param.target                    = target;
+        graph_param.a                         = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, target.in, target.rank);
+        graph_param.b                         = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, target.rank, target.out);
         ggml_set_param(graph_param.a);
         ggml_set_param(graph_param.b);
         ggml_set_input(graph_param.a);
@@ -316,15 +308,14 @@ static bool ace_build_train_adapter_graph_state(struct ggml_context *           
             ggml_set_name(graph_param.base_norm_sq, (stem + ".base_norm_sq").c_str());
         }
 
-        graph_state.transform.params.emplace(target.weight,
-                                             DiTAdapterParam {
-                                                 /*.a =*/graph_param.a,
-                                                 /*.b =*/graph_param.b,
-                                                 /*.magnitude =*/graph_param.magnitude,
-                                                 /*.base_norm_sq =*/graph_param.base_norm_sq,
-                                                 /*.scale =*/(float) target.alpha / target.rank,
-                                                 /*.dora_rows =*/dora_rows,
-                                             });
+        graph_state.transform.params.emplace(target.weight, DiTAdapterParam{
+                                                                /*.a =*/graph_param.a,
+                                                                /*.b =*/graph_param.b,
+                                                                /*.magnitude =*/graph_param.magnitude,
+                                                                /*.base_norm_sq =*/graph_param.base_norm_sq,
+                                                                /*.scale =*/(float) target.alpha / target.rank,
+                                                                /*.dora_rows =*/dora_rows,
+                                                            });
         graph_state.params.push_back(std::move(graph_param));
     }
     return true;

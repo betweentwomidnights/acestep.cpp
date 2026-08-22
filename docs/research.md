@@ -37,8 +37,8 @@ weights. The complete ACE-Step CMake build also succeeds against the port. A pro
 passes the same 128 of 128 `OUT_PROD` cases on an Apple M3 Max through MoltenVK, including the explicit
 Q5_K and Q6_K training cases. The original SA3 CUDA commit records end-to-end LoRA and DoRA-row training
 on a Q4_K_M base, with losses matching its Vulkan implementation to the fifth decimal. That proves the
-source algorithm before the rebase, but the rebased ACE-Step head still needs build and execution on a
-matching CUDA runner; inherited results will not be treated as validation of the integration.
+source algorithm before the rebase. The rebased ACE-Step head compiles in CUDA 12.6 CI but still needs
+execution on a matching CUDA runner; inherited results will not be treated as validation of the integration.
 
 ## Model-side training seam
 
@@ -138,8 +138,8 @@ Gary currently invokes a Python ACE-Step trainer and expects PEFT-compatible art
 - continuous flow-matching with logit-normal timestep sampling centered at `-0.4`;
 - classifier-free condition dropout and optional Min-SNR weighting.
 
-Sawhee should implement that behavior and artifact contract in native code. No Gary files should change
-until Sawhee can demonstrate compatible training and inference independently.
+Sawhee implements that behavior and artifact contract in native code. Gary remains unchanged; Sawhee's
+independent Metal acceptance journey demonstrates native PEFT training, resume, reload, and inference.
 
 The native dataset contract discovers basename-matched `.wav`/`.txt` pairs in stable order and parses
 caption, genre, BPM, key, time signature, instrumental state, custom tag, and multiline lyrics. Missing
@@ -154,8 +154,8 @@ has passed real-checkpoint end-to-end training and inference on Metal.
 
 The supplied [Drive dataset](https://drive.google.com/drive/folders/152WEfkTQuyb78dNWejyvgdoGbJkf-xoP)
 contains 13 basename-matched WAV/metadata pairs. Its text files follow the native dataset contract above.
-The first acceptance run should use a tiny fixed slice, prove loss reduction and checkpoint reload, then
-compare base and adapted generations with fixed prompts and seeds. Lyrics remain input data and are not
+The bounded acceptance run used a tiny fixed slice to exercise optimization and checkpoint reload, then
+compared base and adapted generations with fixed prompts and seeds. Lyrics remain input data and are not
 copied into this repository.
 
 One supplied pair passed the executable dataset journey: the 31.7 MB WAV decoded as 8,313,677 stereo

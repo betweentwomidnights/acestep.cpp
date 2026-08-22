@@ -71,7 +71,7 @@ static void vae_enc_extract_latents(const float *         raw,
     for (int time = 0; time < count; ++time) {
         const int source_time = source_offset + time;
         for (int channel = 0; channel < 64; ++channel) {
-            const float mean = raw[(size_t) channel * raw_temporal_length + source_time];
+            const float mean   = raw[(size_t) channel * raw_temporal_length + source_time];
             float       latent = mean;
             if (sampler) {
                 const float scale = raw[(size_t) (64 + channel) * raw_temporal_length + source_time];
@@ -324,18 +324,14 @@ static int vae_enc_encode_with_sampler(VAEEncoder *          m,
 
     vae_enc_extract_latents(raw.data(), T_latent, 0, T_latent, latent_out, 0, sampler);
 
-    fprintf(stderr, "[VAE-Enc] Encode%s: T_audio=%d -> T_latent=%d (%.2fs @ 48kHz)\n",
-            sampler ? " sampled" : "", T_audio, T_latent, (float) T_audio / 48000.0f);
+    fprintf(stderr, "[VAE-Enc] Encode%s: T_audio=%d -> T_latent=%d (%.2fs @ 48kHz)\n", sampler ? " sampled" : "",
+            T_audio, T_latent, (float) T_audio / 48000.0f);
 
     return T_latent;
 }
 
 // Mean-only deterministic encode used by cover inference.
-static int vae_enc_encode(VAEEncoder *  m,
-                          const float * audio,
-                          int           T_audio,
-                          float *       latent_out,
-                          int           max_T_latent) {
+static int vae_enc_encode(VAEEncoder * m, const float * audio, int T_audio, float * latent_out, int max_T_latent) {
     return vae_enc_encode_with_sampler(m, audio, T_audio, latent_out, max_T_latent, nullptr);
 }
 
@@ -352,14 +348,14 @@ static int vae_enc_encode_sampled(VAEEncoder *  m,
 
 // Tiled encode for long audio (same chunking strategy as decoder)
 // chunk_size: latent frames per tile, overlap: context frames on each side
-static int vae_enc_encode_tiled(VAEEncoder *  m,
-                                const float * audio,       // [T_audio, 2] interleaved stereo
-                                int           T_audio,
-                                float *       latent_out,  // [T_latent, 64] output, time-major
-                                int           max_T_latent,
-                                int           chunk_size = 256,
-                                int           overlap    = 64,
-                                VAEEncLatentSampler * sampler = nullptr) {
+static int vae_enc_encode_tiled(VAEEncoder *          m,
+                                const float *         audio,       // [T_audio, 2] interleaved stereo
+                                int                   T_audio,
+                                float *               latent_out,  // [T_latent, 64] output, time-major
+                                int                   max_T_latent,
+                                int                   chunk_size = 256,
+                                int                   overlap    = 64,
+                                VAEEncLatentSampler * sampler    = nullptr) {
     // Work in audio-sample space. Each latent frame = 1920 audio samples.
     int audio_chunk   = chunk_size * 1920;
     int audio_overlap = overlap * 1920;
@@ -437,8 +433,7 @@ static int vae_enc_encode_tiled(VAEEncoder *  m,
         std::vector<float> raw(128 * tile_T);
         ggml_backend_tensor_get(m->graph_output, raw.data(), 0, out_bytes);
 
-        vae_enc_extract_latents(
-            raw.data(), tile_T, trim_start, core_len, latent_out, latent_write_pos, sampler);
+        vae_enc_extract_latents(raw.data(), tile_T, trim_start, core_len, latent_out, latent_write_pos, sampler);
 
         latent_write_pos += core_len;
     }
@@ -458,8 +453,7 @@ static int vae_enc_encode_tiled_sampled(VAEEncoder *  m,
                                         int           chunk_size = 256,
                                         int           overlap    = 64) {
     VAEEncLatentSampler sampler(seed);
-    return vae_enc_encode_tiled(
-        m, audio, T_audio, latent_out, max_T_latent, chunk_size, overlap, &sampler);
+    return vae_enc_encode_tiled(m, audio, T_audio, latent_out, max_T_latent, chunk_size, overlap, &sampler);
 }
 
 // Free all resources

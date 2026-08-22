@@ -43,15 +43,16 @@ static std::string ace_checkpoint_adapter_key(const std::string & key) {
         const char * serialized;
         const char * canonical;
     };
+
     static const KeySuffix suffixes[] = {
-        { ".lora_A.default.weight", ".lora_A.weight" },
-        { ".lora_A.weight", ".lora_A.weight" },
-        { ".lora_B.default.weight", ".lora_B.weight" },
-        { ".lora_B.weight", ".lora_B.weight" },
+        { ".lora_A.default.weight",                ".lora_A.weight"         },
+        { ".lora_A.weight",                        ".lora_A.weight"         },
+        { ".lora_B.default.weight",                ".lora_B.weight"         },
+        { ".lora_B.weight",                        ".lora_B.weight"         },
         { ".lora_magnitude_vector.default.weight", ".lora_magnitude_vector" },
-        { ".lora_magnitude_vector.default", ".lora_magnitude_vector" },
-        { ".lora_magnitude_vector.weight", ".lora_magnitude_vector" },
-        { ".lora_magnitude_vector", ".lora_magnitude_vector" },
+        { ".lora_magnitude_vector.default",        ".lora_magnitude_vector" },
+        { ".lora_magnitude_vector.weight",         ".lora_magnitude_vector" },
+        { ".lora_magnitude_vector",                ".lora_magnitude_vector" },
     };
     for (const KeySuffix & suffix : suffixes) {
         if (ace_checkpoint_key_ends_with(key, suffix.serialized)) {
@@ -61,9 +62,9 @@ static std::string ace_checkpoint_adapter_key(const std::string & key) {
     return "";
 }
 
-static bool ace_write_safetensors(const std::filesystem::path &              path,
+static bool ace_write_safetensors(const std::filesystem::path &                 path,
                                   const std::vector<ACETrainCheckpointTensor> & tensors,
-                                  std::string &                                error) {
+                                  std::string &                                 error) {
     std::string header = "{\"__metadata__\":{\"format\":\"pt\"}";
     size_t      offset = 0;
     for (const ACETrainCheckpointTensor & tensor : tensors) {
@@ -115,12 +116,12 @@ static bool ace_write_safetensors(const std::filesystem::path &              pat
 }
 
 static bool ace_write_adapter_config(const std::filesystem::path & path,
-                                     const ACETrainAdapterState & state,
-                                     std::string &                error) {
-    std::vector<std::string>       modules;
-    std::set<std::string>          seen;
-    std::map<std::string, int>     ranks;
-    std::map<std::string, int>     alphas;
+                                     const ACETrainAdapterState &  state,
+                                     std::string &                 error) {
+    std::vector<std::string>   modules;
+    std::set<std::string>      seen;
+    std::map<std::string, int> ranks;
+    std::map<std::string, int> alphas;
     for (const ACETrainAdapterParam & param : state.params) {
         const std::string & module = param.target.module_name;
         if (seen.insert(module).second) {
@@ -196,8 +197,14 @@ static bool ace_save_train_adapter_checkpoint(const std::string &          direc
     tensors.reserve(state.params.size() * (state.adapter_type == "dora-rows" ? 3 : 2));
     for (const ACETrainAdapterParam & param : state.params) {
         const std::string module = ace_checkpoint_module_path(param.target.weight_name);
-        tensors.push_back({ module + ".lora_A.weight", { param.target.rank, param.target.in }, &param.a });
-        tensors.push_back({ module + ".lora_B.weight", { param.target.out, param.target.rank }, &param.b });
+        tensors.push_back({
+            module + ".lora_A.weight", { param.target.rank, param.target.in },
+               &param.a
+        });
+        tensors.push_back({
+            module + ".lora_B.weight", { param.target.out, param.target.rank },
+               &param.b
+        });
         if (state.adapter_type == "dora-rows") {
             tensors.push_back({ module + ".lora_magnitude_vector", { param.target.out }, &param.magnitude });
         }
@@ -210,11 +217,11 @@ static bool ace_save_train_adapter_checkpoint(const std::string &          direc
     return ace_write_adapter_config(path / "adapter_config.json", state, error);
 }
 
-static bool ace_load_train_adapter_checkpoint(const std::string &                    directory,
+static bool ace_load_train_adapter_checkpoint(const std::string &                        directory,
                                               const std::vector<ACETrainAdapterTarget> & targets,
-                                              ACETrainAdapterState &                   state,
-                                              std::string &                            error,
-                                              const std::string & expected_adapter_type = "") {
+                                              ACETrainAdapterState &                     state,
+                                              std::string &                              error,
+                                              const std::string &                        expected_adapter_type = "") {
     state = {};
     error.clear();
     if (targets.empty()) {
@@ -222,7 +229,7 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
         return false;
     }
     const std::filesystem::path path(directory);
-    adapter_config config;
+    adapter_config              config;
     if (!adapter_read_config(directory.c_str(), config)) {
         error = "adapter_config.json is missing or invalid";
         return false;
@@ -231,9 +238,8 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
         error = "checkpoint base rank or alpha does not match the requested training configuration";
         return false;
     }
-    if (!expected_adapter_type.empty() &&
-        ((expected_adapter_type == "dora-rows") != config.use_dora ||
-         (expected_adapter_type != "lora" && expected_adapter_type != "dora-rows"))) {
+    if (!expected_adapter_type.empty() && ((expected_adapter_type == "dora-rows") != config.use_dora ||
+                                           (expected_adapter_type != "lora" && expected_adapter_type != "dora-rows"))) {
         error = "checkpoint adapter type does not match the requested adapter type";
         return false;
     }
@@ -247,8 +253,7 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
         return false;
     }
     for (const ACETrainAdapterTarget & target : targets) {
-        const int saved_rank =
-            adapter_config_value_for_weight(config.rank_pattern, target.weight_name, config.rank);
+        const int saved_rank = adapter_config_value_for_weight(config.rank_pattern, target.weight_name, config.rank);
         const int saved_alpha =
             adapter_config_value_for_weight(config.alpha_pattern, target.weight_name, config.lora_alpha);
         if (saved_rank != target.rank || saved_alpha != target.alpha) {
@@ -298,11 +303,11 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
     state.base_rank       = config.rank;
     state.base_alpha      = config.lora_alpha;
     bool adapter_type_set = false;
-    bool dora_rows       = false;
+    bool dora_rows        = false;
     for (const ACETrainAdapterTarget & target : targets) {
-        const std::string module = ace_checkpoint_module_path(target.weight_name);
-        const STEntry *   a = find_entry(module + ".lora_A.weight");
-        const STEntry *   b = find_entry(module + ".lora_B.weight");
+        const std::string module    = ace_checkpoint_module_path(target.weight_name);
+        const STEntry *   a         = find_entry(module + ".lora_A.weight");
+        const STEntry *   b         = find_entry(module + ".lora_B.weight");
         const STEntry *   magnitude = find_entry(module + ".lora_magnitude_vector");
         if (!a) {
             a = find_entry(module + ".lora_A.default.weight");
@@ -319,15 +324,15 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
         if (!magnitude) {
             magnitude = find_entry(module + ".lora_magnitude_vector.default.weight");
         }
-        if (!a || !b || a->n_dims != 2 || b->n_dims != 2 || a->shape[0] != target.rank ||
-            a->shape[1] != target.in || b->shape[0] != target.out || b->shape[1] != target.rank) {
+        if (!a || !b || a->n_dims != 2 || b->n_dims != 2 || a->shape[0] != target.rank || a->shape[1] != target.in ||
+            b->shape[0] != target.out || b->shape[1] != target.rank) {
             error = "checkpoint adapter tensor shape mismatch for " + target.weight_name;
             st_close(&file);
             state = {};
             return false;
         }
         if (!adapter_type_set) {
-            dora_rows       = magnitude != nullptr;
+            dora_rows        = magnitude != nullptr;
             adapter_type_set = true;
             if (dora_rows != config.use_dora) {
                 error = "checkpoint DoRA tensors do not match adapter_config.json";
@@ -365,9 +370,7 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
                 return false;
             }
             param.magnitude.resize((size_t) magnitude_elements);
-            if (!adapter_to_f32(st_data(file, *magnitude),
-                                param.magnitude.data(),
-                                magnitude_elements,
+            if (!adapter_to_f32(st_data(file, *magnitude), param.magnitude.data(), magnitude_elements,
                                 magnitude->dtype)) {
                 error = "unsupported DoRA magnitude dtype for " + target.weight_name;
                 st_close(&file);

@@ -10,22 +10,22 @@
 #include <string>
 
 struct ACETrainDiTGraph {
-    ggml_backend_t         backend;
-    struct ggml_context *  ctx;
-    ggml_gallocr_t         allocator;
-    struct ggml_cgraph *   graph;
-    struct ggml_tensor *   input_latents;
-    struct ggml_tensor *   encoder_hidden;
-    struct ggml_tensor *   timestep;
-    struct ggml_tensor *   reference_timestep;
-    struct ggml_tensor *   positions;
-    struct ggml_tensor *   self_attention_mask;
-    struct ggml_tensor *   full_self_attention_mask;
-    struct ggml_tensor *   cross_attention_mask;
-    struct ggml_tensor *   target_velocity;
-    struct ggml_tensor *   loss_weights;
-    struct ggml_tensor *   velocity;
-    struct ggml_tensor *   loss;
+    ggml_backend_t            backend;
+    struct ggml_context *     ctx;
+    ggml_gallocr_t            allocator;
+    struct ggml_cgraph *      graph;
+    struct ggml_tensor *      input_latents;
+    struct ggml_tensor *      encoder_hidden;
+    struct ggml_tensor *      timestep;
+    struct ggml_tensor *      reference_timestep;
+    struct ggml_tensor *      positions;
+    struct ggml_tensor *      self_attention_mask;
+    struct ggml_tensor *      full_self_attention_mask;
+    struct ggml_tensor *      cross_attention_mask;
+    struct ggml_tensor *      target_velocity;
+    struct ggml_tensor *      loss_weights;
+    struct ggml_tensor *      velocity;
+    struct ggml_tensor *      loss;
     ACETrainAdapterGraphState adapters;
 };
 
@@ -39,13 +39,13 @@ static void ace_free_train_dit_graph(ACETrainDiTGraph & training) {
     training = {};
 }
 
-static bool ace_build_train_dit_graph(DiTGGML &                   model,
+static bool ace_build_train_dit_graph(DiTGGML &                    model,
                                       const ACETrainAdapterState & state,
-                                      int                           temporal_length,
-                                      int                           encoder_sequence_length,
-                                      int                           batch_size,
-                                      ACETrainDiTGraph &            training,
-                                      std::string &                 error) {
+                                      int                          temporal_length,
+                                      int                          encoder_sequence_length,
+                                      int                          batch_size,
+                                      ACETrainDiTGraph &           training,
+                                      std::string &                error) {
     training = {};
     error.clear();
     if (!model.backend) {
@@ -60,8 +60,8 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
     }
 
     const size_t graph_capacity = 65536;
-    const size_t context_size = graph_capacity * ggml_tensor_overhead() +
-                                ggml_graph_overhead_custom(graph_capacity, true) + 64 * 1024 * 1024;
+    const size_t context_size =
+        graph_capacity * ggml_tensor_overhead() + ggml_graph_overhead_custom(graph_capacity, true) + 64 * 1024 * 1024;
     struct ggml_init_params params = {
         /*.mem_size   =*/context_size,
         /*.mem_buffer =*/nullptr,
@@ -78,20 +78,14 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
         return false;
     }
 
-    DiTGGMLLinearTransform saved_transform = model.linear_transform;
-    void *                 saved_data      = model.linear_transform_data;
+    DiTGGMLLinearTransform saved_transform       = model.linear_transform;
+    void *                 saved_data            = model.linear_transform_data;
     const bool             saved_flash_attention = model.use_flash_attn;
-    model.linear_transform                 = dit_adapter_linear_transform;
-    model.linear_transform_data            = &training.adapters.transform;
-    model.use_flash_attn                    = false;
-    training.graph = dit_ggml_build_graph(&model,
-                                          training.ctx,
-                                          temporal_length,
-                                          encoder_sequence_length,
-                                          batch_size,
-                                          &training.input_latents,
-                                          &training.velocity,
-                                          true);
+    model.linear_transform                       = dit_adapter_linear_transform;
+    model.linear_transform_data                  = &training.adapters.transform;
+    model.use_flash_attn                         = false;
+    training.graph = dit_ggml_build_graph(&model, training.ctx, temporal_length, encoder_sequence_length, batch_size,
+                                          &training.input_latents, &training.velocity, true);
     model.linear_transform      = saved_transform;
     model.linear_transform_data = saved_data;
     model.use_flash_attn        = saved_flash_attention;
@@ -101,18 +95,18 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
         return false;
     }
 
-    training.encoder_hidden = ggml_graph_get_tensor(training.graph, "enc_hidden");
-    training.timestep = ggml_graph_get_tensor(training.graph, "t");
-    training.reference_timestep = ggml_graph_get_tensor(training.graph, "t_r");
-    training.positions = ggml_graph_get_tensor(training.graph, "positions");
-    training.self_attention_mask = ggml_graph_get_tensor(training.graph, "sa_mask_sw");
+    training.encoder_hidden           = ggml_graph_get_tensor(training.graph, "enc_hidden");
+    training.timestep                 = ggml_graph_get_tensor(training.graph, "t");
+    training.reference_timestep       = ggml_graph_get_tensor(training.graph, "t_r");
+    training.positions                = ggml_graph_get_tensor(training.graph, "positions");
+    training.self_attention_mask      = ggml_graph_get_tensor(training.graph, "sa_mask_sw");
     training.full_self_attention_mask = ggml_graph_get_tensor(training.graph, "sa_mask");
-    training.cross_attention_mask = ggml_graph_get_tensor(training.graph, "ca_mask");
-    bool needs_sliding_mask = false;
-    bool needs_full_mask = false;
+    training.cross_attention_mask     = ggml_graph_get_tensor(training.graph, "ca_mask");
+    bool needs_sliding_mask           = false;
+    bool needs_full_mask              = false;
     for (int i = 0; i < model.cfg.n_layers; ++i) {
         needs_sliding_mask = needs_sliding_mask || model.layers[i].layer_type == 0;
-        needs_full_mask = needs_full_mask || model.layers[i].layer_type == 1;
+        needs_full_mask    = needs_full_mask || model.layers[i].layer_type == 1;
     }
     if (!training.encoder_hidden || !training.timestep || !training.reference_timestep || !training.positions ||
         (needs_sliding_mask && !training.self_attention_mask) ||
@@ -122,21 +116,17 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
         return false;
     }
 
-    training.target_velocity = ggml_new_tensor_3d(training.ctx,
-                                                  GGML_TYPE_F32,
-                                                  model.cfg.out_channels,
-                                                  temporal_length,
-                                                  batch_size);
+    training.target_velocity =
+        ggml_new_tensor_3d(training.ctx, GGML_TYPE_F32, model.cfg.out_channels, temporal_length, batch_size);
     ggml_set_name(training.target_velocity, "target_velocity");
     ggml_set_input(training.target_velocity);
-    training.loss_weights =
-        ggml_new_tensor_2d(training.ctx, GGML_TYPE_F32, temporal_length, batch_size);
+    training.loss_weights = ggml_new_tensor_2d(training.ctx, GGML_TYPE_F32, temporal_length, batch_size);
     ggml_set_name(training.loss_weights, "loss_weights");
     ggml_set_input(training.loss_weights);
     struct ggml_tensor * squared_error =
         ggml_sqr(training.ctx, ggml_sub(training.ctx, training.velocity, training.target_velocity));
     struct ggml_tensor * per_frame_error = ggml_sum_rows(training.ctx, squared_error);
-    per_frame_error = ggml_reshape_2d(training.ctx, per_frame_error, temporal_length, batch_size);
+    per_frame_error                      = ggml_reshape_2d(training.ctx, per_frame_error, temporal_length, batch_size);
     per_frame_error = ggml_scale(training.ctx, per_frame_error, 1.0f / (float) model.cfg.out_channels);
     struct ggml_tensor * weighted_error = ggml_mul(training.ctx, per_frame_error, training.loss_weights);
     training.loss = ggml_scale(training.ctx, ggml_sum(training.ctx, weighted_error), 1.0f / (float) batch_size);

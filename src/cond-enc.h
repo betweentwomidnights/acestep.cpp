@@ -178,7 +178,7 @@ static bool cond_ggml_forward(CondGGML *           m,
                               std::vector<float> & enc_hidden,
                               int *                out_enc_S) {
     enc_hidden.clear();
-    *out_enc_S = 0;
+    *out_enc_S      = 0;
     int  H          = 2048;
     bool has_timbre = (timbre_feats != NULL && S_ref > 0);
     int  S_timbre   = has_timbre ? S_ref + (m->use_timbre_cls ? 1 : 0) : 0;

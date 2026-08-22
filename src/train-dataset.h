@@ -14,7 +14,7 @@
 struct ACETrainingMetadata {
     std::string caption;
     std::string genre;
-    int         bpm             = 0;
+    int         bpm = 0;
     std::string key;
     int         time_signature  = 0;
     bool        is_instrumental = false;
@@ -43,9 +43,9 @@ static bool ace_training_read_integer(const std::string & value, int & result) {
     if (trimmed.empty()) {
         return false;
     }
-    const char * first = trimmed.data();
-    const char * last  = first + trimmed.size();
-    const auto parsed  = std::from_chars(first, last, result);
+    const char * first  = trimmed.data();
+    const char * last   = first + trimmed.size();
+    const auto   parsed = std::from_chars(first, last, result);
     return parsed.ec == std::errc{} && parsed.ptr == last;
 }
 
@@ -66,19 +66,19 @@ static bool ace_training_read_metadata(const std::filesystem::path & path,
         return false;
     }
 
-    bool has_caption         = false;
-    bool has_genre           = false;
-    bool has_bpm             = false;
-    bool has_key             = false;
-    bool has_time_signature  = false;
-    bool has_instrumental    = false;
-    bool has_custom_tag      = false;
-    bool has_lyrics          = false;
-    size_t offset            = 0;
+    bool   has_caption        = false;
+    bool   has_genre          = false;
+    bool   has_bpm            = false;
+    bool   has_key            = false;
+    bool   has_time_signature = false;
+    bool   has_instrumental   = false;
+    bool   has_custom_tag     = false;
+    bool   has_lyrics         = false;
+    size_t offset             = 0;
     while (offset <= contents.size()) {
         const size_t newline = contents.find('\n', offset);
         const size_t end     = newline == std::string::npos ? contents.size() : newline;
-        std::string line     = contents.substr(offset, end - offset);
+        std::string  line    = contents.substr(offset, end - offset);
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
@@ -157,7 +157,7 @@ static bool ace_training_read_metadata(const std::filesystem::path & path,
     return true;
 }
 
-static bool ace_training_load_dataset(const std::filesystem::path & directory,
+static bool ace_training_load_dataset(const std::filesystem::path &     directory,
                                       std::vector<ACETrainingExample> & examples,
                                       std::string &                     error) {
     examples.clear();
@@ -173,8 +173,9 @@ static bool ace_training_load_dataset(const std::filesystem::path & directory,
         std::filesystem::path audio_path;
         std::filesystem::path metadata_path;
     };
+
     std::map<std::string, Pair> pairs;
-    std::error_code iterator_error;
+    std::error_code             iterator_error;
     for (std::filesystem::directory_iterator iterator(directory, iterator_error), end; iterator != end;
          iterator.increment(iterator_error)) {
         if (iterator_error) {
@@ -185,8 +186,8 @@ static bool ace_training_load_dataset(const std::filesystem::path & directory,
         if (!iterator->is_regular_file(entry_error) || entry_error) {
             continue;
         }
-        const std::filesystem::path & path = iterator->path();
-        const std::string extension = path.extension().string();
+        const std::filesystem::path & path      = iterator->path();
+        const std::string             extension = path.extension().string();
         if (extension == ".wav") {
             pairs[path.stem().string()].audio_path = path;
         } else if (extension == ".txt") {
@@ -205,7 +206,7 @@ static bool ace_training_load_dataset(const std::filesystem::path & directory,
     examples.reserve(pairs.size());
     for (const auto & entry : pairs) {
         const std::string & name = entry.first;
-        const Pair & pair = entry.second;
+        const Pair &        pair = entry.second;
         if (pair.audio_path.empty()) {
             error = "metadata file has no matching audio file: " + pair.metadata_path.filename().string();
             return false;

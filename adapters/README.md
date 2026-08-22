@@ -1,7 +1,8 @@
 # Adapters
 
-Place your adapter files or folders here. Three trainer formats are supported,
-auto detected from the safetensors payload.
+Place your adapter files or folders here. Three adapter formats are supported
+and automatically detected from the safetensors payload. PEFT directories can
+contain LoRA or DoRA-row adapters emitted by `ace-train`.
 
 | Trainer | Layout                | Alpha source                          | Example                                |
 |---------|-----------------------|---------------------------------------|----------------------------------------|

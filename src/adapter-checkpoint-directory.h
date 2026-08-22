@@ -21,7 +21,7 @@ static bool adapter_checkpoint_directory(const std::filesystem::path & requested
         resolved = requested;
         return true;
     }
-    const std::filesystem::path pointer = requested / "checkpoint.current";
+    const std::filesystem::path        pointer        = requested / "checkpoint.current";
     const std::filesystem::file_status pointer_status = std::filesystem::symlink_status(pointer, filesystem_error);
     if (filesystem_error == std::make_error_code(std::errc::no_such_file_or_directory)) {
         filesystem_error.clear();
@@ -42,7 +42,7 @@ static bool adapter_checkpoint_directory(const std::filesystem::path & requested
     if (std::filesystem::is_symlink(pointer_status)) {
         target = std::filesystem::read_symlink(pointer, filesystem_error);
     } else if (std::filesystem::is_regular_file(pointer_status)) {
-        std::ifstream input(pointer, std::ios::binary);
+        std::ifstream     input(pointer, std::ios::binary);
         const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
         if (!input.is_open() || input.bad() || contents.empty()) {
             error = "checkpoint generation pointer is invalid";

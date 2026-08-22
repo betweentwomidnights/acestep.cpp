@@ -134,7 +134,7 @@ static bool lora_is_b(const std::string & key) {
 }
 
 static bool lora_is_magnitude(const std::string & key) {
-    const std::string marker = ".lora_magnitude_vector";
+    const std::string marker   = ".lora_magnitude_vector";
     const size_t      position = key.find(marker);
     if (position == std::string::npos) {
         return false;
@@ -389,11 +389,10 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     // caller builds the delta subgraph and returns its upload closure
     adapter_delta_build db = build_delta(ctx);
 
-    const bool lokr_semantics = merge_semantics == adapter_merge_semantics::lokr ||
-                                merge_semantics == adapter_merge_semantics::lycoris_dora;
-    struct ggml_tensor * tdelta_f = lokr_semantics
-                                        ? ggml_cast(ctx, ggml_cast(ctx, db.tdelta, GGML_TYPE_BF16), GGML_TYPE_F32)
-                                        : db.tdelta;
+    const bool lokr_semantics =
+        merge_semantics == adapter_merge_semantics::lokr || merge_semantics == adapter_merge_semantics::lycoris_dora;
+    struct ggml_tensor * tdelta_f =
+        lokr_semantics ? ggml_cast(ctx, ggml_cast(ctx, db.tdelta, GGML_TYPE_BF16), GGML_TYPE_F32) : db.tdelta;
 
     // merge: plain scaled add, PEFT DoRA interpolation, or LyCORIS weight decomposition
     struct ggml_tensor * tmerged;
@@ -401,10 +400,10 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         struct ggml_tensor * td_u = (user_scale != 1.0f) ? ggml_scale(ctx, tdelta_f, user_scale) : tdelta_f;
         tmerged                   = ggml_add(ctx, tbase_f32, td_u);
     } else {
-        struct ggml_tensor * tm_pre  = ggml_add(ctx, tbase_f32, tdelta_f);
-        struct ggml_tensor * tsq     = ggml_sqr(ctx, tm_pre);
-        struct ggml_tensor * tss     = ggml_sum_rows(ctx, tsq);  // ne=(1, out)
-        struct ggml_tensor * trn     = ggml_sqrt(ctx, tss);
+        struct ggml_tensor * tm_pre = ggml_add(ctx, tbase_f32, tdelta_f);
+        struct ggml_tensor * tsq    = ggml_sqr(ctx, tm_pre);
+        struct ggml_tensor * tss    = ggml_sum_rows(ctx, tsq);  // ne=(1, out)
+        struct ggml_tensor * trn    = ggml_sqrt(ctx, tss);
         if (merge_semantics == adapter_merge_semantics::peft_dora) {
             struct ggml_tensor * tscale = ggml_div(ctx, tds, trn);
             struct ggml_tensor * tfull  = ggml_mul(ctx, tm_pre, tscale);
@@ -412,12 +411,12 @@ static bool adapter_merge_on_backend(WeightCtx *                                
                 tmerged = tfull;
             } else {
                 struct ggml_tensor * tdifference = ggml_sub(ctx, tfull, tbase_f32);
-                tmerged = ggml_add(ctx, tbase_f32, ggml_scale(ctx, tdifference, user_scale));
+                tmerged                          = ggml_add(ctx, tbase_f32, ggml_scale(ctx, tdifference, user_scale));
             }
         } else {
-            const float          eps      = 7.8125e-3f;
-            struct ggml_tensor * trn_eps  = ggml_scale_bias(ctx, trn, 1.0f, eps);
-            struct ggml_tensor * tscale   = ggml_div(ctx, tds, trn_eps);
+            const float          eps     = 7.8125e-3f;
+            struct ggml_tensor * trn_eps = ggml_scale_bias(ctx, trn, 1.0f, eps);
+            struct ggml_tensor * tscale  = ggml_div(ctx, tds, trn_eps);
             struct ggml_tensor * tscale_m =
                 (user_scale != 1.0f) ? ggml_scale_bias(ctx, tscale, user_scale, 1.0f - user_scale) : tscale;
             tmerged = ggml_mul(ctx, tm_pre, tscale_m);
@@ -494,7 +493,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
                                float               scale,
                                ggml_backend_t      backend) {
     adapter_config config;
-    const bool config_loaded = adapter_read_config(cfg_dir.c_str(), config);
+    const bool     config_loaded = adapter_read_config(cfg_dir.c_str(), config);
     if (peft_directory && !config_loaded) {
         fprintf(stderr, "[Adapter] PEFT adapter_config.json is missing or invalid\n");
         return false;
@@ -561,24 +560,26 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         }
         for (const auto & entry : magnitude_map) {
             if (a_map.count(entry.first) == 0) {
-                fprintf(stderr, "[Adapter] PEFT adapter contains magnitude without factors for %s\n", entry.first.c_str());
+                fprintf(stderr, "[Adapter] PEFT adapter contains magnitude without factors for %s\n",
+                        entry.first.c_str());
                 return false;
             }
         }
         for (const auto & entry : a_map) {
             const std::string & gguf_name = entry.first;
-            const STEntry *     a = entry.second;
-            auto                b = b_map.find(gguf_name);
+            const STEntry *     a         = entry.second;
+            auto                b         = b_map.find(gguf_name);
             auto                magnitude = magnitude_map.find(gguf_name);
             if (b == b_map.end() || (config.use_dora && magnitude == magnitude_map.end()) || a->n_dims != 2 ||
                 b->second->n_dims != 2 || a->shape[0] <= 0 || a->shape[1] <= 0 || b->second->shape[0] <= 0 ||
                 b->second->shape[1] != a->shape[0] ||
                 a->shape[0] != adapter_config_value_for_weight(config.rank_pattern, gguf_name, config.rank) ||
-                (config.use_dora && (magnitude->second->n_dims != 1 || magnitude->second->shape[0] != b->second->shape[0]))) {
+                (config.use_dora &&
+                 (magnitude->second->n_dims != 1 || magnitude->second->shape[0] != b->second->shape[0]))) {
                 fprintf(stderr, "[Adapter] PEFT adapter tensor shapes are invalid for %s\n", gguf_name.c_str());
                 return false;
             }
-            int64_t tensor_index = gguf_find_tensor(gf.gguf, gguf_name.c_str());
+            int64_t              tensor_index = gguf_find_tensor(gf.gguf, gguf_name.c_str());
             struct ggml_tensor * tensor = tensor_index >= 0 ? ggml_get_tensor(gf.meta, gguf_name.c_str()) : nullptr;
             if (!adapter_config_targets_weight(config, gguf_name) || !tensor || tensor->ne[0] != a->shape[1] ||
                 tensor->ne[1] != b->second->shape[0]) {
@@ -586,7 +587,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
                 return false;
             }
             const size_t offset = gguf_get_tensor_offset(gf.gguf, tensor_index);
-            const void * base = gf.mapping + gf.data_offset + offset;
+            const void * base   = gf.mapping + gf.data_offset + offset;
             if (pending_idx.count(base) == 0) {
                 fprintf(stderr, "[Adapter] PEFT adapter target is not staged for merge: %s\n", gguf_name.c_str());
                 return false;
@@ -604,7 +605,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
                 continue;
             }
             const size_t offset = gguf_get_tensor_offset(gf.gguf, tensor_index);
-            const void * base = gf.mapping + gf.data_offset + offset;
+            const void * base   = gf.mapping + gf.data_offset + offset;
             if (pending_idx.count(base) != 0) {
                 staged_targets.insert(name);
             }
@@ -616,8 +617,8 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         for (const std::string & target : config.target_modules) {
             bool target_present = false;
             for (const auto & entry : a_map) {
-                target_present = target_present ||
-                                 adapter_module_matches_pattern(adapter_module_for_weight(entry.first), target);
+                target_present =
+                    target_present || adapter_module_matches_pattern(adapter_module_for_weight(entry.first), target);
             }
             if (!target_present) {
                 fprintf(stderr, "[Adapter] PEFT target module has no serialized tensors: %s\n", target.c_str());
@@ -709,9 +710,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             if (magnitude_nel != out_feat) {
                 fprintf(stderr,
                         "[Adapter] WARNING: DoRA magnitude shape mismatch for %s: got %lld values, expected %lld\n",
-                        gguf_name.c_str(),
-                        (long long) magnitude_nel,
-                        (long long) out_feat);
+                        gguf_name.c_str(), (long long) magnitude_nel, (long long) out_feat);
                 skipped++;
                 continue;
             }
@@ -746,7 +745,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             return db;
         };
 
-        const float * magnitude_data = magnitude.empty() ? nullptr : magnitude.data();
+        const float *                 magnitude_data = magnitude.empty() ? nullptr : magnitude.data();
         const adapter_merge_semantics merge_semantics =
             magnitude_data ? adapter_merge_semantics::peft_dora : adapter_merge_semantics::lora;
         if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, magnitude_data, scale,
@@ -759,8 +758,8 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         merged++;
     }
 
-    fprintf(stderr, "[Adapter] LoRA merged %d pairs (%d DoRA, skipped %d), scale=%.2f\n", merged, dora_count,
-            skipped, scale);
+    fprintf(stderr, "[Adapter] LoRA merged %d pairs (%d DoRA, skipped %d), scale=%.2f\n", merged, dora_count, skipped,
+            scale);
     return merged > 0;
 }
 
@@ -1059,8 +1058,8 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
 
         const adapter_merge_semantics merge_semantics =
             ds_ptr ? adapter_merge_semantics::lycoris_dora : adapter_merge_semantics::lokr;
-        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, user_scale,
-                                      merge_semantics, backend, gguf_name.c_str(), build)) {
+        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, user_scale, merge_semantics,
+                                      backend, gguf_name.c_str(), build)) {
             return false;
         }
         if (ds_ptr) {
@@ -1111,8 +1110,8 @@ static bool adapter_merge(WeightCtx *       wctx,
 
     if (S_ISDIR(sb.st_mode)) {
         peft_directory = true;
-        sf_path = resolved_adapter_path + "/adapter_model.safetensors";
-        cfg_dir = resolved_adapter_path;
+        sf_path        = resolved_adapter_path + "/adapter_model.safetensors";
+        cfg_dir        = resolved_adapter_path;
         if (stat(sf_path.c_str(), &sb) != 0) {
             fprintf(stderr, "[Adapter] directory %s is not a PEFT layout, missing adapter_model.safetensors\n",
                     adapter_path);

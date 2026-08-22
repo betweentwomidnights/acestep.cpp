@@ -21,5 +21,5 @@ Sawhee provides native ACE-Step LoRA and DoRA-row training and inference on GGML
 
 ## Repository decision
 
-The source layout and license remain pending. See the
-[training proposal](changes/acestep-dora-training/proposal.md) for the requested decision.
+See the [approved source layout](changes/acestep-dora-training/proposal.md#approved-source-layout)
+for the repository and license decision.

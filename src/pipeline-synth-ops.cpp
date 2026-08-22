@@ -549,15 +549,9 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
         for (int b = 0; b < batch_n; b++) {
             s.timer.reset();
-            if (!cond_ggml_forward(ce,
-                                   main_fwd[b].text_hidden.data(),
-                                   main_fwd[b].S_text,
-                                   main_fwd[b].lyric_embed.data(),
-                                   main_fwd[b].S_lyric,
-                                   s.timbre_feats.data(),
-                                   s.S_ref_timbre,
-                                   s.per_enc[b],
-                                   &s.per_enc_S[b])) {
+            if (!cond_ggml_forward(ce, main_fwd[b].text_hidden.data(), main_fwd[b].S_text,
+                                   main_fwd[b].lyric_embed.data(), main_fwd[b].S_lyric, s.timbre_feats.data(),
+                                   s.S_ref_timbre, s.per_enc[b], &s.per_enc_S[b])) {
                 return -1;
             }
             fprintf(stderr, "[Encode-Text Batch%d] %d+%d tokens -> enc_S=%d, %.1f ms\n", b, main_fwd[b].S_text,
@@ -567,14 +561,8 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
         if (s.need_enc_switch) {
             for (int b = 0; b < batch_n; b++) {
-                if (!cond_ggml_forward(ce,
-                                       nc_fwd[b].text_hidden.data(),
-                                       nc_fwd[b].S_text,
-                                       nc_fwd[b].lyric_embed.data(),
-                                       nc_fwd[b].S_lyric,
-                                       s.timbre_feats.data(),
-                                       s.S_ref_timbre,
-                                       s.per_enc_nc[b],
+                if (!cond_ggml_forward(ce, nc_fwd[b].text_hidden.data(), nc_fwd[b].S_text, nc_fwd[b].lyric_embed.data(),
+                                       nc_fwd[b].S_lyric, s.timbre_feats.data(), s.S_ref_timbre, s.per_enc_nc[b],
                                        &s.per_enc_S_nc[b])) {
                     return -1;
                 }

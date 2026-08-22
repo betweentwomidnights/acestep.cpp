@@ -28,9 +28,7 @@ enum ACETrainCheckpointKind {
     ACE_TRAIN_CHECKPOINT_FULL,
 };
 
-static bool ace_file_fingerprint(const std::filesystem::path & path,
-                                 std::string &                 fingerprint,
-                                 std::string &                 error) {
+static bool ace_file_fingerprint(const std::filesystem::path & path, std::string & fingerprint, std::string & error) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         error = "cannot open file for fingerprinting: " + path.string();
@@ -53,11 +51,7 @@ static bool ace_file_fingerprint(const std::filesystem::path & path,
         return false;
     }
     char value[64];
-    std::snprintf(value,
-                  sizeof(value),
-                  "fnv1a64:%016llx:%llu",
-                  (unsigned long long) hash,
-                  (unsigned long long) size);
+    std::snprintf(value, sizeof(value), "fnv1a64:%016llx:%llu", (unsigned long long) hash, (unsigned long long) size);
     fingerprint = value;
     error.clear();
     return true;
@@ -70,21 +64,15 @@ static const char * const ace_train_checkpoint_files[] = {
     "trainer_state.json",
 };
 
-static bool ace_sync_checkpoint_path(const std::filesystem::path & path,
-                                     bool                          directory,
-                                     std::string &                 error) {
+static bool ace_sync_checkpoint_path(const std::filesystem::path & path, bool directory, std::string & error) {
 #ifdef _WIN32
     if (directory) {
         return true;
     }
     const DWORD flags = directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
-    HANDLE handle = CreateFileW(path.wstring().c_str(),
-                                GENERIC_READ,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                nullptr,
-                                OPEN_EXISTING,
-                                flags,
-                                nullptr);
+    HANDLE      handle =
+        CreateFileW(path.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, flags, nullptr);
     if (handle == INVALID_HANDLE_VALUE || !FlushFileBuffers(handle)) {
         if (handle != INVALID_HANDLE_VALUE) {
             CloseHandle(handle);
@@ -132,8 +120,7 @@ static bool ace_checkpoint_files_equal(const std::filesystem::path & first,
         error = "cannot compare checkpoint files";
         return false;
     }
-    equal = std::equal(std::istreambuf_iterator<char>(first_input),
-                       std::istreambuf_iterator<char>(),
+    equal = std::equal(std::istreambuf_iterator<char>(first_input), std::istreambuf_iterator<char>(),
                        std::istreambuf_iterator<char>(second_input));
     return true;
 }
@@ -142,8 +129,7 @@ static bool ace_replace_checkpoint_file(const std::filesystem::path & source,
                                         const std::filesystem::path & destination,
                                         std::string &                 error) {
 #ifdef _WIN32
-    const bool replaced = MoveFileExW(source.wstring().c_str(),
-                                      destination.wstring().c_str(),
+    const bool replaced = MoveFileExW(source.wstring().c_str(), destination.wstring().c_str(),
                                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
     const bool replaced = ::rename(source.c_str(), destination.c_str()) == 0;
@@ -159,17 +145,16 @@ static bool ace_publish_peft_checkpoint(const std::filesystem::path & directory,
                                         const std::string &           token,
                                         std::string &                 error) {
     const std::filesystem::path generation = directory / relative_generation;
-    const std::filesystem::path config = directory / "adapter_config.json";
-    const std::filesystem::path model = directory / "adapter_model.safetensors";
-    std::error_code filesystem_error;
+    const std::filesystem::path config     = directory / "adapter_config.json";
+    const std::filesystem::path model      = directory / "adapter_model.safetensors";
+    std::error_code             filesystem_error;
     auto inspect = [&](const std::filesystem::path & path, std::filesystem::file_status & status) {
         status = std::filesystem::symlink_status(path, filesystem_error);
         if (filesystem_error == std::make_error_code(std::errc::no_such_file_or_directory)) {
             filesystem_error.clear();
         }
         if (filesystem_error) {
-            error = "cannot inspect checkpoint file " + path.filename().string() + ": " +
-                    filesystem_error.message();
+            error = "cannot inspect checkpoint file " + path.filename().string() + ": " + filesystem_error.message();
             return false;
         }
         return true;
@@ -180,7 +165,7 @@ static bool ace_publish_peft_checkpoint(const std::filesystem::path & directory,
         return false;
     }
     const bool config_exists = std::filesystem::exists(config_status);
-    const bool model_exists = std::filesystem::exists(model_status);
+    const bool model_exists  = std::filesystem::exists(model_status);
     if ((config_exists && !std::filesystem::is_regular_file(config_status)) ||
         (model_exists && (!config_exists || !std::filesystem::is_regular_file(model_status)))) {
         error = "checkpoint directory contains incompatible PEFT files";
@@ -231,9 +216,9 @@ static bool ace_publish_train_checkpoint_generation(const std::filesystem::path 
                                                     const std::filesystem::path & relative_generation,
                                                     const std::string &           token,
                                                     std::string &                 error) {
-    const std::filesystem::path pointer = directory / "checkpoint.current";
+    const std::filesystem::path pointer   = directory / "checkpoint.current";
     const std::filesystem::path temporary = directory / ("checkpoint.current-" + token);
-    std::error_code filesystem_error;
+    std::error_code             filesystem_error;
 #ifdef _WIN32
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     output << relative_generation.generic_string();
@@ -253,8 +238,7 @@ static bool ace_publish_train_checkpoint_generation(const std::filesystem::path 
     }
 #endif
 #ifdef _WIN32
-    const bool published = MoveFileExW(temporary.wstring().c_str(),
-                                       pointer.wstring().c_str(),
+    const bool published = MoveFileExW(temporary.wstring().c_str(), pointer.wstring().c_str(),
                                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 #else
     const bool published = ::rename(temporary.c_str(), pointer.c_str()) == 0;
@@ -284,11 +268,9 @@ static bool ace_write_train_checkpoint_manifest(const std::filesystem::path & di
         error = "cannot create checkpoint_manifest.json";
         return false;
     }
-    output << "{\"format_version\":1,\"base_model_fingerprint\":\"" << base_model_fingerprint
-           << "\",\"files\":{";
+    output << "{\"format_version\":1,\"base_model_fingerprint\":\"" << base_model_fingerprint << "\",\"files\":{";
     for (size_t i = 0; i < fingerprints.size(); ++i) {
-        output << (i == 0 ? "" : ",") << "\"" << ace_train_checkpoint_files[i] << "\":\""
-               << fingerprints[i] << "\"";
+        output << (i == 0 ? "" : ",") << "\"" << ace_train_checkpoint_files[i] << "\":\"" << fingerprints[i] << "\"";
     }
     output << "}}\n";
     if (!output.good()) {
@@ -308,14 +290,14 @@ static bool ace_validate_train_checkpoint_manifest(const std::filesystem::path &
         return false;
     }
     const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    yyjson_doc * document = yyjson_read(contents.data(), contents.size(), 0);
-    yyjson_val * root = document ? yyjson_doc_get_root(document) : nullptr;
-    yyjson_val * version = root ? yyjson_obj_get(root, "format_version") : nullptr;
-    yyjson_val * base = root ? yyjson_obj_get(root, "base_model_fingerprint") : nullptr;
-    yyjson_val * files = root ? yyjson_obj_get(root, "files") : nullptr;
+    yyjson_doc *      document = yyjson_read(contents.data(), contents.size(), 0);
+    yyjson_val *      root     = document ? yyjson_doc_get_root(document) : nullptr;
+    yyjson_val *      version  = root ? yyjson_obj_get(root, "format_version") : nullptr;
+    yyjson_val *      base     = root ? yyjson_obj_get(root, "base_model_fingerprint") : nullptr;
+    yyjson_val *      files    = root ? yyjson_obj_get(root, "files") : nullptr;
     if (!yyjson_is_obj(root) || !yyjson_is_int(version) || yyjson_get_int(version) != 1 || !yyjson_is_str(base) ||
-        !*yyjson_get_str(base) ||
-        !yyjson_is_obj(files) || (!expected_base_fingerprint.empty() && expected_base_fingerprint != yyjson_get_str(base))) {
+        !*yyjson_get_str(base) || !yyjson_is_obj(files) ||
+        (!expected_base_fingerprint.empty() && expected_base_fingerprint != yyjson_get_str(base))) {
         if (document) {
             yyjson_doc_free(document);
         }
@@ -324,7 +306,7 @@ static bool ace_validate_train_checkpoint_manifest(const std::filesystem::path &
     }
     for (const char * name : ace_train_checkpoint_files) {
         yyjson_val * saved = yyjson_obj_get(files, name);
-        std::string current;
+        std::string  current;
         if (!yyjson_is_str(saved) || !ace_file_fingerprint(directory / name, current, error) ||
             current != yyjson_get_str(saved)) {
             yyjson_doc_free(document);
@@ -347,7 +329,7 @@ static bool ace_train_checkpoint_kind(const std::string &      directory,
         return false;
     }
     const bool has_manifest = std::filesystem::is_regular_file(path / "checkpoint_manifest.json");
-    const bool has_pending = std::filesystem::is_regular_file(std::filesystem::path(directory) / "checkpoint.pending");
+    const bool has_pending  = std::filesystem::is_regular_file(std::filesystem::path(directory) / "checkpoint.pending");
     const bool has_progress = std::filesystem::is_regular_file(path / "trainer_state.json");
     const bool has_optimizer = std::filesystem::is_regular_file(path / "optimizer_state.safetensors");
     if (has_manifest) {
@@ -372,12 +354,12 @@ static std::string ace_optimizer_tensor_name(const ACETrainAdapterTarget & targe
     return "optimizer." + ace_checkpoint_module_path(target.weight_name) + "." + parameter + "." + moment;
 }
 
-static bool ace_save_train_checkpoint(const std::string &               directory,
-                                      const ACETrainAdapterState &      state,
-                                      const ACETrainAdapterOptimizer &  optimizer,
-                                      int                               completed_epochs,
-                                      const std::string &               base_model_fingerprint,
-                                      std::string &                     error) {
+static bool ace_save_train_checkpoint(const std::string &              directory,
+                                      const ACETrainAdapterState &     state,
+                                      const ACETrainAdapterOptimizer & optimizer,
+                                      int                              completed_epochs,
+                                      const std::string &              base_model_fingerprint,
+                                      std::string &                    error) {
     error.clear();
     if (completed_epochs < 0 || optimizer.step < 0 || optimizer.params.size() != state.params.size() ||
         state.params.empty() || base_model_fingerprint.empty()) {
@@ -386,9 +368,7 @@ static bool ace_save_train_checkpoint(const std::string &               director
     }
 
     std::vector<ACETrainCheckpointTensor> tensors;
-    auto add_moments = [&](const ACETrainAdapterParam &     parameter,
-                           const char *                      name,
-                           const std::vector<float> &        values,
+    auto add_moments = [&](const ACETrainAdapterParam & parameter, const char * name, const std::vector<float> & values,
                            const ACETrainAdamWTensorState & moments) {
         if (values.empty()) {
             return moments.first_moment.empty() && moments.second_moment.empty();
@@ -405,8 +385,8 @@ static bool ace_save_train_checkpoint(const std::string &               director
         return true;
     };
     for (size_t i = 0; i < state.params.size(); ++i) {
-        const ACETrainAdapterParam & parameter = state.params[i];
-        const ACETrainAdapterOptimizerParam & moments = optimizer.params[i];
+        const ACETrainAdapterParam &          parameter = state.params[i];
+        const ACETrainAdapterOptimizerParam & moments   = optimizer.params[i];
         if (!add_moments(parameter, "lora_A", parameter.a, moments.a) ||
             !add_moments(parameter, "lora_B", parameter.b, moments.b) ||
             !add_moments(parameter, "magnitude", parameter.magnitude, moments.magnitude)) {
@@ -416,14 +396,13 @@ static bool ace_save_train_checkpoint(const std::string &               director
     }
 
     const std::filesystem::path path(directory);
-    const std::string token = std::to_string(std::random_device {}()) + "-" +
-                              std::to_string(std::random_device {}());
+    const std::string token = std::to_string(std::random_device{}()) + "-" + std::to_string(std::random_device{}());
     const std::filesystem::path generations = path / ".checkpoint-generations";
     const std::filesystem::path relative_generation =
         std::filesystem::path(".checkpoint-generations") / ("generation-" + token);
     const std::filesystem::path generation = path / relative_generation;
-    const std::filesystem::path staging = generations / (".stage-" + token);
-    std::error_code filesystem_error;
+    const std::filesystem::path staging    = generations / (".stage-" + token);
+    std::error_code             filesystem_error;
     std::filesystem::create_directories(path, filesystem_error);
     if (!filesystem_error) {
         std::filesystem::create_directories(generations, filesystem_error);
@@ -489,16 +468,16 @@ static bool ace_save_train_checkpoint(const std::string &               director
     return true;
 }
 
-static bool ace_load_train_checkpoint(const std::string &                    directory,
+static bool ace_load_train_checkpoint(const std::string &                        directory,
                                       const std::vector<ACETrainAdapterTarget> & targets,
-                                      ACETrainAdapterState &                   state,
-                                      ACETrainAdapterOptimizer &               optimizer,
-                                      int &                                    completed_epochs,
-                                      const std::string &                      expected_base_fingerprint,
-                                      const std::string &                      expected_adapter_type,
-                                      std::string &                            error) {
-    state = {};
-    optimizer = {};
+                                      ACETrainAdapterState &                     state,
+                                      ACETrainAdapterOptimizer &                 optimizer,
+                                      int &                                      completed_epochs,
+                                      const std::string &                        expected_base_fingerprint,
+                                      const std::string &                        expected_adapter_type,
+                                      std::string &                              error) {
+    state            = {};
+    optimizer        = {};
     completed_epochs = 0;
     error.clear();
     std::filesystem::path path;
@@ -521,31 +500,31 @@ static bool ace_load_train_checkpoint(const std::string &                    dir
         return false;
     }
     const std::string contents((std::istreambuf_iterator<char>(progress)), std::istreambuf_iterator<char>());
-    yyjson_doc * document = yyjson_read(contents.data(), contents.size(), 0);
-    yyjson_val * root = document ? yyjson_doc_get_root(document) : nullptr;
-    yyjson_val * epochs = root ? yyjson_obj_get(root, "completed_epochs") : nullptr;
-    yyjson_val * step = root ? yyjson_obj_get(root, "optimizer_step") : nullptr;
-    yyjson_val * fingerprint = root ? yyjson_obj_get(root, "base_model_fingerprint") : nullptr;
+    yyjson_doc *      document    = yyjson_read(contents.data(), contents.size(), 0);
+    yyjson_val *      root        = document ? yyjson_doc_get_root(document) : nullptr;
+    yyjson_val *      epochs      = root ? yyjson_obj_get(root, "completed_epochs") : nullptr;
+    yyjson_val *      step        = root ? yyjson_obj_get(root, "optimizer_step") : nullptr;
+    yyjson_val *      fingerprint = root ? yyjson_obj_get(root, "base_model_fingerprint") : nullptr;
     if (!yyjson_is_obj(root) || !yyjson_is_int(epochs) || !yyjson_is_int(step) || !yyjson_is_str(fingerprint) ||
         yyjson_get_int(epochs) < 0 || yyjson_get_int(step) < 0 ||
         expected_base_fingerprint != yyjson_get_str(fingerprint)) {
         if (document) {
             yyjson_doc_free(document);
         }
-        state = {};
+        state            = {};
         completed_epochs = 0;
-        error = "trainer_state.json is missing or invalid";
+        error            = "trainer_state.json is missing or invalid";
         return false;
     }
-    completed_epochs = (int) yyjson_get_int(epochs);
+    completed_epochs         = (int) yyjson_get_int(epochs);
     const int optimizer_step = (int) yyjson_get_int(step);
     yyjson_doc_free(document);
 
     STFile file;
     if (!st_open(&file, (path / "optimizer_state.safetensors").string().c_str())) {
-        state = {};
+        state            = {};
         completed_epochs = 0;
-        error = "cannot open optimizer_state.safetensors";
+        error            = "cannot open optimizer_state.safetensors";
         return false;
     }
     auto find_entry = [&](const std::string & name) -> const STEntry * {
@@ -556,15 +535,13 @@ static bool ace_load_train_checkpoint(const std::string &                    dir
         }
         return nullptr;
     };
-    auto load_moments = [&](const ACETrainAdapterParam & parameter,
-                            const char *                  name,
-                            const std::vector<float> &    values,
-                            ACETrainAdamWTensorState &    moments) {
+    auto load_moments = [&](const ACETrainAdapterParam & parameter, const char * name,
+                            const std::vector<float> & values, ACETrainAdamWTensorState & moments) {
         if (values.empty()) {
             moments = {};
             return true;
         }
-        const STEntry * first = find_entry(ace_optimizer_tensor_name(parameter.target, name, "first_moment"));
+        const STEntry * first  = find_entry(ace_optimizer_tensor_name(parameter.target, name, "first_moment"));
         const STEntry * second = find_entry(ace_optimizer_tensor_name(parameter.target, name, "second_moment"));
         if (!first || !second || first->n_dims != 1 || second->n_dims != 1 ||
             first->shape[0] != (int64_t) values.size() || second->shape[0] != (int64_t) values.size()) {
@@ -572,29 +549,25 @@ static bool ace_load_train_checkpoint(const std::string &                    dir
         }
         moments.first_moment.resize(values.size());
         moments.second_moment.resize(values.size());
-        return adapter_to_f32(st_data(file, *first),
-                              moments.first_moment.data(),
-                              (int64_t) values.size(),
+        return adapter_to_f32(st_data(file, *first), moments.first_moment.data(), (int64_t) values.size(),
                               first->dtype) &&
-               adapter_to_f32(st_data(file, *second),
-                              moments.second_moment.data(),
-                              (int64_t) values.size(),
+               adapter_to_f32(st_data(file, *second), moments.second_moment.data(), (int64_t) values.size(),
                               second->dtype);
     };
 
     optimizer.step = optimizer_step;
     optimizer.params.resize(state.params.size());
     for (size_t i = 0; i < state.params.size(); ++i) {
-        const ACETrainAdapterParam & parameter = state.params[i];
-        ACETrainAdapterOptimizerParam & moments = optimizer.params[i];
+        const ACETrainAdapterParam &    parameter = state.params[i];
+        ACETrainAdapterOptimizerParam & moments   = optimizer.params[i];
         if (!load_moments(parameter, "lora_A", parameter.a, moments.a) ||
             !load_moments(parameter, "lora_B", parameter.b, moments.b) ||
             !load_moments(parameter, "magnitude", parameter.magnitude, moments.magnitude)) {
             st_close(&file);
-            state = {};
-            optimizer = {};
+            state            = {};
+            optimizer        = {};
             completed_epochs = 0;
-            error = "optimizer tensor shape mismatch for " + parameter.target.weight_name;
+            error            = "optimizer tensor shape mismatch for " + parameter.target.weight_name;
             return false;
         }
     }

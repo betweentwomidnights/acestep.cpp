@@ -52,7 +52,7 @@ struct STFile {
 
 static bool st_parse(STFile * st, const char * hdr, size_t len) {
     yyjson_doc * document = yyjson_read(hdr, len, 0);
-    yyjson_val * root = document ? yyjson_doc_get_root(document) : nullptr;
+    yyjson_val * root     = document ? yyjson_doc_get_root(document) : nullptr;
     if (!yyjson_is_obj(root)) {
         if (document) {
             yyjson_doc_free(document);
@@ -81,16 +81,16 @@ static bool st_parse(STFile * st, const char * hdr, size_t len) {
         if (!yyjson_is_obj(value)) {
             return reject();
         }
-        yyjson_val * dtype = yyjson_obj_get(value, "dtype");
-        yyjson_val * shape = yyjson_obj_get(value, "shape");
+        yyjson_val * dtype   = yyjson_obj_get(value, "dtype");
+        yyjson_val * shape   = yyjson_obj_get(value, "shape");
         yyjson_val * offsets = yyjson_obj_get(value, "data_offsets");
         if (!yyjson_is_str(dtype) || !yyjson_is_arr(shape) || !yyjson_is_arr(offsets)) {
             return reject();
         }
 
-        STEntry entry = {};
-        entry.name = yyjson_get_str(key);
-        entry.dtype = yyjson_get_str(dtype);
+        STEntry entry              = {};
+        entry.name                 = yyjson_get_str(key);
+        entry.dtype                = yyjson_get_str(dtype);
         yyjson_arr_iter dimensions = yyjson_arr_iter_with(shape);
         yyjson_val *    dimension;
         while ((dimension = yyjson_arr_iter_next(&dimensions))) {
@@ -100,8 +100,8 @@ static bool st_parse(STFile * st, const char * hdr, size_t len) {
             entry.shape[entry.n_dims++] = yyjson_get_int(dimension);
         }
         yyjson_arr_iter offset_values = yyjson_arr_iter_with(offsets);
-        yyjson_val *    start = yyjson_arr_iter_next(&offset_values);
-        yyjson_val *    end = yyjson_arr_iter_next(&offset_values);
+        yyjson_val *    start         = yyjson_arr_iter_next(&offset_values);
+        yyjson_val *    end           = yyjson_arr_iter_next(&offset_values);
         if (!yyjson_is_int(start) || !yyjson_is_int(end) || yyjson_arr_iter_next(&offset_values) ||
             yyjson_get_int(start) < 0 || yyjson_get_int(end) < 0 ||
             (uint64_t) yyjson_get_int(start) > (uint64_t) SIZE_MAX ||
@@ -109,7 +109,7 @@ static bool st_parse(STFile * st, const char * hdr, size_t len) {
             return reject();
         }
         entry.data_start = (size_t) yyjson_get_int(start);
-        entry.data_end = (size_t) yyjson_get_int(end);
+        entry.data_end   = (size_t) yyjson_get_int(end);
         st->entries.push_back(std::move(entry));
     }
     yyjson_doc_free(document);
@@ -129,7 +129,7 @@ static size_t st_dtype_size(const std::string & dtype) {
 }
 
 static bool st_validate_entries(const STFile & st) {
-    const size_t data_size = st.file_size - st.data_offset;
+    const size_t                           data_size = st.file_size - st.data_offset;
     std::vector<std::pair<size_t, size_t>> spans;
     spans.reserve(st.entries.size());
     for (const STEntry & entry : st.entries) {

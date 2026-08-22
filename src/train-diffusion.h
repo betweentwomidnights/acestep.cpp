@@ -59,21 +59,21 @@ static float ace_train_timestep_from_logits(float first, float second) {
 
 static float ace_train_flow_min_snr_weight(float timestep, float gamma) {
     const float clamped = std::max(1e-4f, std::min(1.0f - 1e-4f, timestep));
-    const float ratio = (1.0f - clamped) / clamped;
-    const float snr = std::min(1e6f, ratio * ratio);
+    const float ratio   = (1.0f - clamped) / clamped;
+    const float snr     = std::min(1e6f, ratio * ratio);
     return std::min(snr, gamma) / std::max(snr, 1e-6f);
 }
 
-static bool ace_collate_training_examples(const DiTGGML &                              model,
+static bool ace_collate_training_examples(const DiTGGML &                               model,
                                           const std::vector<ACETrainDiffusionExample> & sources,
-                                          const std::vector<float> &                   silence_latents,
-                                          const std::vector<float> &                   null_condition,
+                                          const std::vector<float> &                    silence_latents,
+                                          const std::vector<float> &                    null_condition,
                                           std::vector<ACETrainDiffusionExample> &       collated,
-                                          int &                                        temporal_length,
-                                          int &                                        encoder_sequence_length,
-                                          std::string &                                error) {
+                                          int &                                         temporal_length,
+                                          int &                                         encoder_sequence_length,
+                                          std::string &                                 error) {
     collated.clear();
-    temporal_length = 0;
+    temporal_length         = 0;
     encoder_sequence_length = 0;
     error.clear();
     if (sources.empty() || model.cfg.out_channels <= 0 || model.cfg.in_channels <= model.cfg.out_channels ||
@@ -82,9 +82,9 @@ static bool ace_collate_training_examples(const DiTGGML &                       
         return false;
     }
 
-    const int output_channels = model.cfg.out_channels;
+    const int output_channels  = model.cfg.out_channels;
     const int context_channels = model.cfg.in_channels - output_channels;
-    const int hidden_size = (int) model.cond_emb_w->ne[0];
+    const int hidden_size      = (int) model.cond_emb_w->ne[0];
     for (const ACETrainDiffusionExample & source : sources) {
         if (source.target_latents.empty() || source.target_latents.size() % (size_t) output_channels != 0 ||
             source.encoder_hidden.empty() || source.encoder_hidden.size() % (size_t) hidden_size != 0) {
@@ -92,20 +92,18 @@ static bool ace_collate_training_examples(const DiTGGML &                       
             return false;
         }
         const int source_temporal_length = (int) (source.target_latents.size() / (size_t) output_channels);
-        const int source_encoder_length = (int) (source.encoder_hidden.size() / (size_t) hidden_size);
+        const int source_encoder_length  = (int) (source.encoder_hidden.size() / (size_t) hidden_size);
         if (source_temporal_length % model.cfg.patch_size != 0 ||
             source.context_latents.size() != (size_t) source_temporal_length * context_channels ||
             source.real_temporal_length <= 0 || source.real_temporal_length > source_temporal_length ||
-            source.real_encoder_sequence_length <= 0 ||
-            source.real_encoder_sequence_length > source_encoder_length) {
+            source.real_encoder_sequence_length <= 0 || source.real_encoder_sequence_length > source_encoder_length) {
             error = "training example lengths do not match its tensor shapes";
             return false;
         }
-        temporal_length = std::max(temporal_length, source_temporal_length);
+        temporal_length         = std::max(temporal_length, source_temporal_length);
         encoder_sequence_length = std::max(encoder_sequence_length, source_encoder_length);
     }
-    if (context_channels < output_channels ||
-        silence_latents.size() < (size_t) temporal_length * output_channels ||
+    if (context_channels < output_channels || silence_latents.size() < (size_t) temporal_length * output_channels ||
         null_condition.size() != (size_t) hidden_size) {
         error = "training padding values do not match the DiT dimensions";
         return false;
@@ -113,42 +111,39 @@ static bool ace_collate_training_examples(const DiTGGML &                       
 
     collated.resize(sources.size());
     for (size_t sample = 0; sample < sources.size(); ++sample) {
-        const ACETrainDiffusionExample & source = sources[sample];
-        ACETrainDiffusionExample & destination = collated[sample];
+        const ACETrainDiffusionExample & source      = sources[sample];
+        ACETrainDiffusionExample &       destination = collated[sample];
         destination.target_latents.assign((size_t) temporal_length * output_channels, 0.0f);
         std::copy(source.target_latents.begin(), source.target_latents.end(), destination.target_latents.begin());
         destination.context_latents.resize((size_t) temporal_length * context_channels);
         for (int time = 0; time < temporal_length; ++time) {
-            float * context = destination.context_latents.data() + (size_t) time * context_channels;
+            float *       context = destination.context_latents.data() + (size_t) time * context_channels;
             const float * silence = silence_latents.data() + (size_t) time * output_channels;
             std::copy(silence, silence + output_channels, context);
             std::fill(context + output_channels, context + context_channels, 1.0f);
         }
-        std::copy(source.context_latents.begin(),
-                  source.context_latents.end(),
-                  destination.context_latents.begin());
+        std::copy(source.context_latents.begin(), source.context_latents.end(), destination.context_latents.begin());
         destination.encoder_hidden.resize((size_t) encoder_sequence_length * hidden_size);
         for (int position = 0; position < encoder_sequence_length; ++position) {
-            std::copy(null_condition.begin(),
-                      null_condition.end(),
+            std::copy(null_condition.begin(), null_condition.end(),
                       destination.encoder_hidden.begin() + (size_t) position * hidden_size);
         }
         std::copy(source.encoder_hidden.begin(), source.encoder_hidden.end(), destination.encoder_hidden.begin());
-        destination.real_temporal_length = source.real_temporal_length;
+        destination.real_temporal_length         = source.real_temporal_length;
         destination.real_encoder_sequence_length = source.real_encoder_sequence_length;
     }
     return true;
 }
 
-static bool ace_prepare_train_diffusion_batch(const DiTGGML &                              model,
+static bool ace_prepare_train_diffusion_batch(const DiTGGML &                               model,
                                               const std::vector<ACETrainDiffusionExample> & examples,
-                                              int                                          temporal_length,
-                                              int                                          encoder_sequence_length,
-                                              const std::vector<float> &                   null_condition,
-                                              uint64_t                                     seed,
-                                              const ACETrainDiffusionConfig &              config,
-                                              ACETrainDiffusionBatch &                     batch,
-                                              std::string &                                error) {
+                                              int                                           temporal_length,
+                                              int                                           encoder_sequence_length,
+                                              const std::vector<float> &                    null_condition,
+                                              uint64_t                                      seed,
+                                              const ACETrainDiffusionConfig &               config,
+                                              ACETrainDiffusionBatch &                      batch,
+                                              std::string &                                 error) {
     batch = {};
     error.clear();
     if (examples.empty() || temporal_length <= 0 || encoder_sequence_length <= 0 || model.cfg.patch_size <= 0 ||
@@ -157,21 +152,21 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
         error = "invalid diffusion batch dimensions or model configuration";
         return false;
     }
-    if (!std::isfinite(config.timestep_mean) || !std::isfinite(config.timestep_std) ||
-        config.timestep_std < 0.0f || !std::isfinite(config.cfg_dropout) || config.cfg_dropout < 0.0f ||
-        config.cfg_dropout > 1.0f || !std::isfinite(config.min_snr_gamma) || config.min_snr_gamma <= 0.0f) {
+    if (!std::isfinite(config.timestep_mean) || !std::isfinite(config.timestep_std) || config.timestep_std < 0.0f ||
+        !std::isfinite(config.cfg_dropout) || config.cfg_dropout < 0.0f || config.cfg_dropout > 1.0f ||
+        !std::isfinite(config.min_snr_gamma) || config.min_snr_gamma <= 0.0f) {
         error = "invalid diffusion sampling configuration";
         return false;
     }
 
-    const int batch_size       = (int) examples.size();
-    const int output_channels  = model.cfg.out_channels;
-    const int context_channels = model.cfg.in_channels - output_channels;
-    const int hidden_size      = (int) model.cond_emb_w->ne[0];
-    const int sequence_length  = temporal_length / model.cfg.patch_size;
-    const size_t target_size   = (size_t) output_channels * temporal_length;
-    const size_t context_size  = (size_t) context_channels * temporal_length;
-    const size_t encoder_size  = (size_t) hidden_size * encoder_sequence_length;
+    const int    batch_size       = (int) examples.size();
+    const int    output_channels  = model.cfg.out_channels;
+    const int    context_channels = model.cfg.in_channels - output_channels;
+    const int    hidden_size      = (int) model.cond_emb_w->ne[0];
+    const int    sequence_length  = temporal_length / model.cfg.patch_size;
+    const size_t target_size      = (size_t) output_channels * temporal_length;
+    const size_t context_size     = (size_t) context_channels * temporal_length;
+    const size_t encoder_size     = (size_t) hidden_size * encoder_sequence_length;
     if (config.cfg_dropout > 0.0f && null_condition.size() != (size_t) hidden_size) {
         error = "null condition width does not match the encoder hidden width";
         return false;
@@ -214,11 +209,10 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
     }
     for (int sample = 0; sample < batch_size; ++sample) {
         const ACETrainDiffusionExample & example = examples[(size_t) sample];
-        float * encoder_destination = batch.encoder_hidden.data() + (size_t) sample * encoder_size;
+        float * encoder_destination              = batch.encoder_hidden.data() + (size_t) sample * encoder_size;
         if (drop_condition[(size_t) sample]) {
             for (int position = 0; position < encoder_sequence_length; ++position) {
-                std::copy(null_condition.begin(),
-                          null_condition.end(),
+                std::copy(null_condition.begin(), null_condition.end(),
                           encoder_destination + (size_t) position * hidden_size);
             }
         } else {
@@ -231,35 +225,34 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
         first_logits[(size_t) sample] = config.timestep_mean + config.timestep_std * normal(generator);
     }
     for (int sample = 0; sample < batch_size; ++sample) {
-        const float second_logit = config.timestep_mean + config.timestep_std * normal(generator);
-        const float timestep = ace_train_timestep_from_logits(first_logits[(size_t) sample], second_logit);
+        const float second_logit         = config.timestep_mean + config.timestep_std * normal(generator);
+        const float timestep             = ace_train_timestep_from_logits(first_logits[(size_t) sample], second_logit);
         batch.timesteps[(size_t) sample] = timestep;
         batch.reference_timesteps[(size_t) sample] = timestep;
-        const float sample_weight = config.min_snr ? ace_train_flow_min_snr_weight(timestep, config.min_snr_gamma)
-                                                   : 1.0f;
+        const float sample_weight =
+            config.min_snr ? ace_train_flow_min_snr_weight(timestep, config.min_snr_gamma) : 1.0f;
         for (int time = 0; time < temporal_length; ++time) {
             batch.loss_weights[(size_t) sample * temporal_length + time] =
-                time < examples[(size_t) sample].real_temporal_length
-                    ? sample_weight / (float) examples[(size_t) sample].real_temporal_length
-                    : 0.0f;
+                time < examples[(size_t) sample].real_temporal_length ?
+                    sample_weight / (float) examples[(size_t) sample].real_temporal_length :
+                    0.0f;
         }
     }
 
     for (int sample = 0; sample < batch_size; ++sample) {
         const ACETrainDiffusionExample & example = examples[(size_t) sample];
         for (int time = 0; time < temporal_length; ++time) {
-            float * input = batch.input_latents.data() +
-                            ((size_t) sample * temporal_length + time) * model.cfg.in_channels;
+            float * input =
+                batch.input_latents.data() + ((size_t) sample * temporal_length + time) * model.cfg.in_channels;
             const float * context = example.context_latents.data() + (size_t) time * context_channels;
             std::copy(context, context + context_channels, input);
             for (int channel = 0; channel < output_channels; ++channel) {
-                const size_t latent_index = (size_t) time * output_channels + channel;
-                const size_t batch_index = (size_t) sample * target_size + latent_index;
-                const float data = example.target_latents[latent_index];
-                const float sampled_noise = noise[batch_index];
+                const size_t latent_index  = (size_t) time * output_channels + channel;
+                const size_t batch_index   = (size_t) sample * target_size + latent_index;
+                const float  data          = example.target_latents[latent_index];
+                const float  sampled_noise = noise[batch_index];
                 input[context_channels + channel] =
-                    batch.timesteps[(size_t) sample] * sampled_noise +
-                    (1.0f - batch.timesteps[(size_t) sample]) * data;
+                    batch.timesteps[(size_t) sample] * sampled_noise + (1.0f - batch.timesteps[(size_t) sample]) * data;
                 batch.target_velocity[batch_index] = sampled_noise - data;
             }
         }
@@ -271,16 +264,16 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
             (example.real_temporal_length + model.cfg.patch_size - 1) / model.cfg.patch_size;
         for (int query = 0; query < sequence_length; ++query) {
             for (int key = 0; key < sequence_length; ++key) {
-                const int distance = query > key ? query - key : key - query;
-                const bool within_window = model.cfg.sliding_window <= 0 || sequence_length <= model.cfg.sliding_window ||
+                const int  distance      = query > key ? query - key : key - query;
+                const bool within_window = model.cfg.sliding_window <= 0 ||
+                                           sequence_length <= model.cfg.sliding_window ||
                                            distance <= model.cfg.sliding_window;
-                const bool full_visible = key < real_sequence_length;
-                const bool visible = full_visible && within_window;
-                const size_t offset = (size_t) sample * sequence_length * sequence_length +
-                                      (size_t) query * sequence_length + key;
-                batch.self_attention_mask[offset] = ggml_fp32_to_fp16(visible ? 0.0f : -INFINITY);
-                batch.full_self_attention_mask[offset] =
-                    ggml_fp32_to_fp16(full_visible ? 0.0f : -INFINITY);
+                const bool   full_visible = key < real_sequence_length;
+                const bool   visible      = full_visible && within_window;
+                const size_t offset =
+                    (size_t) sample * sequence_length * sequence_length + (size_t) query * sequence_length + key;
+                batch.self_attention_mask[offset]      = ggml_fp32_to_fp16(visible ? 0.0f : -INFINITY);
+                batch.full_self_attention_mask[offset] = ggml_fp32_to_fp16(full_visible ? 0.0f : -INFINITY);
             }
             for (int key = 0; key < encoder_sequence_length; ++key) {
                 const size_t offset = (size_t) sample * encoder_sequence_length * sequence_length +
@@ -304,8 +297,7 @@ static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             trai
         !matches(training.input_latents, batch.input_latents) ||
         !matches(training.encoder_hidden, batch.encoder_hidden) ||
         !matches(training.target_velocity, batch.target_velocity) ||
-        !matches(training.loss_weights, batch.loss_weights) ||
-        !matches(training.timestep, batch.timesteps) ||
+        !matches(training.loss_weights, batch.loss_weights) || !matches(training.timestep, batch.timesteps) ||
         !matches(training.reference_timestep, batch.reference_timesteps) || !training.positions ||
         (size_t) ggml_nelements(training.positions) != batch.positions.size() ||
         (training.self_attention_mask &&
@@ -318,39 +310,27 @@ static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             trai
         return false;
     }
 
-    ggml_backend_tensor_set(
-        training.input_latents, batch.input_latents.data(), 0, batch.input_latents.size() * sizeof(float));
-    ggml_backend_tensor_set(
-        training.encoder_hidden, batch.encoder_hidden.data(), 0, batch.encoder_hidden.size() * sizeof(float));
-    ggml_backend_tensor_set(training.target_velocity,
-                            batch.target_velocity.data(),
-                            0,
+    ggml_backend_tensor_set(training.input_latents, batch.input_latents.data(), 0,
+                            batch.input_latents.size() * sizeof(float));
+    ggml_backend_tensor_set(training.encoder_hidden, batch.encoder_hidden.data(), 0,
+                            batch.encoder_hidden.size() * sizeof(float));
+    ggml_backend_tensor_set(training.target_velocity, batch.target_velocity.data(), 0,
                             batch.target_velocity.size() * sizeof(float));
-    ggml_backend_tensor_set(
-        training.loss_weights, batch.loss_weights.data(), 0, batch.loss_weights.size() * sizeof(float));
-    ggml_backend_tensor_set(
-        training.timestep, batch.timesteps.data(), 0, batch.timesteps.size() * sizeof(float));
-    ggml_backend_tensor_set(training.reference_timestep,
-                            batch.reference_timesteps.data(),
-                            0,
+    ggml_backend_tensor_set(training.loss_weights, batch.loss_weights.data(), 0,
+                            batch.loss_weights.size() * sizeof(float));
+    ggml_backend_tensor_set(training.timestep, batch.timesteps.data(), 0, batch.timesteps.size() * sizeof(float));
+    ggml_backend_tensor_set(training.reference_timestep, batch.reference_timesteps.data(), 0,
                             batch.reference_timesteps.size() * sizeof(float));
-    ggml_backend_tensor_set(
-        training.positions, batch.positions.data(), 0, batch.positions.size() * sizeof(int32_t));
+    ggml_backend_tensor_set(training.positions, batch.positions.data(), 0, batch.positions.size() * sizeof(int32_t));
     if (training.self_attention_mask) {
-        ggml_backend_tensor_set(training.self_attention_mask,
-                                batch.self_attention_mask.data(),
-                                0,
+        ggml_backend_tensor_set(training.self_attention_mask, batch.self_attention_mask.data(), 0,
                                 batch.self_attention_mask.size() * sizeof(ggml_fp16_t));
     }
     if (training.full_self_attention_mask) {
-        ggml_backend_tensor_set(training.full_self_attention_mask,
-                                batch.full_self_attention_mask.data(),
-                                0,
+        ggml_backend_tensor_set(training.full_self_attention_mask, batch.full_self_attention_mask.data(), 0,
                                 batch.full_self_attention_mask.size() * sizeof(ggml_fp16_t));
     }
-    ggml_backend_tensor_set(training.cross_attention_mask,
-                            batch.cross_attention_mask.data(),
-                            0,
+    ggml_backend_tensor_set(training.cross_attention_mask, batch.cross_attention_mask.data(), 0,
                             batch.cross_attention_mask.size() * sizeof(ggml_fp16_t));
     return true;
 }

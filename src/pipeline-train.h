@@ -22,8 +22,8 @@ struct ACETrainPreprocessConfig {
     bool                use_genre    = false;
 };
 
-AceRequest ace_training_request(const ACETrainingExample & example,
-                                float                      duration,
+AceRequest ace_training_request(const ACETrainingExample &       example,
+                                float                            duration,
                                 const ACETrainPreprocessConfig & config);
 
 bool ace_prepare_training_example(AceSynth *                       synth,

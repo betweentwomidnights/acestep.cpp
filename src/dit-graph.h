@@ -375,9 +375,9 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
 static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
                                                  DiTGGML *             m,
                                                  int                   layer_idx,
-                                                 struct ggml_tensor *  hidden,     // [H, S, N]
-                                                 struct ggml_tensor *  tproj,      // [6H, N] f32 combined temb projection
-                                                 struct ggml_tensor *  enc,        // [H, enc_S, N] or NULL
+                                                 struct ggml_tensor *  hidden,  // [H, S, N]
+                                                 struct ggml_tensor *  tproj,   // [6H, N] f32 combined temb projection
+                                                 struct ggml_tensor *  enc,     // [H, enc_S, N] or NULL
                                                  struct ggml_tensor *  positions,  // [S] int32
                                                  struct ggml_tensor *  sa_mask,    // [S, S, 1, N] or NULL
                                                  struct ggml_tensor *  ca_mask,    // [enc_S, S, 1, N] or NULL
@@ -473,13 +473,12 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
 //   "velocity"        [out_channels, T, N]  predicted flow velocity
 static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
                                                  struct ggml_context * ctx,
-                                                 int                   T,           // temporal length (before patching)
-                                                 int                   enc_S,       // encoder sequence length
-                                                 int                   N,           // batch size
-                                                 struct ggml_tensor ** p_input,     // [out] input tensor to fill
-                                                 struct ggml_tensor ** p_output,    // [out] output tensor to read
+                                                 int                   T,         // temporal length (before patching)
+                                                 int                   enc_S,     // encoder sequence length
+                                                 int                   N,         // batch size
+                                                 struct ggml_tensor ** p_input,   // [out] input tensor to fill
+                                                 struct ggml_tensor ** p_output,  // [out] output tensor to read
                                                  bool                  gradients = false) {
-
     DiTGGMLConfig & c = m->cfg;
     int             S = T / c.patch_size;  // sequence length after patching
     int             H = c.hidden_size;
@@ -607,13 +606,11 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     }
     struct ggml_tensor * oss_flat = ggml_reshape_1d(ctx, oss, 2 * H);
 
-    struct ggml_tensor * temb_pair = ggml_concat(ctx, temb, temb, 0);
+    struct ggml_tensor * temb_pair      = ggml_concat(ctx, temb, temb, 0);
     struct ggml_tensor * out_modulation = ggml_add(ctx, temb_pair, oss_flat);
     size_t               Hb             = H * sizeof(float);
-    struct ggml_tensor * out_shift =
-        ggml_view_3d(ctx, out_modulation, H, 1, N, Hb, out_modulation->nb[1], 0);
-    struct ggml_tensor * out_scale =
-        ggml_view_3d(ctx, out_modulation, H, 1, N, Hb, out_modulation->nb[1], Hb);
+    struct ggml_tensor * out_shift      = ggml_view_3d(ctx, out_modulation, H, 1, N, Hb, out_modulation->nb[1], 0);
+    struct ggml_tensor * out_scale      = ggml_view_3d(ctx, out_modulation, H, 1, N, Hb, out_modulation->nb[1], Hb);
 
     struct ggml_tensor * norm_out = dit_ggml_rms_norm_weighted(ctx, hidden, m->norm_out, c.rms_norm_eps);
     norm_out                      = dit_ggml_adaln(ctx, norm_out, out_scale, out_shift, m->scalar_one);

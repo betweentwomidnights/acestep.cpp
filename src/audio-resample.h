@@ -132,8 +132,8 @@ static float * audio_resample(const float * in, int n_in, int sr_in, int sr_out,
     double fc = 0.5 * ((ratio < 1.0) ? ratio : 1.0);
 
     // build polyphase filter table (one-time cost: ~16K coeff, microseconds)
-    float(*table)[RESAMPLE_N_TAPS] =
-        (float(*)[RESAMPLE_N_TAPS]) malloc(RESAMPLE_N_PHASES * RESAMPLE_N_TAPS * sizeof(float));
+    float (*table)[RESAMPLE_N_TAPS] =
+        (float (*)[RESAMPLE_N_TAPS]) malloc(RESAMPLE_N_PHASES * RESAMPLE_N_TAPS * sizeof(float));
     if (!table) {
         free(out);
         *n_out = 0;

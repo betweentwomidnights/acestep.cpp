@@ -21,31 +21,31 @@
 #include <vector>
 
 struct ACETrainCommand {
-    const char * models_dir    = nullptr;
-    const char * dataset_dir   = nullptr;
-    const char * output_dir    = nullptr;
-    const char * resume_dir    = nullptr;
-    const char * dit_name      = nullptr;
-    const char * text_name     = nullptr;
-    const char * vae_name      = nullptr;
-    std::string adapter_type   = "dora-rows";
-    std::string module_profile = "balanced";
-    int         rank            = 64;
-    int         alpha           = 128;
-    int         epochs          = 10;
-    int         batch_size      = 1;
-    int         accumulation    = 1;
-    int         warmup_steps    = 10;
-    int         restart_count   = 1;
-    uint64_t    seed            = 42;
-    float       learning_rate   = 1e-4f;
-    float       weight_decay    = 0.01f;
-    float       max_grad_norm   = 1.0f;
-    float       cfg_dropout     = 0.15f;
-    bool        min_snr         = false;
-    float       min_snr_gamma   = 5.0f;
-    bool        validate_dataset = false;
-    ACETrainSchedule schedule   = ACE_TRAIN_SCHEDULE_COSINE;
+    const char *             models_dir       = nullptr;
+    const char *             dataset_dir      = nullptr;
+    const char *             output_dir       = nullptr;
+    const char *             resume_dir       = nullptr;
+    const char *             dit_name         = nullptr;
+    const char *             text_name        = nullptr;
+    const char *             vae_name         = nullptr;
+    std::string              adapter_type     = "dora-rows";
+    std::string              module_profile   = "balanced";
+    int                      rank             = 64;
+    int                      alpha            = 128;
+    int                      epochs           = 10;
+    int                      batch_size       = 1;
+    int                      accumulation     = 1;
+    int                      warmup_steps     = 10;
+    int                      restart_count    = 1;
+    uint64_t                 seed             = 42;
+    float                    learning_rate    = 1e-4f;
+    float                    weight_decay     = 0.01f;
+    float                    max_grad_norm    = 1.0f;
+    float                    cfg_dropout      = 0.15f;
+    bool                     min_snr          = false;
+    float                    min_snr_gamma    = 5.0f;
+    bool                     validate_dataset = false;
+    ACETrainSchedule         schedule         = ACE_TRAIN_SCHEDULE_COSINE;
     ACETrainPreprocessConfig preprocess;
 };
 
@@ -86,15 +86,14 @@ static void usage(const char * program) {
                  "  --text-encoder <name>        Text encoder filename in the model registry\n"
                  "  --vae <name>                VAE filename in the model registry\n\n"
                  "Set GGML_BACKEND=CUDA0, Vulkan0, MTL0, or CPU to select a device.\n",
-                 ACE_VERSION,
-                 program);
+                 ACE_VERSION, program);
 }
 
 static bool read_integer(const char * value, int & result) {
     if (!value || !*value) {
         return false;
     }
-    char * end = nullptr;
+    char *     end    = nullptr;
     const long parsed = std::strtol(value, &end, 10);
     if (!end || *end || parsed < 0 || parsed > 2147483647L) {
         return false;
@@ -107,7 +106,7 @@ static bool read_seed(const char * value, uint64_t & result) {
     if (!value || !*value || *value == '-') {
         return false;
     }
-    char * end = nullptr;
+    char *                   end    = nullptr;
     const unsigned long long parsed = std::strtoull(value, &end, 10);
     if (!end || *end) {
         return false;
@@ -120,7 +119,7 @@ static bool read_float(const char * value, float & result) {
     if (!value || !*value) {
         return false;
     }
-    char * end = nullptr;
+    char *      end    = nullptr;
     const float parsed = std::strtof(value, &end);
     if (!end || *end || !std::isfinite(parsed)) {
         return false;
@@ -132,7 +131,7 @@ static bool read_float(const char * value, float & result) {
 static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
     for (int i = 1; i < argc; ++i) {
         const char * option = argv[i];
-        auto next = [&]() -> const char * {
+        auto         next   = [&]() -> const char * {
             return i + 1 < argc ? argv[++i] : nullptr;
         };
         if (!std::strcmp(option, "--models")) {
@@ -258,12 +257,13 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
             return false;
         }
     }
-    const bool required_paths = command.validate_dataset ? command.dataset_dir != nullptr
-                                                         : command.models_dir && command.dataset_dir && command.output_dir;
-    return required_paths && command.rank > 0 && command.alpha > 0 &&
-           command.epochs > 0 && command.batch_size > 0 && command.accumulation > 0 && command.restart_count > 0 &&
-           command.learning_rate > 0.0f && command.weight_decay >= 0.0f && command.max_grad_norm >= 0.0f &&
-           command.cfg_dropout >= 0.0f && command.cfg_dropout <= 1.0f && command.min_snr_gamma > 0.0f &&
+    const bool required_paths = command.validate_dataset ?
+                                    command.dataset_dir != nullptr :
+                                    command.models_dir && command.dataset_dir && command.output_dir;
+    return required_paths && command.rank > 0 && command.alpha > 0 && command.epochs > 0 && command.batch_size > 0 &&
+           command.accumulation > 0 && command.restart_count > 0 && command.learning_rate > 0.0f &&
+           command.weight_decay >= 0.0f && command.max_grad_norm >= 0.0f && command.cfg_dropout >= 0.0f &&
+           command.cfg_dropout <= 1.0f && command.min_snr_gamma > 0.0f &&
            (command.adapter_type == "lora" || command.adapter_type == "dora-rows") &&
            (command.module_profile == "attention" || command.module_profile == "balanced");
 }
@@ -275,25 +275,25 @@ static const ModelEntry * choose_model(const std::vector<ModelEntry> & entries, 
     return name ? registry_find(entries, name) : &entries[0];
 }
 
-static bool preprocess_dataset(const ACETrainCommand &             command,
-                               const ModelEntry &                  dit_entry,
-                               const ModelEntry &                  text_entry,
-                               const ModelEntry &                  vae_entry,
+static bool preprocess_dataset(const ACETrainCommand &                 command,
+                               const ModelEntry &                      dit_entry,
+                               const ModelEntry &                      text_entry,
+                               const ModelEntry &                      vae_entry,
                                std::vector<ACETrainDiffusionExample> & prepared,
-                               std::vector<float> &                silence_latents,
-                               std::vector<float> &                null_condition,
-                               std::string &                       error) {
+                               std::vector<float> &                    silence_latents,
+                               std::vector<float> &                    null_condition,
+                               std::string &                           error) {
     std::vector<ACETrainingExample> sources;
     if (!ace_training_load_dataset(command.dataset_dir, sources, error)) {
         return false;
     }
-    ModelStore * store = store_create(EVICT_STRICT);
+    ModelStore *   store = store_create(EVICT_STRICT);
     AceSynthParams params;
     ace_synth_default_params(&params);
-    params.dit_path = dit_entry.path.c_str();
+    params.dit_path          = dit_entry.path.c_str();
     params.text_encoder_path = text_entry.path.c_str();
-    params.vae_path = vae_entry.path.c_str();
-    AceSynth * synth = ace_synth_load(store, &params);
+    params.vae_path          = vae_entry.path.c_str();
+    AceSynth * synth         = ace_synth_load(store, &params);
     if (!synth) {
         store_free(store);
         error = "could not initialize ACE-Step preprocessing models";
@@ -318,12 +318,12 @@ static bool preprocess_dataset(const ACETrainCommand &             command,
     return true;
 }
 
-static bool train_adapter(const ACETrainCommand &                   command,
-                          const ModelEntry &                        dit_entry,
+static bool train_adapter(const ACETrainCommand &                       command,
+                          const ModelEntry &                            dit_entry,
                           const std::vector<ACETrainDiffusionExample> & prepared,
-                          const std::vector<float> &                silence_latents,
-                          const std::vector<float> &                null_condition,
-                          std::string &                             error) {
+                          const std::vector<float> &                    silence_latents,
+                          const std::vector<float> &                    null_condition,
+                          std::string &                                 error) {
     std::string base_model_fingerprint;
     if (!ace_file_fingerprint(dit_entry.path, base_model_fingerprint, error)) {
         return false;
@@ -335,31 +335,24 @@ static bool train_adapter(const ACETrainCommand &                   command,
     }
 
     std::vector<ACETrainAdapterTarget> targets;
-    if (!ace_train_adapter_targets(
-            model, command.module_profile, command.rank, command.alpha, targets, error)) {
+    if (!ace_train_adapter_targets(model, command.module_profile, command.rank, command.alpha, targets, error)) {
         dit_ggml_free(&model);
         return false;
     }
-    ACETrainAdapterState state;
+    ACETrainAdapterState     state;
     ACETrainAdapterOptimizer optimizer;
-    int completed_epochs = 0;
+    int                      completed_epochs = 0;
     if (command.resume_dir) {
         ACETrainCheckpointKind checkpoint_kind;
         if (!ace_train_checkpoint_kind(command.resume_dir, checkpoint_kind, error)) {
             dit_ggml_free(&model);
             return false;
         }
-        const bool loaded = checkpoint_kind == ACE_TRAIN_CHECKPOINT_FULL ?
-                                ace_load_train_checkpoint(command.resume_dir,
-                                                          targets,
-                                                          state,
-                                                          optimizer,
-                                                          completed_epochs,
-                                                          base_model_fingerprint,
-                                                          command.adapter_type,
-                                                          error) :
-                                ace_load_train_adapter_checkpoint(
-                                    command.resume_dir, targets, state, error, command.adapter_type);
+        const bool loaded =
+            checkpoint_kind == ACE_TRAIN_CHECKPOINT_FULL ?
+                ace_load_train_checkpoint(command.resume_dir, targets, state, optimizer, completed_epochs,
+                                          base_model_fingerprint, command.adapter_type, error) :
+                ace_load_train_adapter_checkpoint(command.resume_dir, targets, state, error, command.adapter_type);
         if (!loaded) {
             dit_ggml_free(&model);
             return false;
@@ -371,19 +364,19 @@ static bool train_adapter(const ACETrainCommand &                   command,
 
     const int batches_per_epoch = ((int) prepared.size() + command.batch_size - 1) / command.batch_size;
     const int updates_per_epoch = (batches_per_epoch + command.accumulation - 1) / command.accumulation;
-    const int total_steps = updates_per_epoch * command.epochs;
+    const int total_steps       = updates_per_epoch * command.epochs;
     if (completed_epochs > command.epochs) {
         error = "resume checkpoint has completed more epochs than requested";
         dit_ggml_free(&model);
         return false;
     }
     ACETrainAdapterGradientAccumulator accumulator;
-    ACETrainAdamWConfig optimizer_config;
-    optimizer_config.weight_decay = command.weight_decay;
+    ACETrainAdamWConfig                optimizer_config;
+    optimizer_config.weight_decay      = command.weight_decay;
     optimizer_config.max_gradient_norm = command.max_grad_norm;
     ACETrainDiffusionConfig diffusion_config;
-    diffusion_config.cfg_dropout = command.cfg_dropout;
-    diffusion_config.min_snr = command.min_snr;
+    diffusion_config.cfg_dropout   = command.cfg_dropout;
+    diffusion_config.min_snr       = command.min_snr;
     diffusion_config.min_snr_gamma = command.min_snr_gamma;
 
     std::vector<size_t> order(prepared.size());
@@ -391,11 +384,11 @@ static bool train_adapter(const ACETrainCommand &                   command,
     for (int epoch = completed_epochs; epoch < command.epochs; ++epoch) {
         std::mt19937_64 shuffle(command.seed + (uint64_t) epoch);
         std::shuffle(order.begin(), order.end(), shuffle);
-        double epoch_loss = 0.0;
-        int epoch_batches = 0;
+        double epoch_loss    = 0.0;
+        int    epoch_batches = 0;
         for (int batch_index = 0; batch_index < batches_per_epoch; ++batch_index) {
-            const int first = batch_index * command.batch_size;
-            const int last = std::min(first + command.batch_size, (int) prepared.size());
+            const int                             first = batch_index * command.batch_size;
+            const int                             last  = std::min(first + command.batch_size, (int) prepared.size());
             std::vector<ACETrainDiffusionExample> sources;
             sources.reserve((size_t) (last - first));
             for (int i = first; i < last; ++i) {
@@ -403,41 +396,23 @@ static bool train_adapter(const ACETrainCommand &                   command,
             }
 
             std::vector<ACETrainDiffusionExample> collated;
-            int temporal_length = 0;
-            int encoder_sequence_length = 0;
-            if (!ace_collate_training_examples(model,
-                                                sources,
-                                                silence_latents,
-                                                null_condition,
-                                                collated,
-                                                temporal_length,
-                                                encoder_sequence_length,
-                                                error)) {
+            int                                   temporal_length         = 0;
+            int                                   encoder_sequence_length = 0;
+            if (!ace_collate_training_examples(model, sources, silence_latents, null_condition, collated,
+                                               temporal_length, encoder_sequence_length, error)) {
                 dit_ggml_free(&model);
                 return false;
             }
             ACETrainDiffusionBatch batch;
-            const uint64_t batch_seed = command.seed + (uint64_t) epoch * 1000000ULL + (uint64_t) batch_index;
-            if (!ace_prepare_train_diffusion_batch(model,
-                                                   collated,
-                                                   temporal_length,
-                                                   encoder_sequence_length,
-                                                   null_condition,
-                                                   batch_seed,
-                                                   diffusion_config,
-                                                   batch,
-                                                   error)) {
+            const uint64_t         batch_seed = command.seed + (uint64_t) epoch * 1000000ULL + (uint64_t) batch_index;
+            if (!ace_prepare_train_diffusion_batch(model, collated, temporal_length, encoder_sequence_length,
+                                                   null_condition, batch_seed, diffusion_config, batch, error)) {
                 dit_ggml_free(&model);
                 return false;
             }
             ACETrainDiTGraph graph;
-            if (!ace_build_train_dit_graph(model,
-                                           state,
-                                           temporal_length,
-                                           encoder_sequence_length,
-                                           (int) collated.size(),
-                                           graph,
-                                           error)) {
+            if (!ace_build_train_dit_graph(model, state, temporal_length, encoder_sequence_length,
+                                           (int) collated.size(), graph, error)) {
                 dit_ggml_free(&model);
                 return false;
             }
@@ -451,49 +426,36 @@ static bool train_adapter(const ACETrainCommand &                   command,
             epoch_loss += loss;
             epoch_batches += 1;
 
-            const bool update = accumulator.microbatch_count == command.accumulation || batch_index + 1 == batches_per_epoch;
+            const bool update =
+                accumulator.microbatch_count == command.accumulation || batch_index + 1 == batches_per_epoch;
             if (update) {
-                optimizer_config.learning_rate = ace_train_learning_rate(command.learning_rate,
-                                                                         optimizer.step,
-                                                                         total_steps,
-                                                                         command.warmup_steps,
-                                                                         command.schedule,
-                                                                         command.restart_count);
-                if (!ace_train_adapter_adamw_step_accumulated(
-                        graph, state, optimizer, optimizer_config, accumulator, error)) {
+                optimizer_config.learning_rate =
+                    ace_train_learning_rate(command.learning_rate, optimizer.step, total_steps, command.warmup_steps,
+                                            command.schedule, command.restart_count);
+                if (!ace_train_adapter_adamw_step_accumulated(graph, state, optimizer, optimizer_config, accumulator,
+                                                              error)) {
                     ace_free_train_dit_graph(graph);
                     dit_ggml_free(&model);
                     return false;
                 }
-                std::fprintf(stderr,
-                             "[Ace-Train] epoch=%d/%d step=%d/%d batch=%d/%d loss=%.6f lr=%.8g\n",
-                             epoch + 1,
-                             command.epochs,
-                             optimizer.step,
-                             total_steps,
-                             batch_index + 1,
-                             batches_per_epoch,
-                             loss,
+                std::fprintf(stderr, "[Ace-Train] epoch=%d/%d step=%d/%d batch=%d/%d loss=%.6f lr=%.8g\n", epoch + 1,
+                             command.epochs, optimizer.step, total_steps, batch_index + 1, batches_per_epoch, loss,
                              optimizer_config.learning_rate);
             }
             ace_free_train_dit_graph(graph);
         }
         const std::string checkpoint =
             std::string(command.output_dir) + "/checkpoint-epoch-" + std::to_string(epoch + 1);
-        if (!ace_save_train_checkpoint(
-                checkpoint, state, optimizer, epoch + 1, base_model_fingerprint, error)) {
+        if (!ace_save_train_checkpoint(checkpoint, state, optimizer, epoch + 1, base_model_fingerprint, error)) {
             dit_ggml_free(&model);
             return false;
         }
-        std::fprintf(stderr,
-                     "[Ace-Train] epoch=%d mean_loss=%.6f checkpoint=%s\n",
-                     epoch + 1,
-                     epoch_loss / (double) epoch_batches,
-                     checkpoint.c_str());
+        std::fprintf(stderr, "[Ace-Train] epoch=%d mean_loss=%.6f checkpoint=%s\n", epoch + 1,
+                     epoch_loss / (double) epoch_batches, checkpoint.c_str());
     }
 
-    const bool saved = ace_save_train_checkpoint(
-        command.output_dir, state, optimizer, command.epochs, base_model_fingerprint, error);
+    const bool saved =
+        ace_save_train_checkpoint(command.output_dir, state, optimizer, command.epochs, base_model_fingerprint, error);
     dit_ggml_free(&model);
     return saved;
 }
@@ -507,7 +469,7 @@ int main(int argc, char ** argv) {
 
     if (command.validate_dataset) {
         std::vector<ACETrainingExample> examples;
-        std::string error;
+        std::string                     error;
         if (!ace_training_load_dataset(command.dataset_dir, examples, error)) {
             std::fprintf(stderr, "[Ace-Train] ERROR: %s\n", error.c_str());
             return 1;
@@ -521,10 +483,8 @@ int main(int argc, char ** argv) {
             }
             duration += (double) samples / 48000.0;
         }
-        std::fprintf(stderr,
-                     "[Ace-Train] Dataset valid: %zu paired examples, %.2f minutes decoded at 48 kHz\n",
-                     examples.size(),
-                     duration / 60.0);
+        std::fprintf(stderr, "[Ace-Train] Dataset valid: %zu paired examples, %.2f minutes decoded at 48 kHz\n",
+                     examples.size(), duration / 60.0);
         return 0;
     }
 
@@ -533,20 +493,19 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "[Ace-Train] ERROR: could not scan models directory\n");
         return 1;
     }
-    const ModelEntry * dit = choose_model(registry.dit, command.dit_name);
+    const ModelEntry * dit          = choose_model(registry.dit, command.dit_name);
     const ModelEntry * text_encoder = choose_model(registry.text_enc, command.text_name);
-    const ModelEntry * vae = choose_model(registry.vae, command.vae_name);
+    const ModelEntry * vae          = choose_model(registry.vae, command.vae_name);
     if (!dit || !text_encoder || !vae) {
         std::fprintf(stderr, "[Ace-Train] ERROR: selected DiT, text encoder, or VAE model was not found\n");
         return 1;
     }
 
-    std::string error;
+    std::string                           error;
     std::vector<ACETrainDiffusionExample> prepared;
-    std::vector<float> silence_latents;
-    std::vector<float> null_condition;
-    if (!preprocess_dataset(
-            command, *dit, *text_encoder, *vae, prepared, silence_latents, null_condition, error) ||
+    std::vector<float>                    silence_latents;
+    std::vector<float>                    null_condition;
+    if (!preprocess_dataset(command, *dit, *text_encoder, *vae, prepared, silence_latents, null_condition, error) ||
         !train_adapter(command, *dit, prepared, silence_latents, null_condition, error)) {
         std::fprintf(stderr, "[Ace-Train] ERROR: %s\n", error.c_str());
         return 1;

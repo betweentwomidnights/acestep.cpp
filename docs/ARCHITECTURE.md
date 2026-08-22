@@ -182,8 +182,9 @@ EOF
     --request /tmp/request0.json
 ```
 
-With an adapter (LoRA today, PEFT directory or ComfyUI single file), set
-`adapter` in the JSON and point `--adapters` at a directory that contains it:
+With an adapter, set `adapter` in the JSON and point `--adapters` at a directory
+that contains it. See the [adapter format reference](../adapters/README.md) for
+the supported LoRA and DoRA layouts:
 
 ```bash
 # JSON carries the adapter name, CLI passes the directory

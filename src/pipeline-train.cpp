@@ -13,8 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 
-static std::string ace_training_caption(const ACETrainingMetadata & metadata,
-                                        const ACETrainPreprocessConfig & config) {
+static std::string ace_training_caption(const ACETrainingMetadata & metadata, const ACETrainPreprocessConfig & config) {
     std::string caption = config.use_genre && !metadata.genre.empty() ? metadata.genre : metadata.caption;
     if (metadata.custom_tag.empty()) {
         return caption;
@@ -28,19 +27,19 @@ static std::string ace_training_caption(const ACETrainingMetadata & metadata,
     return caption.empty() ? metadata.custom_tag : metadata.custom_tag + ", " + caption;
 }
 
-AceRequest ace_training_request(const ACETrainingExample & example,
-                                float                      duration,
+AceRequest ace_training_request(const ACETrainingExample &       example,
+                                float                            duration,
                                 const ACETrainPreprocessConfig & config) {
     AceRequest request;
     request_init(&request);
-    request.caption         = ace_training_caption(example.metadata, config);
-    request.lyrics          = example.metadata.lyrics;
-    request.bpm             = example.metadata.bpm;
-    request.duration        = duration;
-    request.keyscale        = example.metadata.key;
-    request.timesignature   = std::to_string(example.metadata.time_signature);
-    request.vocal_language  = "unknown";
-    request.task_type       = TASK_TEXT2MUSIC;
+    request.caption        = ace_training_caption(example.metadata, config);
+    request.lyrics         = example.metadata.lyrics;
+    request.bpm            = example.metadata.bpm;
+    request.duration       = duration;
+    request.keyscale       = example.metadata.key;
+    request.timesignature  = std::to_string(example.metadata.time_signature);
+    request.vocal_language = "unknown";
+    request.task_type      = TASK_TEXT2MUSIC;
     if (request.lyrics.empty() && example.metadata.is_instrumental) {
         request.lyrics = "[Instrumental]";
     }
@@ -88,7 +87,7 @@ static bool ace_prepare_training_audio(AceSynth *                 synth,
     }
 
     int     audio_length = 0;
-    float * planar = audio_read_48k(source.audio_path.string().c_str(), &audio_length);
+    float * planar       = audio_read_48k(source.audio_path.string().c_str(), &audio_length);
     if (!planar || audio_length <= 0) {
         free(planar);
         error = "could not decode training audio at 48 kHz: " + source.audio_path.string();
@@ -101,37 +100,31 @@ static bool ace_prepare_training_audio(AceSynth *                 synth,
         return false;
     }
 
-    const int maximum_latent_length = audio_length / 1920 + 64;
+    const int          maximum_latent_length = audio_length / 1920 + 64;
     std::vector<float> target((size_t) maximum_latent_length * synth->Oc);
-    const int real_temporal_length = vae_enc_encode_tiled_sampled(encoder,
-                                                                  audio,
-                                                                  audio_length,
-                                                                  target.data(),
-                                                                  maximum_latent_length,
-                                                                  seed,
-                                                                  synth->params.vae_chunk,
-                                                                  synth->params.vae_overlap);
+    const int          real_temporal_length =
+        vae_enc_encode_tiled_sampled(encoder, audio, audio_length, target.data(), maximum_latent_length, seed,
+                                     synth->params.vae_chunk, synth->params.vae_overlap);
     free(audio);
     if (real_temporal_length <= 0) {
         error = "VAE training posterior encoding failed: " + source.audio_path.string();
         return false;
     }
 
-    const int patch_size = synth->meta->cfg.patch_size;
-    const int temporal_length =
-        ((real_temporal_length + patch_size - 1) / patch_size) * patch_size;
+    const int patch_size      = synth->meta->cfg.patch_size;
+    const int temporal_length = ((real_temporal_length + patch_size - 1) / patch_size) * patch_size;
     if ((size_t) temporal_length * synth->Oc > synth->meta->silence_full.size()) {
         error = "training audio exceeds the DiT model's maximum latent duration: " + source.audio_path.string();
         return false;
     }
     target.resize((size_t) temporal_length * synth->Oc, 0.0f);
 
-    duration = (float) audio_length / 48000.0f;
+    duration                = (float) audio_length / 48000.0f;
     prepared.target_latents = std::move(target);
     prepared.context_latents.resize((size_t) temporal_length * synth->ctx_ch);
     for (int time = 0; time < temporal_length; ++time) {
-        float * destination = prepared.context_latents.data() + (size_t) time * synth->ctx_ch;
-        const float * silence = synth->meta->silence_full.data() + (size_t) time * synth->Oc;
+        float *       destination = prepared.context_latents.data() + (size_t) time * synth->ctx_ch;
+        const float * silence     = synth->meta->silence_full.data() + (size_t) time * synth->Oc;
         std::copy(silence, silence + synth->Oc, destination);
         std::fill(destination + synth->Oc, destination + synth->ctx_ch, 1.0f);
     }
@@ -162,8 +155,8 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
         }
         ModelHandle encoder_guard(synth->store, encoder);
         for (size_t i = 0; i < sources.size(); ++i) {
-            if (!ace_prepare_training_audio(
-                    synth, encoder, sources[i], seed + (uint64_t) i, prepared[i], durations[i], error)) {
+            if (!ace_prepare_training_audio(synth, encoder, sources[i], seed + (uint64_t) i, prepared[i], durations[i],
+                                            error)) {
                 return false;
             }
         }
@@ -174,7 +167,7 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
     for (size_t i = 0; i < sources.size(); ++i) {
         requests.push_back(ace_training_request(sources[i], durations[i], config));
     }
-    SynthState state = {};
+    SynthState state         = {};
     state.Oc                 = synth->Oc;
     state.ctx_ch             = synth->ctx_ch;
     state.rr                 = requests[0];
