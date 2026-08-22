@@ -271,13 +271,15 @@ int main() {
                                filesystem_error);
     std::filesystem::create_directories(
         published / ".checkpoint-generations" / "generation-interrupted", filesystem_error);
-    std::filesystem::create_directory_symlink(
-        std::filesystem::path(".checkpoint-generations") / "generation-test",
-        published / "checkpoint.current",
-        filesystem_error);
+    bool pointer_written = false;
+    {
+        std::ofstream pointer(published / "checkpoint.current", std::ios::binary | std::ios::trunc);
+        pointer << (std::filesystem::path(".checkpoint-generations") / "generation-test").generic_string();
+        pointer_written = pointer.good();
+    }
     std::vector<float> published_q;
     std::vector<float> published_v;
-    if (filesystem_error || !reload_adapter(published, 1.0f, published_q, published_v)) {
+    if (filesystem_error || !pointer_written || !reload_adapter(published, 1.0f, published_q, published_v)) {
         std::fputs("native adapter reload did not honor the selected checkpoint generation\n", stderr);
         return 1;
     }

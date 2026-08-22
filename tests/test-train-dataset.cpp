@@ -70,7 +70,8 @@ int main() {
     AceRequest request = ace_training_request(examples[0], 42.5f, preprocess);
     if (request.caption != "reference_voice, sparse electronic pop" || request.lyrics != parsed.lyrics ||
         request.bpm != 70 || request.keyscale != "E minor" || request.timesignature != "4" ||
-        request.duration != 42.5f) {
+        request.duration != 42.5f || request.seed != -1 || request.lm_batch_size != 1 ||
+        request.output_format != "mp3" || request.adapter_scale != 1.0f) {
         std::filesystem::remove_all(directory);
         return fail("default training request must match Gary's prepended-tag caption semantics");
     }

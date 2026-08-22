@@ -4,6 +4,8 @@
 #pragma once
 
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 static bool adapter_checkpoint_directory(const std::filesystem::path & requested,
@@ -36,12 +38,21 @@ static bool adapter_checkpoint_directory(const std::filesystem::path & requested
         resolved = requested;
         return true;
     }
-    if (!std::filesystem::is_symlink(pointer_status)) {
+    std::filesystem::path target;
+    if (std::filesystem::is_symlink(pointer_status)) {
+        target = std::filesystem::read_symlink(pointer, filesystem_error);
+    } else if (std::filesystem::is_regular_file(pointer_status)) {
+        std::ifstream input(pointer, std::ios::binary);
+        const std::string contents((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        if (!input.is_open() || input.bad() || contents.empty()) {
+            error = "checkpoint generation pointer is invalid";
+            return false;
+        }
+        target = std::filesystem::path(contents);
+    } else {
         error = "checkpoint generation pointer is invalid";
         return false;
     }
-
-    const std::filesystem::path target = std::filesystem::read_symlink(pointer, filesystem_error);
     const std::string generation_name = target.filename().string();
     if (filesystem_error || target.is_absolute() || target.parent_path() != ".checkpoint-generations" ||
         generation_name.size() <= 11 || generation_name.compare(0, 11, "generation-") != 0) {

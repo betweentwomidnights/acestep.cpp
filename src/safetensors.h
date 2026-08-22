@@ -11,6 +11,7 @@
 
 #include "yyjson.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -129,6 +130,8 @@ static size_t st_dtype_size(const std::string & dtype) {
 
 static bool st_validate_entries(const STFile & st) {
     const size_t data_size = st.file_size - st.data_offset;
+    std::vector<std::pair<size_t, size_t>> spans;
+    spans.reserve(st.entries.size());
     for (const STEntry & entry : st.entries) {
         const size_t element_size = st_dtype_size(entry.dtype);
         if (entry.name.empty() || element_size == 0 || entry.n_dims < 0 || entry.n_dims > 4 ||
@@ -149,8 +152,17 @@ static bool st_validate_entries(const STFile & st) {
         if (elements > SIZE_MAX / element_size || entry.data_end - entry.data_start != elements * element_size) {
             return false;
         }
+        spans.emplace_back(entry.data_start, entry.data_end);
     }
-    return true;
+    std::sort(spans.begin(), spans.end());
+    size_t expected_start = 0;
+    for (const auto & span : spans) {
+        if (span.first != expected_start) {
+            return false;
+        }
+        expected_start = span.second;
+    }
+    return expected_start == data_size;
 }
 
 static bool st_open(STFile * st, const char * path) {

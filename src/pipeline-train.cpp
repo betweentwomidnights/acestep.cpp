@@ -32,6 +32,7 @@ AceRequest ace_training_request(const ACETrainingExample & example,
                                 float                      duration,
                                 const ACETrainPreprocessConfig & config) {
     AceRequest request;
+    request_init(&request);
     request.caption         = ace_training_caption(example.metadata, config);
     request.lyrics          = example.metadata.lyrics;
     request.bpm             = example.metadata.bpm;

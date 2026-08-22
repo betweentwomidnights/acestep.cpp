@@ -135,6 +135,8 @@ struct DiTGGML {
     void *                 linear_transform_data;
 };
 
+static void dit_ggml_free(DiTGGML * m);
+
 // Load timestep embedding weights
 static void dit_ggml_load_temb(DiTGGMLTembWeights * w,
                                WeightCtx *          wctx,
@@ -280,6 +282,7 @@ static bool dit_ggml_load(DiTGGML *    m,
     GGUFModel gf;
     if (!gf_load(&gf, gguf_path)) {
         fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
+        dit_ggml_free(m);
         return false;
     }
 
@@ -304,6 +307,7 @@ static bool dit_ggml_load(DiTGGML *    m,
         cfg.rope_theta <= 0.0f || cfg.rms_norm_eps <= 0.0f || block_count > (uint32_t) DIT_GGML_MAX_LAYERS) {
         fprintf(stderr, "[Load] FATAL: invalid DiT config in GGUF\n");
         gf_close(&gf);
+        dit_ggml_free(m);
         return false;
     }
 
@@ -450,6 +454,7 @@ static bool dit_ggml_load(DiTGGML *    m,
         if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
             fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
             gf_close(&gf);
+            dit_ggml_free(m);
             return false;
         }
         fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
@@ -458,6 +463,7 @@ static bool dit_ggml_load(DiTGGML *    m,
     // Allocate backend buffer and copy weights
     if (!wctx_alloc(&m->wctx, m->backend)) {
         gf_close(&gf);
+        dit_ggml_free(m);
         return false;
     }
     gf_close(&gf);

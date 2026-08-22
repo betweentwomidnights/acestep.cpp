@@ -69,6 +69,15 @@ int main() {
     TrainingGraphBuilder training_graph_builder = dit_ggml_build_graph;
     (void) training_graph_builder;
 
+    const std::filesystem::path missing_model =
+        std::filesystem::temp_directory_path() / ("missing-dit-" + std::to_string(std::random_device {}()) + ".gguf");
+    const int backend_references = g_backend_refs;
+    DiTGGML failed_model = {};
+    if (dit_ggml_load(&failed_model, missing_model.string().c_str()) || g_backend_refs != backend_references ||
+        failed_model.backend || failed_model.cpu_backend || failed_model.sched || failed_model.wctx.ctx) {
+        return fail("failed DiT loads must release all partial model resources");
+    }
+
     ggml_init_params params = {
         /*.mem_size   =*/32 * 1024 * 1024,
         /*.mem_buffer =*/nullptr,
@@ -343,15 +352,18 @@ int main() {
         }
         std::ofstream output(file_path, std::ios::binary | std::ios::trunc);
         const uint64_t header_size = (uint64_t) header.size();
-        const float data = 1.0f;
+        const std::vector<char> data(data_bytes, 0);
         output.write(reinterpret_cast<const char *>(&header_size), sizeof(header_size));
         output.write(header.data(), (std::streamsize) header.size());
-        output.write(reinterpret_cast<const char *>(&data), (std::streamsize) data_bytes);
+        output.write(data.data(), (std::streamsize) data.size());
         return output.good();
     };
     const std::filesystem::path truncated_tensor = checkpoint_dir / "truncated.safetensors";
     const std::filesystem::path mismatched_tensor = checkpoint_dir / "mismatched.safetensors";
     const std::filesystem::path unterminated_header = checkpoint_dir / "unterminated-header.safetensors";
+    const std::filesystem::path overlapping_tensors = checkpoint_dir / "overlapping.safetensors";
+    const std::filesystem::path gapped_tensors = checkpoint_dir / "gapped.safetensors";
+    const std::filesystem::path trailing_data = checkpoint_dir / "trailing-data.safetensors";
     STFile malformed_file;
     if (!write_safetensors_fixture(
             truncated_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}", 4) ||
@@ -360,7 +372,22 @@ int main() {
             mismatched_tensor, "{\"x\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4) ||
         st_open(&malformed_file, mismatched_tensor.string().c_str()) ||
         !write_safetensors_fixture(unterminated_header, "{\"x\"", 0) ||
-        st_open(&malformed_file, unterminated_header.string().c_str())) {
+        st_open(&malformed_file, unterminated_header.string().c_str()) ||
+        !write_safetensors_fixture(
+            overlapping_tensors,
+            "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},"
+            "\"y\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}",
+            4) ||
+        st_open(&malformed_file, overlapping_tensors.string().c_str()) ||
+        !write_safetensors_fixture(
+            gapped_tensors,
+            "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},"
+            "\"y\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[8,12]}}",
+            12) ||
+        st_open(&malformed_file, gapped_tensors.string().c_str()) ||
+        !write_safetensors_fixture(
+            trailing_data, "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}", 8) ||
+        st_open(&malformed_file, trailing_data.string().c_str())) {
         std::filesystem::remove_all(checkpoint_dir);
         ggml_free(ctx);
         return fail("safetensors parser must reject invalid tensor byte spans");
@@ -368,6 +395,9 @@ int main() {
     std::filesystem::remove(truncated_tensor);
     std::filesystem::remove(mismatched_tensor);
     std::filesystem::remove(unterminated_header);
+    std::filesystem::remove(overlapping_tensors);
+    std::filesystem::remove(gapped_tensors);
+    std::filesystem::remove(trailing_data);
 
     ACETrainAdapterState incompatible_config = state;
     incompatible_config.base_alpha            = 64;
@@ -659,10 +689,18 @@ int main() {
         training_checkpoint_dir / ".checkpoint-generations" / "generation-interrupted";
     std::filesystem::create_directories(interrupted_generation);
     ACETrainCheckpointKind retained_checkpoint_kind;
+#ifdef _WIN32
+    const bool publication_layout = std::filesystem::is_regular_file(training_checkpoint_dir / "checkpoint.current") &&
+                                    std::filesystem::is_regular_file(training_checkpoint_dir /
+                                                                     "adapter_model.safetensors");
+#else
+    const bool publication_layout = std::filesystem::is_symlink(training_checkpoint_dir / "checkpoint.current") &&
+                                    std::filesystem::is_symlink(training_checkpoint_dir /
+                                                                "adapter_model.safetensors");
+#endif
     if (!adapter_checkpoint_directory(training_checkpoint_dir, first_generation, error) ||
         first_generation == training_checkpoint_dir ||
-        !std::filesystem::is_symlink(training_checkpoint_dir / "checkpoint.current") ||
-        !std::filesystem::is_symlink(training_checkpoint_dir / "adapter_model.safetensors") ||
+        !publication_layout ||
         !ace_train_checkpoint_kind(training_checkpoint_dir.string(), retained_checkpoint_kind, error) ||
         retained_checkpoint_kind != ACE_TRAIN_CHECKPOINT_FULL) {
         std::filesystem::remove_all(training_checkpoint_dir);
