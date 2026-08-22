@@ -42,6 +42,18 @@ static bool parse_weight_type(const char * name, ggml_type & type) {
         type = GGML_TYPE_Q8_0;
         return true;
     }
+    if (std::strcmp(name, "Q4_K") == 0) {
+        type = GGML_TYPE_Q4_K;
+        return true;
+    }
+    if (std::strcmp(name, "Q5_K") == 0) {
+        type = GGML_TYPE_Q5_K;
+        return true;
+    }
+    if (std::strcmp(name, "Q6_K") == 0) {
+        type = GGML_TYPE_Q6_K;
+        return true;
+    }
     return false;
 }
 
@@ -49,7 +61,9 @@ int main(int argc, char ** argv) {
     const char * backend_name = argc > 1 ? argv[1] : "CPU";
     ggml_type weight_type = GGML_TYPE_F32;
     if (argc > 2 && !parse_weight_type(argv[2], weight_type)) {
-        std::fprintf(stderr, "unsupported DoRA test weight type: %s (expected F32 or Q8_0)\n", argv[2]);
+        std::fprintf(stderr,
+                     "unsupported DoRA test weight type: %s (expected F32, Q8_0, Q4_K, Q5_K, or Q6_K)\n",
+                     argv[2]);
         return 1;
     }
     ggml_backend_t backend = open_backend(backend_name);
