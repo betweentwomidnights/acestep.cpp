@@ -267,7 +267,8 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
 static bool dit_ggml_load(DiTGGML *    m,
                           const char * gguf_path,
                           const char * adapter_path  = nullptr,
-                          float        adapter_scale = 1.0f) {
+                          float        adapter_scale = 1.0f,
+                          bool         fuse_projections = true) {
     // Backend init. flash_attn_ext accumulates in F16 on CPU, causing audible
     // drift over 24 layers x 8 steps: use F32 manual attention on CPU instead.
     BackendPair bp    = backend_init("DiT");
@@ -333,11 +334,16 @@ static bool dit_ggml_load(DiTGGML *    m,
 
         // Self-attention: try full QKV, partial QK, separate
         ly.self_attn_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn_norm.weight");
-        ly.sa_qkv = gf_load_qkv_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
-                                      p + ".self_attn.v_proj.weight");
+        ly.sa_qkv = fuse_projections ?
+                        gf_load_qkv_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
+                                          p + ".self_attn.v_proj.weight") :
+                        nullptr;
         if (!ly.sa_qkv) {
             // Try Q+K fusion (same input, often same type in K-quants)
-            ly.sa_qk = gf_load_pair_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight");
+            ly.sa_qk = fuse_projections ?
+                           gf_load_pair_fused(
+                               &m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight") :
+                           nullptr;
             if (ly.sa_qk) {
                 ly.sa_v_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
                 if (i == 0) {
@@ -362,13 +368,20 @@ static bool dit_ggml_load(DiTGGML *    m,
 
         // Cross-attention: try full QKV, K+V fused, separate
         ly.cross_attn_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn_norm.weight");
-        ly.ca_qkv = gf_load_qkv_fused(&m->wctx, gf, p + ".cross_attn.q_proj.weight", p + ".cross_attn.k_proj.weight",
-                                      p + ".cross_attn.v_proj.weight");
+        ly.ca_qkv = fuse_projections ?
+                        gf_load_qkv_fused(&m->wctx,
+                                          gf,
+                                          p + ".cross_attn.q_proj.weight",
+                                          p + ".cross_attn.k_proj.weight",
+                                          p + ".cross_attn.v_proj.weight") :
+                        nullptr;
         if (!ly.ca_qkv) {
             ly.ca_q_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_proj.weight");
             // Try K+V fusion (same input enc, may share type)
-            ly.ca_kv =
-                gf_load_pair_fused(&m->wctx, gf, p + ".cross_attn.k_proj.weight", p + ".cross_attn.v_proj.weight");
+            ly.ca_kv = fuse_projections ?
+                           gf_load_pair_fused(
+                               &m->wctx, gf, p + ".cross_attn.k_proj.weight", p + ".cross_attn.v_proj.weight") :
+                           nullptr;
             if (ly.ca_kv) {
                 if (i == 0) {
                     fprintf(stderr, "[DiT] Cross-attn: Q separate, K+V fused\n");
@@ -391,7 +404,9 @@ static bool dit_ggml_load(DiTGGML *    m,
 
         // MLP: try gate+up fusion (same input, same pattern as QKV)
         ly.mlp_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".mlp_norm.weight");
-        ly.gate_up  = gf_load_pair_fused(&m->wctx, gf, p + ".mlp.gate_proj.weight", p + ".mlp.up_proj.weight");
+        ly.gate_up  = fuse_projections ?
+                          gf_load_pair_fused(&m->wctx, gf, p + ".mlp.gate_proj.weight", p + ".mlp.up_proj.weight") :
+                          nullptr;
         if (ly.gate_up) {
             if (i == 0) {
                 fprintf(stderr, "[DiT] MLP: gate+up fused\n");

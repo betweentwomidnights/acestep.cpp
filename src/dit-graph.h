@@ -476,14 +476,15 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
                                                  int                   enc_S,       // encoder sequence length
                                                  int                   N,           // batch size
                                                  struct ggml_tensor ** p_input,     // [out] input tensor to fill
-                                                 struct ggml_tensor ** p_output) {  // [out] output tensor to read
+                                                 struct ggml_tensor ** p_output,    // [out] output tensor to read
+                                                 bool                  gradients = false) {
 
     DiTGGMLConfig & c = m->cfg;
     int             S = T / c.patch_size;  // sequence length after patching
     int             H = c.hidden_size;
     int             P = c.patch_size;
 
-    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8192, false);
+    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, gradients ? 65536 : 8192, gradients);
 
     // Inputs
 

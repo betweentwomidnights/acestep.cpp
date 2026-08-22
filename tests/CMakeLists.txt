@@ -23,3 +23,8 @@ link_ggml_backends(test-lm-prompt)
 add_executable(test-dit-linear-transform test-dit-linear-transform.cpp)
 target_link_libraries(test-dit-linear-transform PRIVATE acestep-core)
 link_ggml_backends(test-dit-linear-transform)
+
+# test-train-adapter-state: verify Gary-compatible target profiles and initialization.
+add_executable(test-train-adapter-state test-train-adapter-state.cpp)
+target_link_libraries(test-train-adapter-state PRIVATE acestep-core)
+link_ggml_backends(test-train-adapter-state)
