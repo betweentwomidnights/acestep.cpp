@@ -116,6 +116,7 @@ add_library(acestep-core STATIC
     src/pipeline-lm.cpp
     src/pipeline-synth.cpp
     src/pipeline-synth-ops.cpp
+    src/pipeline-train.cpp
     src/pipeline-understand.cpp
 )
 target_link_libraries(acestep-core PUBLIC yyjson)
@@ -125,6 +126,11 @@ link_ggml_backends(acestep-core)
 add_executable(ace-synth tools/ace-synth.cpp)
 target_link_libraries(ace-synth PRIVATE acestep-core)
 link_ggml_backends(ace-synth)
+
+# ace-train: native LoRA and DoRA-row adapter training.
+add_executable(ace-train tools/ace-train.cpp)
+target_link_libraries(ace-train PRIVATE acestep-core)
+link_ggml_backends(ace-train)
 
 # ace-lm: LLM inference (CoT + audio codes)
 add_executable(ace-lm tools/ace-lm.cpp)

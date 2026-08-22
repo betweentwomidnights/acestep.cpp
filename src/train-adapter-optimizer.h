@@ -19,6 +19,50 @@ struct ACETrainAdamWConfig {
     float max_gradient_norm = 1.0f;
 };
 
+enum ACETrainSchedule {
+    ACE_TRAIN_SCHEDULE_CONSTANT,
+    ACE_TRAIN_SCHEDULE_LINEAR,
+    ACE_TRAIN_SCHEDULE_COSINE,
+    ACE_TRAIN_SCHEDULE_COSINE_RESTARTS,
+};
+
+static float ace_train_learning_rate(float            base_learning_rate,
+                                     int              step,
+                                     int              total_steps,
+                                     int              warmup_steps,
+                                     ACETrainSchedule schedule,
+                                     int              restart_count = 1) {
+    if (base_learning_rate <= 0.0f || total_steps <= 0) {
+        return 0.0f;
+    }
+    const int clamped_step = std::max(0, std::min(step, total_steps));
+    const int clamped_warmup = std::max(0, std::min(warmup_steps, total_steps));
+    if (clamped_warmup > 0 && clamped_step < clamped_warmup) {
+        const float progress = (float) clamped_step / (float) clamped_warmup;
+        return base_learning_rate * (0.1f + 0.9f * progress);
+    }
+    if (schedule == ACE_TRAIN_SCHEDULE_CONSTANT || clamped_warmup == total_steps) {
+        return base_learning_rate;
+    }
+
+    const int remaining_steps = total_steps - clamped_warmup;
+    const float progress = (float) (clamped_step - clamped_warmup) / (float) remaining_steps;
+    float factor = 1.0f;
+    if (schedule == ACE_TRAIN_SCHEDULE_LINEAR) {
+        factor = 1.0f - 0.99f * progress;
+    } else {
+        float cosine_progress = progress;
+        if (schedule == ACE_TRAIN_SCHEDULE_COSINE_RESTARTS && clamped_step < total_steps) {
+            const int cycles = std::max(1, restart_count);
+            cosine_progress = progress * (float) cycles;
+            cosine_progress -= std::floor(cosine_progress);
+        }
+        constexpr float pi = 3.14159265358979323846f;
+        factor = 0.01f + 0.99f * 0.5f * (1.0f + std::cos(pi * cosine_progress));
+    }
+    return base_learning_rate * factor;
+}
+
 struct ACETrainAdamWTensorState {
     std::vector<float> first_moment;
     std::vector<float> second_moment;
@@ -33,6 +77,17 @@ struct ACETrainAdapterOptimizerParam {
 struct ACETrainAdapterOptimizer {
     int                                        step = 0;
     std::vector<ACETrainAdapterOptimizerParam> params;
+};
+
+struct ACETrainAdapterGradientParam {
+    std::vector<float> a;
+    std::vector<float> b;
+    std::vector<float> magnitude;
+};
+
+struct ACETrainAdapterGradientAccumulator {
+    int                                        microbatch_count = 0;
+    std::vector<ACETrainAdapterGradientParam> params;
 };
 
 static bool ace_train_adamw_update(std::vector<float> &          parameter,
@@ -67,33 +122,22 @@ static bool ace_train_adamw_update(std::vector<float> &          parameter,
     return true;
 }
 
-static bool ace_train_adapter_adamw_step(ACETrainDiTGraph &             training,
-                                         ACETrainAdapterState &         state,
-                                         ACETrainAdapterOptimizer &     optimizer,
-                                         const ACETrainAdamWConfig &    config,
-                                         std::string &                  error) {
+static bool ace_train_adapter_accumulate_gradients(ACETrainDiTGraph &                    training,
+                                                   ACETrainAdapterGradientAccumulator & accumulator,
+                                                   std::string &                        error) {
     error.clear();
-    if (training.adapters.params.size() != state.params.size() || state.params.empty()) {
-        error = "training graph and adapter state target counts differ";
+    if (training.adapters.params.empty() ||
+        (!accumulator.params.empty() && accumulator.params.size() != training.adapters.params.size())) {
+        error = "training graph and gradient accumulator target counts differ";
         return false;
     }
-    if (config.learning_rate <= 0.0f || config.beta1 < 0.0f || config.beta1 >= 1.0f || config.beta2 < 0.0f ||
-        config.beta2 >= 1.0f || config.epsilon <= 0.0f || config.weight_decay < 0.0f ||
-        config.max_gradient_norm < 0.0f) {
-        error = "invalid AdamW configuration";
-        return false;
+    if (accumulator.params.empty()) {
+        accumulator.params.resize(training.adapters.params.size());
     }
 
-    struct Gradients {
-        std::vector<float> a;
-        std::vector<float> b;
-        std::vector<float> magnitude;
-    };
-    std::vector<Gradients> gradients(state.params.size());
-    double                 global_norm_sq = 0.0;
-    auto download = [&](struct ggml_tensor * parameter, std::vector<float> & values) {
+    auto accumulate = [&](struct ggml_tensor * parameter, std::vector<float> & sum) {
         if (!parameter) {
-            values.clear();
+            sum.clear();
             return true;
         }
         struct ggml_tensor * gradient = ggml_graph_get_grad(training.graph, parameter);
@@ -104,31 +148,77 @@ static bool ace_train_adapter_adamw_step(ACETrainDiTGraph &             training
             error = "adapter parameter has no gradient: " + std::string(ggml_get_name(parameter));
             return false;
         }
+        std::vector<float> values((size_t) ggml_nelements(gradient));
+        if (sum.empty()) {
+            sum.assign(values.size(), 0.0f);
+        } else if (sum.size() != values.size()) {
+            error = "adapter gradient shape changed between microbatches: " + std::string(ggml_get_name(parameter));
+            return false;
+        }
         values.resize((size_t) ggml_nelements(gradient));
         ggml_backend_tensor_get(gradient, values.data(), 0, values.size() * sizeof(float));
-        for (float value : values) {
+        for (size_t i = 0; i < values.size(); ++i) {
+            const float value = values[i];
             if (!std::isfinite(value)) {
                 error = "adapter gradient is not finite: " + std::string(ggml_get_name(parameter));
                 return false;
             }
-            global_norm_sq += (double) value * value;
+            sum[i] += value;
         }
         return true;
     };
 
-    for (size_t i = 0; i < state.params.size(); ++i) {
+    for (size_t i = 0; i < training.adapters.params.size(); ++i) {
         const ACETrainAdapterGraphParam & graph = training.adapters.params[i];
-        if (!download(graph.a, gradients[i].a) || !download(graph.b, gradients[i].b) ||
-            !download(graph.magnitude, gradients[i].magnitude)) {
+        ACETrainAdapterGradientParam & sums = accumulator.params[i];
+        if (!accumulate(graph.a, sums.a) || !accumulate(graph.b, sums.b) ||
+            !accumulate(graph.magnitude, sums.magnitude)) {
             return false;
         }
     }
+    accumulator.microbatch_count += 1;
+    return true;
+}
+
+static bool ace_train_adapter_adamw_step_accumulated(ACETrainDiTGraph &                    training,
+                                                     ACETrainAdapterState &                state,
+                                                     ACETrainAdapterOptimizer &            optimizer,
+                                                     const ACETrainAdamWConfig &           config,
+                                                     ACETrainAdapterGradientAccumulator & accumulator,
+                                                     std::string &                        error) {
+    error.clear();
+    if (training.adapters.params.size() != state.params.size() || state.params.empty() ||
+        accumulator.params.size() != state.params.size() || accumulator.microbatch_count <= 0) {
+        error = "training graph, adapter state, and accumulated gradient target counts differ";
+        return false;
+    }
+    if (config.learning_rate <= 0.0f || config.beta1 < 0.0f || config.beta1 >= 1.0f || config.beta2 < 0.0f ||
+        config.beta2 >= 1.0f || config.epsilon <= 0.0f || config.weight_decay < 0.0f ||
+        config.max_gradient_norm < 0.0f) {
+        error = "invalid AdamW configuration";
+        return false;
+    }
+
+    const float accumulation_scale = 1.0f / (float) accumulator.microbatch_count;
+    double global_norm_sq = 0.0;
+    auto add_norm = [&](const std::vector<float> & gradient) {
+        for (float value : gradient) {
+            const double averaged = (double) value * accumulation_scale;
+            global_norm_sq += averaged * averaged;
+        }
+    };
+    for (const ACETrainAdapterGradientParam & gradient : accumulator.params) {
+        add_norm(gradient.a);
+        add_norm(gradient.b);
+        add_norm(gradient.magnitude);
+    }
 
     const double global_norm = std::sqrt(global_norm_sq);
-    const float gradient_scale =
+    const float clip_scale =
         (config.max_gradient_norm > 0.0f && global_norm > config.max_gradient_norm) ?
             (float) (config.max_gradient_norm / global_norm) :
             1.0f;
+    const float gradient_scale = accumulation_scale * clip_scale;
     const int next_step = optimizer.step + 1;
     if (optimizer.params.size() != state.params.size()) {
         optimizer.params.resize(state.params.size());
@@ -136,13 +226,14 @@ static bool ace_train_adapter_adamw_step(ACETrainDiTGraph &             training
     for (size_t i = 0; i < state.params.size(); ++i) {
         ACETrainAdapterParam &          parameter = state.params[i];
         ACETrainAdapterOptimizerParam & moments   = optimizer.params[i];
+        const ACETrainAdapterGradientParam & gradient = accumulator.params[i];
         if (!ace_train_adamw_update(
-                parameter.a, gradients[i].a, moments.a, config, next_step, gradient_scale, error) ||
+                parameter.a, gradient.a, moments.a, config, next_step, gradient_scale, error) ||
             !ace_train_adamw_update(
-                parameter.b, gradients[i].b, moments.b, config, next_step, gradient_scale, error) ||
+                parameter.b, gradient.b, moments.b, config, next_step, gradient_scale, error) ||
             (!parameter.magnitude.empty() &&
              !ace_train_adamw_update(parameter.magnitude,
-                                     gradients[i].magnitude,
+                                     gradient.magnitude,
                                      moments.magnitude,
                                      config,
                                      next_step,
@@ -152,5 +243,19 @@ static bool ace_train_adapter_adamw_step(ACETrainDiTGraph &             training
         }
     }
     optimizer.step = next_step;
-    return ace_upload_train_adapter_state(training.adapters, state, error);
+    if (!ace_upload_train_adapter_state(training.adapters, state, error)) {
+        return false;
+    }
+    accumulator = {};
+    return true;
+}
+
+static bool ace_train_adapter_adamw_step(ACETrainDiTGraph &             training,
+                                         ACETrainAdapterState &         state,
+                                         ACETrainAdapterOptimizer &     optimizer,
+                                         const ACETrainAdamWConfig &    config,
+                                         std::string &                  error) {
+    ACETrainAdapterGradientAccumulator accumulator;
+    return ace_train_adapter_accumulate_gradients(training, accumulator, error) &&
+           ace_train_adapter_adamw_step_accumulated(training, state, optimizer, config, accumulator, error);
 }

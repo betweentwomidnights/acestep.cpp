@@ -2,6 +2,7 @@
 // ABOUTME: Verifies structured metadata, multiline lyrics, stable ordering, and pair validation.
 
 #include "train-dataset.h"
+#include "pipeline-train.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -63,6 +64,22 @@ int main() {
         parsed.custom_tag != "reference_voice" || parsed.lyrics != "[Verse]\nSynthetic test words only") {
         std::filesystem::remove_all(directory);
         return fail("metadata fields or multiline lyrics were not parsed exactly");
+    }
+
+    ACETrainPreprocessConfig preprocess;
+    AceRequest request = ace_training_request(examples[0], 42.5f, preprocess);
+    if (request.caption != "reference_voice, sparse electronic pop" || request.lyrics != parsed.lyrics ||
+        request.bpm != 70 || request.keyscale != "E minor" || request.timesignature != "4" ||
+        request.duration != 42.5f) {
+        std::filesystem::remove_all(directory);
+        return fail("default training request must match Gary's prepended-tag caption semantics");
+    }
+    preprocess.use_genre = true;
+    preprocess.tag_position = ACE_TRAIN_TAG_APPEND;
+    request = ace_training_request(examples[0], 42.5f, preprocess);
+    if (request.caption != "alternative pop, reference_voice") {
+        std::filesystem::remove_all(directory);
+        return fail("training request must support Gary's genre and appended-tag prompt mode");
     }
 
     if (!write_file(directory / "unpaired.wav", "RIFFtest") || ace_training_load_dataset(directory, examples, error) ||

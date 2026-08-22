@@ -422,8 +422,22 @@ int main() {
     optimizer_config.learning_rate = 1e-3f;
     optimizer_config.weight_decay = 0.01f;
     optimizer_config.max_gradient_norm = 1.0f;
-    if (!ace_train_adapter_adamw_step(tiny_training, tiny_state, optimizer, optimizer_config, error) ||
-        optimizer.step != 1) {
+    if (std::fabs(ace_train_learning_rate(1e-3f, 0, 10, 2, ACE_TRAIN_SCHEDULE_COSINE) - 1e-4f) > 1e-8f ||
+        std::fabs(ace_train_learning_rate(1e-3f, 2, 10, 2, ACE_TRAIN_SCHEDULE_COSINE) - 1e-3f) > 1e-8f ||
+        std::fabs(ace_train_learning_rate(1e-3f, 10, 10, 2, ACE_TRAIN_SCHEDULE_COSINE) - 1e-5f) > 1e-8f) {
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("warmup and cosine learning-rate schedule does not match the trainer contract");
+    }
+    ACETrainAdapterGradientAccumulator accumulated_gradients;
+    if (!ace_train_adapter_accumulate_gradients(tiny_training, accumulated_gradients, error) ||
+        !ace_train_adapter_accumulate_gradients(tiny_training, accumulated_gradients, error) ||
+        accumulated_gradients.microbatch_count != 2 ||
+        !ace_train_adapter_adamw_step_accumulated(
+            tiny_training, tiny_state, optimizer, optimizer_config, accumulated_gradients, error) ||
+        optimizer.step != 1 || accumulated_gradients.microbatch_count != 0) {
         std::fprintf(stderr, "FAIL: native AdamW step: %s\n", error.c_str());
         ace_free_train_dit_graph(tiny_training);
         ggml_backend_free(tiny.backend);
@@ -452,8 +466,8 @@ int main() {
     ace_free_train_dit_graph(tiny_training);
 
     std::vector<ACETrainDiffusionExample> examples(2);
-    examples[0].target_latents = { 0.1f, -0.2f, 0.3f, -0.4f };
-    examples[0].context_latents = { 0.5f, 0.6f, 0.7f, 0.8f };
+    examples[0].target_latents = { 0.1f, -0.2f };
+    examples[0].context_latents = { 0.5f, 0.6f };
     examples[0].encoder_hidden = { 0.2f, -0.1f, 0.05f, 0.3f };
     examples[0].real_encoder_sequence_length = 1;
     examples[0].real_temporal_length = 1;
@@ -463,6 +477,28 @@ int main() {
     examples[1].real_encoder_sequence_length = 1;
     examples[1].real_temporal_length = 2;
     const std::vector<float> null_condition = { 0.9f, 0.8f, 0.7f, 0.6f };
+    const std::vector<float> silence_latents = { 0.01f, 0.02f, 0.03f, 0.04f };
+    std::vector<ACETrainDiffusionExample> collated_examples;
+    int collated_temporal_length = 0;
+    int collated_encoder_sequence_length = 0;
+    if (!ace_collate_training_examples(tiny,
+                                       examples,
+                                       silence_latents,
+                                       null_condition,
+                                       collated_examples,
+                                       collated_temporal_length,
+                                       collated_encoder_sequence_length,
+                                       error) ||
+        collated_temporal_length != 2 || collated_encoder_sequence_length != 1 ||
+        collated_examples[0].target_latents != std::vector<float>({ 0.1f, -0.2f, 0.0f, 0.0f }) ||
+        collated_examples[0].context_latents != std::vector<float>({ 0.5f, 0.6f, 0.03f, 0.04f })) {
+        std::fprintf(stderr, "FAIL: collate variable training examples: %s\n", error.c_str());
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    examples = std::move(collated_examples);
     ACETrainDiffusionConfig diffusion_config;
     diffusion_config.timestep_mean = 0.0f;
     diffusion_config.timestep_std = 0.0f;
@@ -486,7 +522,15 @@ int main() {
     }
     ACETrainDiffusionBatch batch;
     if (!ace_prepare_train_diffusion_batch(
-            tiny, examples, 2, 1, null_condition, 1234, diffusion_config, batch, error)) {
+            tiny,
+            examples,
+            collated_temporal_length,
+            collated_encoder_sequence_length,
+            null_condition,
+            1234,
+            diffusion_config,
+            batch,
+            error)) {
         std::fprintf(stderr, "FAIL: prepare diffusion batch: %s\n", error.c_str());
         ggml_backend_free(tiny.backend);
         ggml_free(tiny_ctx);
