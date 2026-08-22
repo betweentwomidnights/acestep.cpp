@@ -3,12 +3,18 @@
 
 #include "dit-graph.h"
 #include "ggml-cpu.h"
+#include "train-adapter-checkpoint.h"
+#include "train-adapter-optimizer.h"
 #include "train-adapter-state.h"
 #include "train-dit-graph.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -201,6 +207,65 @@ int main() {
     }
     ggml_free(graph_ctx);
 
+    const std::filesystem::path checkpoint_dir =
+        std::filesystem::temp_directory_path() /
+        ("ace-adapter-checkpoint-" + std::to_string(std::random_device {}()));
+    if (!ace_save_train_adapter_checkpoint(checkpoint_dir.string(), state, error)) {
+        std::fprintf(stderr, "FAIL: save PEFT checkpoint: %s\n", error.c_str());
+        ggml_free(ctx);
+        return 1;
+    }
+    STFile saved_adapter;
+    const std::filesystem::path adapter_path = checkpoint_dir / "adapter_model.safetensors";
+    if (!st_open(&saved_adapter, adapter_path.string().c_str()) || saved_adapter.entries.size() != 33) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("saved DoRA checkpoint must contain A, B, and magnitude for every target");
+    }
+    const std::string expected_a_key =
+        "base_model.model.layers.0.self_attn.q_proj.lora_A.default.weight";
+    const std::string expected_magnitude_key =
+        "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector.default";
+    const STEntry * saved_a = nullptr;
+    const STEntry * saved_magnitude = nullptr;
+    for (const STEntry & entry : saved_adapter.entries) {
+        if (entry.name == expected_a_key) {
+            saved_a = &entry;
+        } else if (entry.name == expected_magnitude_key) {
+            saved_magnitude = &entry;
+        }
+    }
+    if (!saved_a || saved_a->n_dims != 2 || saved_a->shape[0] != 16 || saved_a->shape[1] != 128 ||
+        !saved_magnitude || saved_magnitude->n_dims != 1 || saved_magnitude->shape[0] != 256 ||
+        static_cast<const float *>(st_data(saved_adapter, *saved_a))[0] != first.a[0]) {
+        st_close(&saved_adapter);
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("saved PEFT tensor names, shapes, or data are incorrect");
+    }
+    st_close(&saved_adapter);
+    std::ifstream config_file(checkpoint_dir / "adapter_config.json");
+    const std::string config((std::istreambuf_iterator<char>(config_file)), std::istreambuf_iterator<char>());
+    if (config.find("\"use_dora\": true") == std::string::npos ||
+        config.find("\"self_attn.q_proj\": 16") == std::string::npos ||
+        config.find("\"self_attn.v_proj\": 80") == std::string::npos) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("adapter_config.json must preserve DoRA and balanced rank metadata");
+    }
+    ACETrainAdapterState resumed;
+    if (!ace_load_train_adapter_checkpoint(checkpoint_dir.string(), balanced, resumed, error) ||
+        resumed.adapter_type != "dora-rows" || resumed.params.size() != state.params.size() ||
+        resumed.params[0].a != state.params[0].a || resumed.params[0].b != state.params[0].b ||
+        resumed.params[0].magnitude != state.params[0].magnitude ||
+        resumed.params[0].base_norm_sq != state.params[0].base_norm_sq) {
+        std::fprintf(stderr, "FAIL: resume PEFT checkpoint: %s\n", error.c_str());
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return 1;
+    }
+    std::filesystem::remove_all(checkpoint_dir);
+
     ggml_init_params tiny_params = {
         /*.mem_size   =*/4 * 1024 * 1024,
         /*.mem_buffer =*/nullptr,
@@ -342,6 +407,44 @@ int main() {
         ggml_free(tiny_ctx);
         ggml_free(ctx);
         return fail("tiny training graph must produce finite loss and a nonzero adapter gradient");
+    }
+    std::vector<float> parameters_before;
+    for (const ACETrainAdapterParam & param : tiny_state.params) {
+        parameters_before.insert(parameters_before.end(), param.a.begin(), param.a.end());
+        parameters_before.insert(parameters_before.end(), param.b.begin(), param.b.end());
+        parameters_before.insert(parameters_before.end(), param.magnitude.begin(), param.magnitude.end());
+    }
+    ACETrainAdapterOptimizer optimizer;
+    ACETrainAdamWConfig optimizer_config;
+    optimizer_config.learning_rate = 1e-3f;
+    optimizer_config.weight_decay = 0.01f;
+    optimizer_config.max_gradient_norm = 1.0f;
+    if (!ace_train_adapter_adamw_step(tiny_training, tiny_state, optimizer, optimizer_config, error) ||
+        optimizer.step != 1) {
+        std::fprintf(stderr, "FAIL: native AdamW step: %s\n", error.c_str());
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    std::vector<float> parameters_after;
+    for (const ACETrainAdapterParam & param : tiny_state.params) {
+        parameters_after.insert(parameters_after.end(), param.a.begin(), param.a.end());
+        parameters_after.insert(parameters_after.end(), param.b.begin(), param.b.end());
+        parameters_after.insert(parameters_after.end(), param.magnitude.begin(), param.magnitude.end());
+    }
+    float uploaded_magnitude = 0.0f;
+    ggml_backend_tensor_get(tiny_training.adapters.params[0].magnitude,
+                            &uploaded_magnitude,
+                            0,
+                            sizeof(uploaded_magnitude));
+    if (parameters_before == parameters_after || uploaded_magnitude != tiny_state.params[0].magnitude[0]) {
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("AdamW must update host parameters and upload them for the next graph replay");
     }
     ace_free_train_dit_graph(tiny_training);
     ggml_backend_free(tiny.backend);

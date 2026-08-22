@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 struct TransformProbe {
     int calls;
@@ -26,6 +27,14 @@ static bool nearly_equal(float actual, float expected) {
 }
 
 int main() {
+    const std::string magnitude_key =
+        "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector.default.weight";
+    if (lora_base_name(magnitude_key) != "decoder.layers.0.self_attn.q_proj.weight" ||
+        !lora_is_magnitude(magnitude_key)) {
+        std::fputs("PEFT DoRA magnitude key was not recognized\n", stderr);
+        return 1;
+    }
+
     ggml_init_params params = {
         /*.mem_size   =*/1024 * 1024,
         /*.mem_buffer =*/nullptr,

@@ -127,6 +127,10 @@ static bool lora_is_b(const std::string & key) {
     return key.find(".lora_B.") != std::string::npos || key.find(".lora_up.") != std::string::npos;
 }
 
+static bool lora_is_magnitude(const std::string & key) {
+    return key.find(".lora_magnitude_vector.") != std::string::npos;
+}
+
 // Read adapter_config.json for alpha. Returns alpha or 0 if not found.
 // Rank is always read from the actual tensor shapes (more reliable).
 static int adapter_read_alpha(const char * dir) {
@@ -489,7 +493,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
 
     // group lora_A and lora_B entries by their GGUF base tensor name.
     // also collect per tensor alpha scalars (ComfyUI baked format).
-    std::map<std::string, const STEntry *> a_map, b_map;
+    std::map<std::string, const STEntry *> a_map, b_map, magnitude_map;
     std::map<std::string, float>           alpha_map;
     for (const auto & e : st.entries) {
         // per tensor alpha: "base_model.model.layers.0.self_attn.q_proj.alpha"
@@ -512,7 +516,9 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         if (base.empty()) {
             continue;
         }
-        if (lora_is_a(e.name)) {
+        if (lora_is_magnitude(e.name)) {
+            magnitude_map[base] = &e;
+        } else if (lora_is_a(e.name)) {
             a_map[base] = &e;
         } else if (lora_is_b(e.name)) {
             b_map[base] = &e;
@@ -525,8 +531,9 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         pending_idx[wctx->pending[i].src] = i;
     }
 
-    int merged  = 0;
-    int skipped = 0;
+    int merged     = 0;
+    int skipped    = 0;
+    int dora_count = 0;
 
     for (const auto & kv : a_map) {
         const std::string & gguf_name = kv.first;
@@ -596,6 +603,31 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             skipped++;
             continue;
         }
+
+        std::vector<float> magnitude;
+        auto               magnitude_it = magnitude_map.find(gguf_name);
+        if (magnitude_it != magnitude_map.end()) {
+            const STEntry * em            = magnitude_it->second;
+            int64_t         magnitude_nel = 1;
+            for (int dimension = 0; dimension < em->n_dims; ++dimension) {
+                magnitude_nel *= em->shape[dimension];
+            }
+            if (magnitude_nel != out_feat) {
+                fprintf(stderr,
+                        "[Adapter] WARNING: DoRA magnitude shape mismatch for %s: got %lld values, expected %lld\n",
+                        gguf_name.c_str(),
+                        (long long) magnitude_nel,
+                        (long long) out_feat);
+                skipped++;
+                continue;
+            }
+            magnitude.resize((size_t) magnitude_nel);
+            if (!adapter_to_f32(st_data(st, *em), magnitude.data(), magnitude_nel, em->dtype)) {
+                fprintf(stderr, "[Adapter] WARNING: unsupported dtype %s for DoRA magnitude\n", em->dtype.c_str());
+                skipped++;
+                continue;
+            }
+        }
         if (!adapter_to_f32(st_data(st, *eb), b_f32.data(), b_nel, eb->dtype)) {
             fprintf(stderr, "[Adapter] WARNING: unsupported dtype %s for lora_B\n", eb->dtype.c_str());
             skipped++;
@@ -623,15 +655,21 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             return db;
         };
 
-        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, nullptr, 1.0f, backend,
-                                      gguf_name.c_str(), build)) {
+        const float * magnitude_data = magnitude.empty() ? nullptr : magnitude.data();
+        const float   merge_scale   = magnitude_data ? scale : 1.0f;
+        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, magnitude_data, merge_scale,
+                                      backend, gguf_name.c_str(), build)) {
             skipped++;
             continue;
+        }
+        if (magnitude_data) {
+            dora_count++;
         }
         merged++;
     }
 
-    fprintf(stderr, "[Adapter] LoRA merged %d pairs (skipped %d), scale=%.2f\n", merged, skipped, scale);
+    fprintf(stderr, "[Adapter] LoRA merged %d pairs (%d DoRA, skipped %d), scale=%.2f\n", merged, dora_count,
+            skipped, scale);
     return merged > 0;
 }
 

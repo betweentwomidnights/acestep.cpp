@@ -21,6 +21,9 @@ struct ACETrainAdapterTarget {
     int64_t              out;
     int                  rank;
     int                  alpha;
+    int                  base_rank;
+    int                  base_alpha;
+    std::string          module_profile;
 };
 
 struct ACETrainAdapterParam {
@@ -33,6 +36,9 @@ struct ACETrainAdapterParam {
 
 struct ACETrainAdapterState {
     std::string                       adapter_type;
+    std::string                       module_profile;
+    int                               base_rank;
+    int                               base_alpha;
     std::vector<ACETrainAdapterParam> params;
 };
 
@@ -116,6 +122,9 @@ static bool ace_train_adapter_targets(const DiTGGML &                    model,
         target.out         = weight->ne[1];
         target.rank        = profile_value(module_name, false);
         target.alpha       = profile_value(module_name, true);
+        target.base_rank   = base_rank;
+        target.base_alpha  = base_alpha;
+        target.module_profile = profile;
         targets.push_back(std::move(target));
         return true;
     };
@@ -204,6 +213,11 @@ static bool ace_init_train_adapter_state(const std::vector<ACETrainAdapterTarget
         return false;
     }
     state.adapter_type = adapter_type;
+    if (!targets.empty()) {
+        state.module_profile = targets.front().module_profile;
+        state.base_rank      = targets.front().base_rank;
+        state.base_alpha     = targets.front().base_alpha;
+    }
     std::mt19937_64 random(seed);
 
     for (const ACETrainAdapterTarget & target : targets) {
