@@ -29,6 +29,11 @@ add_executable(test-dora-backend test-dora-backend.cpp)
 target_link_libraries(test-dora-backend PRIVATE acestep-core)
 link_ggml_backends(test-dora-backend)
 
+# test-adapter-merge: reload emitted PEFT DoRA adapters through native inference.
+add_executable(test-adapter-merge test-adapter-merge.cpp)
+target_link_libraries(test-adapter-merge PRIVATE acestep-core)
+link_ggml_backends(test-adapter-merge)
+
 # test-vae-latent-sampling: verify training-only posterior sampling from VAE encoder output.
 add_executable(test-vae-latent-sampling test-vae-latent-sampling.cpp)
 target_link_libraries(test-vae-latent-sampling PRIVATE acestep-core)

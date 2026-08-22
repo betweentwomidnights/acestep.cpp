@@ -1,6 +1,7 @@
 // ABOUTME: Tests ACE-Step adapter target profiles and trainable parameter initialization.
 // ABOUTME: Covers Gary-compatible ranks, DoRA magnitudes, identity initialization, and fusion rejection.
 
+#include "adapter-merge.h"
 #include "dit-graph.h"
 #include "ggml-cpu.h"
 #include "train-adapter-checkpoint.h"
@@ -14,8 +15,6 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <random>
 #include <string>
 #include <vector>
@@ -246,14 +245,19 @@ int main() {
         return fail("saved PEFT tensor names, shapes, or data are incorrect");
     }
     st_close(&saved_adapter);
-    std::ifstream config_file(checkpoint_dir / "adapter_config.json");
-    const std::string config((std::istreambuf_iterator<char>(config_file)), std::istreambuf_iterator<char>());
-    if (config.find("\"use_dora\": true") == std::string::npos ||
-        config.find("\"self_attn.q_proj\": 16") == std::string::npos ||
-        config.find("\"self_attn.v_proj\": 80") == std::string::npos) {
+    adapter_config config;
+    if (!adapter_read_config(checkpoint_dir.string().c_str(), config) || !config.use_dora ||
+        config.rank_pattern["self_attn.q_proj"] != 16 || config.rank_pattern["self_attn.v_proj"] != 80 ||
+        config.alpha_pattern["self_attn.q_proj"] != 32 || config.alpha_pattern["self_attn.v_proj"] != 160 ||
+        adapter_config_value_for_weight(config.alpha_pattern,
+                                        "decoder.layers.0.self_attn.q_proj.weight",
+                                        config.lora_alpha) != 32 ||
+        adapter_config_value_for_weight(config.alpha_pattern,
+                                        "decoder.layers.0.self_attn.v_proj.weight",
+                                        config.lora_alpha) != 160) {
         std::filesystem::remove_all(checkpoint_dir);
         ggml_free(ctx);
-        return fail("adapter_config.json must preserve DoRA and balanced rank metadata");
+        return fail("adapter_config.json must preserve semantic DoRA rank and alpha metadata");
     }
     ACETrainAdapterState resumed;
     if (!ace_load_train_adapter_checkpoint(checkpoint_dir.string(), balanced, resumed, error) ||

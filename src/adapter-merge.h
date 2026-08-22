@@ -1,3 +1,6 @@
+// ABOUTME: Merges LoRA, DoRA, and LoKr adapters into GGUF weights on the selected backend.
+// ABOUTME: Loads PEFT and LyCORIS metadata before pending weights are uploaded or fused.
+
 #pragma once
 // adapter-merge.h: runtime adapter merge into GGUF weights before QKV fusion.
 //
@@ -131,55 +134,117 @@ static bool lora_is_magnitude(const std::string & key) {
     return key.find(".lora_magnitude_vector.") != std::string::npos;
 }
 
-// Read adapter_config.json for alpha. Returns alpha or 0 if not found.
-// Rank is always read from the actual tensor shapes (more reliable).
-static int adapter_read_alpha(const char * dir) {
+struct adapter_config {
+    int                        lora_alpha = 0;
+    bool                       use_dora   = false;
+    std::map<std::string, int> rank_pattern;
+    std::map<std::string, int> alpha_pattern;
+};
+
+static void adapter_read_pattern(yyjson_val * value, std::map<std::string, int> & pattern) {
+    if (!value || !yyjson_is_obj(value)) {
+        return;
+    }
+    yyjson_obj_iter iterator = yyjson_obj_iter_with(value);
+    yyjson_val *    key;
+    while ((key = yyjson_obj_iter_next(&iterator))) {
+        yyjson_val * item = yyjson_obj_iter_get_val(key);
+        if (yyjson_is_str(key) && yyjson_is_int(item) && yyjson_get_int(item) > 0) {
+            pattern[yyjson_get_str(key)] = (int) yyjson_get_int(item);
+        }
+    }
+}
+
+// Read the PEFT adapter configuration used to resolve module-specific rank and alpha values.
+static bool adapter_read_config(const char * dir, adapter_config & config) {
+    config           = {};
     std::string path = std::string(dir) + "/adapter_config.json";
 
     FILE * f = fopen(path.c_str(), "rb");
     if (!f) {
-        return 0;
+        return false;
     }
 
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return false;
+    }
     long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (len < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
 
-    std::vector<char> buf((size_t) len + 1);
-    size_t            nr = fread(buf.data(), 1, (size_t) len, f);
+    std::vector<char> buf((size_t) len);
+    size_t            nr = fread(buf.data(), 1, buf.size(), f);
     fclose(f);
-    if (nr != (size_t) len) {
-        return 0;
+    if (nr != buf.size()) {
+        return false;
     }
-    buf[(size_t) len] = '\0';
 
-    const char * json  = buf.data();
-    int          alpha = 0;
+    yyjson_doc * document = yyjson_read(buf.data(), buf.size(), 0);
+    if (!document) {
+        return false;
+    }
+    yyjson_val * root = yyjson_doc_get_root(document);
+    if (!yyjson_is_obj(root)) {
+        yyjson_doc_free(document);
+        return false;
+    }
 
-    // look for "lora_alpha": <int>
-    const char * p = strstr(json, "\"lora_alpha\"");
-    if (p) {
-        p = strchr(p + 12, ':');
-        if (p) {
-            alpha = atoi(p + 1);
+    yyjson_val * alpha = yyjson_obj_get(root, "lora_alpha");
+    if ((!alpha || !yyjson_is_int(alpha)) && yyjson_obj_get(root, "alpha")) {
+        alpha = yyjson_obj_get(root, "alpha");
+    }
+    if (alpha && yyjson_is_int(alpha) && yyjson_get_int(alpha) > 0) {
+        config.lora_alpha = (int) yyjson_get_int(alpha);
+    }
+    yyjson_val * use_dora = yyjson_obj_get(root, "use_dora");
+    if (use_dora && yyjson_is_bool(use_dora)) {
+        config.use_dora = yyjson_get_bool(use_dora);
+    }
+    adapter_read_pattern(yyjson_obj_get(root, "rank_pattern"), config.rank_pattern);
+    adapter_read_pattern(yyjson_obj_get(root, "alpha_pattern"), config.alpha_pattern);
+    yyjson_doc_free(document);
+
+    if (config.lora_alpha > 0) {
+        fprintf(stderr, "[Adapter] adapter_config.json: alpha=%d, %zu module overrides\n", config.lora_alpha,
+                config.alpha_pattern.size());
+    }
+    return true;
+}
+
+static bool adapter_module_matches_pattern(const std::string & module, const std::string & pattern) {
+    if (pattern.empty()) {
+        return false;
+    }
+    if (pattern[0] == '^') {
+        return module == pattern.substr(1);
+    }
+    if (module == pattern) {
+        return true;
+    }
+    return module.size() > pattern.size() &&
+           module.compare(module.size() - pattern.size(), pattern.size(), pattern) == 0 &&
+           module[module.size() - pattern.size() - 1] == '.';
+}
+
+static int adapter_config_value_for_weight(const std::map<std::string, int> & pattern,
+                                           const std::string &                gguf_name,
+                                           int                                fallback) {
+    std::string module = gguf_name;
+    if (module.compare(0, 8, "decoder.") == 0) {
+        module.erase(0, 8);
+    }
+    if (module.size() >= 7 && module.compare(module.size() - 7, 7, ".weight") == 0) {
+        module.resize(module.size() - 7);
+    }
+    for (const auto & entry : pattern) {
+        if (adapter_module_matches_pattern(module, entry.first)) {
+            return entry.second;
         }
     }
-
-    // fallback: try "alpha": <int> (some configs use this)
-    if (alpha == 0) {
-        p = strstr(json, "\"alpha\"");
-        if (p) {
-            p = strchr(p + 7, ':');
-            if (p) {
-                alpha = atoi(p + 1);
-            }
-        }
-    }
-
-    if (alpha > 0) {
-        fprintf(stderr, "[Adapter] adapter_config.json: alpha=%d\n", alpha);
-    }
-    return alpha;
+    return fallback;
 }
 
 // Read linear_dim from LyCORIS __metadata__.lokr_config for LoKr payloads.
@@ -356,6 +421,12 @@ struct adapter_delta_build {
     std::function<void()> upload;
 };
 
+enum class adapter_magnitude_semantics {
+    none,
+    peft,
+    lycoris,
+};
+
 // Execute the unified merge graph for one tensor. Returns true on success.
 // See adapter_delta_build for the caller contract.
 static bool adapter_merge_on_backend(WeightCtx *                                                       wctx,
@@ -366,12 +437,10 @@ static bool adapter_merge_on_backend(WeightCtx *                                
                                      int64_t                                                           ne1,
                                      const float *                                                     ds,
                                      float                                                             user_scale,
+                                     adapter_magnitude_semantics                                       magnitude_semantics,
                                      ggml_backend_t                                                    backend,
                                      const char *                                                      gguf_name,
                                      const std::function<adapter_delta_build(struct ggml_context *)> & build_delta) {
-    // torch.finfo(torch.bfloat16).eps, used verbatim in LyCORIS apply_weight_decompose
-    const float eps = 7.8125e-3f;
-
     // locate the pending copy upfront: no point computing if we can't apply
     auto pc_it = pending_idx.find(base_ptr);
     if (pc_it == pending_idx.end()) {
@@ -407,23 +476,33 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     struct ggml_tensor * tdelta_bf = ggml_cast(ctx, db.tdelta, GGML_TYPE_BF16);
     struct ggml_tensor * tdelta_f  = ggml_cast(ctx, tdelta_bf, GGML_TYPE_F32);
 
-    // merge: plain scaled add for no DoRA, weight decompose otherwise
+    // merge: plain scaled add, PEFT DoRA interpolation, or LyCORIS weight decomposition
     struct ggml_tensor * tmerged;
     if (!tds) {
         struct ggml_tensor * td_u = (user_scale != 1.0f) ? ggml_scale(ctx, tdelta_f, user_scale) : tdelta_f;
         tmerged                   = ggml_add(ctx, tbase_f32, td_u);
     } else {
-        // DoRA per output row: scale = user * (ds / sqrt(sum_sq(m_pre)) + eps) + (1 - user)
         struct ggml_tensor * tm_pre  = ggml_add(ctx, tbase_f32, tdelta_f);
         struct ggml_tensor * tsq     = ggml_sqr(ctx, tm_pre);
         struct ggml_tensor * tss     = ggml_sum_rows(ctx, tsq);  // ne=(1, out)
         struct ggml_tensor * trn     = ggml_sqrt(ctx, tss);
-        struct ggml_tensor * trn_eps = ggml_scale_bias(ctx, trn, 1.0f, eps);
-        struct ggml_tensor * tscale  = ggml_div(ctx, tds, trn_eps);
-        struct ggml_tensor * tscale_m =
-            (user_scale != 1.0f) ? ggml_scale_bias(ctx, tscale, user_scale, 1.0f - user_scale) : tscale;
-        // broadcast (in, out) * (1, out)
-        tmerged = ggml_mul(ctx, tm_pre, tscale_m);
+        if (magnitude_semantics == adapter_magnitude_semantics::peft) {
+            struct ggml_tensor * tscale = ggml_div(ctx, tds, trn);
+            struct ggml_tensor * tfull  = ggml_mul(ctx, tm_pre, tscale);
+            if (user_scale == 1.0f) {
+                tmerged = tfull;
+            } else {
+                struct ggml_tensor * tdifference = ggml_sub(ctx, tfull, tbase_f32);
+                tmerged = ggml_add(ctx, tbase_f32, ggml_scale(ctx, tdifference, user_scale));
+            }
+        } else {
+            const float          eps      = 7.8125e-3f;
+            struct ggml_tensor * trn_eps  = ggml_scale_bias(ctx, trn, 1.0f, eps);
+            struct ggml_tensor * tscale   = ggml_div(ctx, tds, trn_eps);
+            struct ggml_tensor * tscale_m =
+                (user_scale != 1.0f) ? ggml_scale_bias(ctx, tscale, user_scale, 1.0f - user_scale) : tscale;
+            tmerged = ggml_mul(ctx, tm_pre, tscale_m);
+        }
     }
 
     // output: native type when the backend can encode, else F32 for host requant
@@ -446,7 +525,12 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     // caller-owned uploads for adapter factors
     db.upload();
 
-    ggml_backend_graph_compute(backend, graph);
+    if (ggml_backend_graph_compute(backend, graph) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "[Adapter] WARNING: backend merge graph failed for %s\n", gguf_name);
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctx);
+        return false;
+    }
 
     // allocate a staging slot sized for the native encoded weight, then download
     size_t n_floats    = (base_nb + sizeof(float) - 1) / sizeof(float);
@@ -489,7 +573,8 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
                                const std::string & cfg_dir,
                                float               scale,
                                ggml_backend_t      backend) {
-    int alpha_cfg = adapter_read_alpha(cfg_dir.c_str());
+    adapter_config config;
+    adapter_read_config(cfg_dir.c_str(), config);
 
     // group lora_A and lora_B entries by their GGUF base tensor name.
     // also collect per tensor alpha scalars (ComfyUI baked format).
@@ -581,17 +666,16 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             continue;
         }
 
-        // alpha: prefer per tensor (ComfyUI baked), then config, fallback to rank
+        // alpha: prefer per tensor (ComfyUI baked), then module config, then global config, fallback to rank
         float alpha;
         auto  alpha_it = alpha_map.find(gguf_name);
         if (alpha_it != alpha_map.end()) {
             alpha = alpha_it->second;
-        } else if (alpha_cfg > 0) {
-            alpha = (float) alpha_cfg;
         } else {
-            alpha = (float) rank;
+            alpha = (float) adapter_config_value_for_weight(config.alpha_pattern, gguf_name,
+                                                            config.lora_alpha > 0 ? config.lora_alpha : (int) rank);
         }
-        float scaling = (alpha / (float) rank) * scale;
+        float scaling = alpha / (float) rank;
 
         // load A and B to F32, PEFT rounds them through BF16 before the GEMM
         int64_t            a_nel = rank * in_feat;
@@ -656,9 +740,10 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         };
 
         const float * magnitude_data = magnitude.empty() ? nullptr : magnitude.data();
-        const float   merge_scale   = magnitude_data ? scale : 1.0f;
-        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, magnitude_data, merge_scale,
-                                      backend, gguf_name.c_str(), build)) {
+        const adapter_magnitude_semantics magnitude_semantics =
+            magnitude_data ? adapter_magnitude_semantics::peft : adapter_magnitude_semantics::none;
+        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, magnitude_data, scale,
+                                      magnitude_semantics, backend, gguf_name.c_str(), build)) {
             skipped++;
             continue;
         }
@@ -966,8 +1051,10 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
             return db;
         };
 
-        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, user_scale, backend,
-                                      gguf_name.c_str(), build)) {
+        const adapter_magnitude_semantics magnitude_semantics =
+            ds_ptr ? adapter_magnitude_semantics::lycoris : adapter_magnitude_semantics::none;
+        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, user_scale,
+                                      magnitude_semantics, backend, gguf_name.c_str(), build)) {
             skipped++;
             continue;
         }
