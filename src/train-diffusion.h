@@ -41,6 +41,7 @@ struct ACETrainDiffusionBatch {
     std::vector<float>       reference_timesteps;
     std::vector<int32_t>     positions;
     std::vector<ggml_fp16_t> self_attention_mask;
+    std::vector<ggml_fp16_t> full_self_attention_mask;
     std::vector<ggml_fp16_t> cross_attention_mask;
 };
 
@@ -196,6 +197,7 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
     batch.reference_timesteps.resize(batch_size);
     batch.positions.resize((size_t) sequence_length * batch_size);
     batch.self_attention_mask.resize((size_t) sequence_length * sequence_length * batch_size);
+    batch.full_self_attention_mask.resize((size_t) sequence_length * sequence_length * batch_size);
     batch.cross_attention_mask.resize((size_t) encoder_sequence_length * sequence_length * batch_size);
 
     std::mt19937_64                       generator(seed);
@@ -272,10 +274,13 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
                 const int distance = query > key ? query - key : key - query;
                 const bool within_window = model.cfg.sliding_window <= 0 || sequence_length <= model.cfg.sliding_window ||
                                            distance <= model.cfg.sliding_window;
-                const bool visible = key < real_sequence_length && within_window;
+                const bool full_visible = key < real_sequence_length;
+                const bool visible = full_visible && within_window;
                 const size_t offset = (size_t) sample * sequence_length * sequence_length +
                                       (size_t) query * sequence_length + key;
                 batch.self_attention_mask[offset] = ggml_fp32_to_fp16(visible ? 0.0f : -INFINITY);
+                batch.full_self_attention_mask[offset] =
+                    ggml_fp32_to_fp16(full_visible ? 0.0f : -INFINITY);
             }
             for (int key = 0; key < encoder_sequence_length; ++key) {
                 const size_t offset = (size_t) sample * encoder_sequence_length * sequence_length +
@@ -302,8 +307,11 @@ static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             trai
         !matches(training.loss_weights, batch.loss_weights) ||
         !matches(training.timestep, batch.timesteps) ||
         !matches(training.reference_timestep, batch.reference_timesteps) || !training.positions ||
-        (size_t) ggml_nelements(training.positions) != batch.positions.size() || !training.self_attention_mask ||
-        (size_t) ggml_nelements(training.self_attention_mask) != batch.self_attention_mask.size() ||
+        (size_t) ggml_nelements(training.positions) != batch.positions.size() ||
+        (training.self_attention_mask &&
+         (size_t) ggml_nelements(training.self_attention_mask) != batch.self_attention_mask.size()) ||
+        (training.full_self_attention_mask &&
+         (size_t) ggml_nelements(training.full_self_attention_mask) != batch.full_self_attention_mask.size()) ||
         !training.cross_attention_mask ||
         (size_t) ggml_nelements(training.cross_attention_mask) != batch.cross_attention_mask.size()) {
         error = "prepared diffusion batch does not match the training graph";
@@ -328,10 +336,18 @@ static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             trai
                             batch.reference_timesteps.size() * sizeof(float));
     ggml_backend_tensor_set(
         training.positions, batch.positions.data(), 0, batch.positions.size() * sizeof(int32_t));
-    ggml_backend_tensor_set(training.self_attention_mask,
-                            batch.self_attention_mask.data(),
-                            0,
-                            batch.self_attention_mask.size() * sizeof(ggml_fp16_t));
+    if (training.self_attention_mask) {
+        ggml_backend_tensor_set(training.self_attention_mask,
+                                batch.self_attention_mask.data(),
+                                0,
+                                batch.self_attention_mask.size() * sizeof(ggml_fp16_t));
+    }
+    if (training.full_self_attention_mask) {
+        ggml_backend_tensor_set(training.full_self_attention_mask,
+                                batch.full_self_attention_mask.data(),
+                                0,
+                                batch.full_self_attention_mask.size() * sizeof(ggml_fp16_t));
+    }
     ggml_backend_tensor_set(training.cross_attention_mask,
                             batch.cross_attention_mask.data(),
                             0,

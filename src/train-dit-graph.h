@@ -20,6 +20,7 @@ struct ACETrainDiTGraph {
     struct ggml_tensor *   reference_timestep;
     struct ggml_tensor *   positions;
     struct ggml_tensor *   self_attention_mask;
+    struct ggml_tensor *   full_self_attention_mask;
     struct ggml_tensor *   cross_attention_mask;
     struct ggml_tensor *   target_velocity;
     struct ggml_tensor *   loss_weights;
@@ -105,9 +106,17 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
     training.reference_timestep = ggml_graph_get_tensor(training.graph, "t_r");
     training.positions = ggml_graph_get_tensor(training.graph, "positions");
     training.self_attention_mask = ggml_graph_get_tensor(training.graph, "sa_mask_sw");
+    training.full_self_attention_mask = ggml_graph_get_tensor(training.graph, "sa_mask");
     training.cross_attention_mask = ggml_graph_get_tensor(training.graph, "ca_mask");
+    bool needs_sliding_mask = false;
+    bool needs_full_mask = false;
+    for (int i = 0; i < model.cfg.n_layers; ++i) {
+        needs_sliding_mask = needs_sliding_mask || model.layers[i].layer_type == 0;
+        needs_full_mask = needs_full_mask || model.layers[i].layer_type == 1;
+    }
     if (!training.encoder_hidden || !training.timestep || !training.reference_timestep || !training.positions ||
-        !training.self_attention_mask || !training.cross_attention_mask) {
+        (needs_sliding_mask && !training.self_attention_mask) ||
+        (needs_full_mask && !training.full_self_attention_mask) || !training.cross_attention_mask) {
         error = "DiT training graph is missing a required input";
         ace_free_train_dit_graph(training);
         return false;

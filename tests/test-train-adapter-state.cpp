@@ -689,15 +689,9 @@ int main() {
         training_checkpoint_dir / ".checkpoint-generations" / "generation-interrupted";
     std::filesystem::create_directories(interrupted_generation);
     ACETrainCheckpointKind retained_checkpoint_kind;
-#ifdef _WIN32
-    const bool publication_layout = std::filesystem::is_regular_file(training_checkpoint_dir / "checkpoint.current") &&
-                                    std::filesystem::is_regular_file(training_checkpoint_dir /
-                                                                     "adapter_model.safetensors");
-#else
     const bool publication_layout = std::filesystem::is_symlink(training_checkpoint_dir / "checkpoint.current") &&
                                     std::filesystem::is_symlink(training_checkpoint_dir /
                                                                 "adapter_model.safetensors");
-#endif
     if (!adapter_checkpoint_directory(training_checkpoint_dir, first_generation, error) ||
         first_generation == training_checkpoint_dir ||
         !publication_layout ||
@@ -845,12 +839,49 @@ int main() {
         ggml_fp16_to_fp32(batch.self_attention_mask[1]) >= 0.0f ||
         ggml_fp16_to_fp32(batch.self_attention_mask[0]) != 0.0f ||
         ggml_fp16_to_fp32(batch.self_attention_mask[2]) != 0.0f ||
-        !std::isinf(ggml_fp16_to_fp32(batch.self_attention_mask[3]))) {
+        !std::isinf(ggml_fp16_to_fp32(batch.self_attention_mask[3])) ||
+        ggml_fp16_to_fp32(batch.full_self_attention_mask[0]) != 0.0f ||
+        !std::isinf(ggml_fp16_to_fp32(batch.full_self_attention_mask[1])) ||
+        ggml_fp16_to_fp32(batch.full_self_attention_mask[2]) != 0.0f ||
+        !std::isinf(ggml_fp16_to_fp32(batch.full_self_attention_mask[3]))) {
         ggml_backend_free(tiny.backend);
         ggml_free(tiny_ctx);
         ggml_free(ctx);
         return fail("self attention must hide padded keys without creating an all-masked padded query");
     }
+    const int saved_sliding_window = tiny.cfg.sliding_window;
+    tiny.cfg.sliding_window = 1;
+    ACETrainDiffusionExample window_example;
+    window_example.target_latents = { 0.1f, -0.2f, 0.2f, -0.1f, 0.3f, -0.3f };
+    window_example.context_latents = { 0.4f, 0.5f, 0.5f, 0.6f, 0.6f, 0.7f };
+    window_example.encoder_hidden = { 0.2f, -0.1f, 0.05f, 0.3f };
+    window_example.real_encoder_sequence_length = 1;
+    window_example.real_temporal_length = 3;
+    ACETrainDiffusionBatch window_batch;
+    if (!ace_prepare_train_diffusion_batch(
+            tiny, { window_example }, 3, 1, null_condition, 1234, diffusion_config, window_batch, error) ||
+        !std::isinf(ggml_fp16_to_fp32(window_batch.self_attention_mask[2])) ||
+        ggml_fp16_to_fp32(window_batch.full_self_attention_mask[2]) != 0.0f) {
+        std::fprintf(stderr, "FAIL: distinct self attention masks: %s\n", error.c_str());
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    tiny.cfg.sliding_window = saved_sliding_window;
+    tiny_layer.layer_type = 1;
+    ACETrainDiTGraph full_attention_training;
+    if (!ace_build_train_dit_graph(tiny, tiny_state, 2, 1, 1, full_attention_training, error) ||
+        !full_attention_training.full_self_attention_mask || full_attention_training.self_attention_mask) {
+        std::fprintf(stderr, "FAIL: full attention training mask: %s\n", error.c_str());
+        ace_free_train_dit_graph(full_attention_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    ace_free_train_dit_graph(full_attention_training);
+    tiny_layer.layer_type = 0;
     for (size_t sample = 0; sample < examples.size(); ++sample) {
         for (int time = 0; time < 2; ++time) {
             const size_t input_offset = sample * 8 + (size_t) time * 4;
