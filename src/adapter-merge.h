@@ -55,6 +55,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -140,6 +141,27 @@ static bool lora_is_magnitude(const std::string & key) {
     }
     const size_t end = position + marker.size();
     return end == key.size() || key[end] == '.';
+}
+
+static std::string adapter_module_for_weight(const std::string & weight_name) {
+    std::string module = weight_name;
+    if (module.compare(0, 8, "decoder.") == 0) {
+        module.erase(0, 8);
+    }
+    if (module.size() >= 7 && module.compare(module.size() - 7, 7, ".weight") == 0) {
+        module.resize(module.size() - 7);
+    }
+    return module;
+}
+
+static bool adapter_config_targets_weight(const adapter_config & config, const std::string & weight_name) {
+    const std::string module = adapter_module_for_weight(weight_name);
+    for (const std::string & target : config.target_modules) {
+        if (adapter_module_matches_pattern(module, target)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Read linear_dim from LyCORIS __metadata__.lokr_config for LoKr payloads.
@@ -556,20 +578,10 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
                 fprintf(stderr, "[Adapter] PEFT adapter tensor shapes are invalid for %s\n", gguf_name.c_str());
                 return false;
             }
-            std::string module = gguf_name;
-            if (module.compare(0, 8, "decoder.") == 0) {
-                module.erase(0, 8);
-            }
-            if (module.size() >= 7 && module.compare(module.size() - 7, 7, ".weight") == 0) {
-                module.resize(module.size() - 7);
-            }
-            bool target_matches = false;
-            for (const std::string & target : config.target_modules) {
-                target_matches = target_matches || adapter_module_matches_pattern(module, target);
-            }
             int64_t tensor_index = gguf_find_tensor(gf.gguf, gguf_name.c_str());
             struct ggml_tensor * tensor = tensor_index >= 0 ? ggml_get_tensor(gf.meta, gguf_name.c_str()) : nullptr;
-            if (!target_matches || !tensor || tensor->ne[0] != a->shape[1] || tensor->ne[1] != b->second->shape[0]) {
+            if (!adapter_config_targets_weight(config, gguf_name) || !tensor || tensor->ne[0] != a->shape[1] ||
+                tensor->ne[1] != b->second->shape[0]) {
                 fprintf(stderr, "[Adapter] PEFT adapter target does not match GGUF tensor %s\n", gguf_name.c_str());
                 return false;
             }
@@ -580,17 +592,32 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
                 return false;
             }
         }
+        std::set<std::string> serialized_targets;
+        for (const auto & entry : a_map) {
+            serialized_targets.insert(entry.first);
+        }
+        std::set<std::string> staged_targets;
+        const int64_t         tensor_count = gguf_get_n_tensors(gf.gguf);
+        for (int64_t tensor_index = 0; tensor_index < tensor_count; ++tensor_index) {
+            const char * name = gguf_get_tensor_name(gf.gguf, tensor_index);
+            if (!name || !adapter_config_targets_weight(config, name)) {
+                continue;
+            }
+            const size_t offset = gguf_get_tensor_offset(gf.gguf, tensor_index);
+            const void * base = gf.mapping + gf.data_offset + offset;
+            if (pending_idx.count(base) != 0) {
+                staged_targets.insert(name);
+            }
+        }
+        if (serialized_targets != staged_targets) {
+            fprintf(stderr, "[Adapter] PEFT adapter module-instance inventory does not match staged GGUF targets\n");
+            return false;
+        }
         for (const std::string & target : config.target_modules) {
             bool target_present = false;
             for (const auto & entry : a_map) {
-                std::string module = entry.first;
-                if (module.compare(0, 8, "decoder.") == 0) {
-                    module.erase(0, 8);
-                }
-                if (module.size() >= 7 && module.compare(module.size() - 7, 7, ".weight") == 0) {
-                    module.resize(module.size() - 7);
-                }
-                target_present = target_present || adapter_module_matches_pattern(module, target);
+                target_present = target_present ||
+                                 adapter_module_matches_pattern(adapter_module_for_weight(entry.first), target);
             }
             if (!target_present) {
                 fprintf(stderr, "[Adapter] PEFT target module has no serialized tensors: %s\n", target.c_str());

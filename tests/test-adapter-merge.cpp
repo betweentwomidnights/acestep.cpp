@@ -51,9 +51,13 @@ static ACETrainAdapterParam make_param(const char *         weight_name,
     return param;
 }
 
-static bool write_base_gguf(const std::filesystem::path & path,
-                            const std::vector<float> &    q_weight,
-                            const std::vector<float> &    v_weight) {
+struct base_weight_fixture {
+    const char *               name;
+    const std::vector<float> * values;
+};
+
+static bool write_base_gguf(const std::filesystem::path &             path,
+                            const std::vector<base_weight_fixture> & weights) {
     ggml_init_params params = {
         /*.mem_size   =*/1024 * 1024,
         /*.mem_buffer =*/nullptr,
@@ -63,16 +67,18 @@ static bool write_base_gguf(const std::filesystem::path & path,
     if (!context) {
         return false;
     }
-    ggml_tensor * q = ggml_new_tensor_2d(context, GGML_TYPE_F32, 2, 2);
-    ggml_tensor * v = ggml_new_tensor_2d(context, GGML_TYPE_F32, 2, 2);
-    ggml_set_name(q, "decoder.layers.0.self_attn.q_proj.weight");
-    ggml_set_name(v, "decoder.layers.0.self_attn.v_proj.weight");
-    std::memcpy(q->data, q_weight.data(), q_weight.size() * sizeof(float));
-    std::memcpy(v->data, v_weight.data(), v_weight.size() * sizeof(float));
-
     gguf_context * file = gguf_init_empty();
-    gguf_add_tensor(file, q);
-    gguf_add_tensor(file, v);
+    for (const base_weight_fixture & weight : weights) {
+        if (!weight.values || weight.values->size() != 4) {
+            gguf_free(file);
+            ggml_free(context);
+            return false;
+        }
+        ggml_tensor * tensor = ggml_new_tensor_2d(context, GGML_TYPE_F32, 2, 2);
+        ggml_set_name(tensor, weight.name);
+        std::memcpy(tensor->data, weight.values->data(), weight.values->size() * sizeof(float));
+        gguf_add_tensor(file, tensor);
+    }
     const bool written = gguf_write_to_file(file, path.string().c_str(), false);
     gguf_free(file);
     ggml_free(context);
@@ -144,15 +150,18 @@ static bool reload_adapter(const std::filesystem::path & directory,
     return true;
 }
 
-static bool rejects_partial_merge(const std::filesystem::path & directory) {
+static bool rejects_adapter_merge(const std::filesystem::path & directory,
+                                  const std::vector<const char *> & staged_weights) {
     GGUFModel model = {};
     if (!gf_load(&model, (directory / "base.gguf").string().c_str())) {
         return false;
     }
 
     WeightCtx weights = {};
-    wctx_init(&weights, 1);
-    gf_load_tensor(&weights, model, "decoder.layers.0.self_attn.q_proj.weight");
+    wctx_init(&weights, (int) staged_weights.size());
+    for (const char * name : staged_weights) {
+        gf_load_tensor(&weights, model, name);
+    }
     ggml_backend_t backend = ggml_backend_cpu_init();
     const bool rejected = backend && !adapter_merge(&weights, model, directory.string().c_str(), 1.0f, backend);
     wctx_free(&weights);
@@ -177,7 +186,11 @@ int main() {
 
     const std::vector<float> q_base = { 1.0f, 2.0f, 3.0f, 4.0f };
     const std::vector<float> v_base = { 1.0f, 2.0f, 3.0f, 4.0f };
-    if (!write_base_gguf(directory.path / "base.gguf", q_base, v_base)) {
+    if (!write_base_gguf(directory.path / "base.gguf",
+                         {
+                             { "decoder.layers.0.self_attn.q_proj.weight", &q_base },
+                             { "decoder.layers.0.self_attn.v_proj.weight", &v_base },
+                         })) {
         std::fputs("failed to write adapter merge GGUF fixture\n", stderr);
         return 1;
     }
@@ -268,7 +281,7 @@ int main() {
         std::fputs("native adapter reload did not honor the selected checkpoint generation\n", stderr);
         return 1;
     }
-    if (!rejects_partial_merge(directory.path)) {
+    if (!rejects_adapter_merge(directory.path, { "decoder.layers.0.self_attn.q_proj.weight" })) {
         std::fputs("native adapter reload accepted a partial merge\n", stderr);
         return 1;
     }
@@ -289,8 +302,36 @@ int main() {
     };
     if (filesystem_error ||
         !ace_write_safetensors(incomplete / "adapter_model.safetensors", incomplete_tensors, error) ||
-        !rejects_partial_merge(incomplete)) {
+        !rejects_adapter_merge(incomplete, { "decoder.layers.0.self_attn.q_proj.weight" })) {
         std::fputs("native PEFT reload accepted a missing DoRA magnitude\n", stderr);
+        return 1;
+    }
+
+    const std::filesystem::path missing_instance = directory.path / "missing-instance";
+    ACETrainAdapterState missing_instance_state;
+    missing_instance_state.adapter_type = "dora-rows";
+    missing_instance_state.module_profile = "attention";
+    missing_instance_state.base_rank = 2;
+    missing_instance_state.base_alpha = 8;
+    missing_instance_state.params.push_back(make_param("decoder.layers.1.self_attn.q_proj.weight",
+                                                       "self_attn.q_proj",
+                                                       1,
+                                                       2,
+                                                       { 0.123456f, -0.654321f },
+                                                       { 0.333333f, -0.222222f },
+                                                       { 1.234567f, 2.345678f }));
+    if (!ace_save_train_adapter_checkpoint(missing_instance.string(), missing_instance_state, error) ||
+        !write_base_gguf(missing_instance / "base.gguf",
+                         {
+                             { "decoder.layers.0.self_attn.q_proj.weight", &q_base },
+                             { "decoder.layers.1.self_attn.q_proj.weight", &q_base },
+                         }) ||
+        !rejects_adapter_merge(missing_instance,
+                               {
+                                   "decoder.layers.0.self_attn.q_proj.weight",
+                                   "decoder.layers.1.self_attn.q_proj.weight",
+                               })) {
+        std::fputs("native PEFT reload accepted a missing target module instance\n", stderr);
         return 1;
     }
 
@@ -303,7 +344,8 @@ int main() {
     std::ofstream invalid_config_file(invalid_config / "adapter_config.json", std::ios::trunc);
     invalid_config_file << "{\n";
     invalid_config_file.close();
-    if (filesystem_error || !invalid_config_file.good() || !rejects_partial_merge(invalid_config)) {
+    if (filesystem_error || !invalid_config_file.good() ||
+        !rejects_adapter_merge(invalid_config, { "decoder.layers.0.self_attn.q_proj.weight" })) {
         std::fputs("native PEFT reload accepted an invalid adapter configuration\n", stderr);
         return 1;
     }
