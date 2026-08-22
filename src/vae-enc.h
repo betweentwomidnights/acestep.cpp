@@ -8,6 +8,8 @@
 #pragma once
 #include "vae.h"
 
+#include <random>
+
 // Encoder block: 3xResUnit(in_ch) -> snake(in_ch) -> strided Conv1d(in_ch -> out_ch)
 // Decoder block is the mirror: snake(in_ch) -> ConvT(in_ch -> out_ch) -> 3xResUnit(out_ch)
 struct VAEEncBlock {
@@ -39,6 +41,46 @@ struct VAEEncoder {
 
     std::vector<float> scratch_in;       // transposed input [2 * T_audio]
 };
+
+struct VAEEncLatentSampler {
+    std::mt19937_64                 generator;
+    std::normal_distribution<float> normal;
+
+    explicit VAEEncLatentSampler(uint64_t seed) : generator(seed), normal(0.0f, 1.0f) {}
+};
+
+static float vae_enc_standard_deviation(float scale) {
+    float softplus;
+    if (scale > 20.0f) {
+        softplus = scale;
+    } else if (scale < -20.0f) {
+        softplus = std::exp(scale);
+    } else {
+        softplus = std::log1p(std::exp(scale));
+    }
+    return softplus + 1e-4f;
+}
+
+static void vae_enc_extract_latents(const float *         raw,
+                                    int                   raw_temporal_length,
+                                    int                   source_offset,
+                                    int                   count,
+                                    float *               latent_out,
+                                    int                   destination_offset,
+                                    VAEEncLatentSampler * sampler) {
+    for (int time = 0; time < count; ++time) {
+        const int source_time = source_offset + time;
+        for (int channel = 0; channel < 64; ++channel) {
+            const float mean = raw[(size_t) channel * raw_temporal_length + source_time];
+            float       latent = mean;
+            if (sampler) {
+                const float scale = raw[(size_t) (64 + channel) * raw_temporal_length + source_time];
+                latent += vae_enc_standard_deviation(scale) * sampler->normal(sampler->generator);
+            }
+            latent_out[(size_t) (destination_offset + time) * 64 + channel] = latent;
+        }
+    }
+}
 
 // Load encoder weights from the same VAE GGUF (encoder.* tensors)
 static void vae_enc_load(VAEEncoder * m, const char * path) {
@@ -247,14 +289,15 @@ static int vae_enc_compute(VAEEncoder *  m,
     return (int) m->graph_output->ne[0];  // T_latent
 }
 
-// Encode API: audio [T_audio, 2] -> latent_out [T_latent, 64] (mean only, deterministic)
+// Encode API: audio [T_audio, 2] -> latent_out [T_latent, 64].
 // Returns T_latent (or -1 on error).
 // latent_out must hold at least (T_audio / 1920) * 64 floats.
-static int vae_enc_encode(VAEEncoder *  m,
-                          const float * audio,       // [T_audio, 2] interleaved stereo
-                          int           T_audio,
-                          float *       latent_out,  // [T_latent, 64] output, time-major
-                          int           max_T_latent) {
+static int vae_enc_encode_with_sampler(VAEEncoder *          m,
+                                       const float *         audio,       // [T_audio, 2] interleaved stereo
+                                       int                   T_audio,
+                                       float *               latent_out,  // [T_latent, 64] output, time-major
+                                       int                   max_T_latent,
+                                       VAEEncLatentSampler * sampler) {
     int T_latent = vae_enc_compute(m, audio, T_audio);
     if (T_latent < 0) {
         return -1;
@@ -266,25 +309,41 @@ static int vae_enc_encode(VAEEncoder *  m,
     }
 
     // Graph output is [ne0=T_latent, ne1=128] in ggml, channel-contiguous.
-    // Channels 0..63 = mean, 64..127 = scale. We only read mean.
+    // Channels 0..63 = mean, 64..127 = scale.
     // ggml layout: data[c * T_latent + t] for channel c, time t.
     // We write time-major: latent_out[t * 64 + c] = data[c * T_latent + t]
     //
-    // Read the full 128ch output once, extract mean channels 0..63
+    // Read the full 128ch output once, then extract either the mean or a posterior sample.
     size_t             out_bytes = (size_t) 128 * T_latent * sizeof(float);
     std::vector<float> raw(128 * T_latent);
     ggml_backend_tensor_get(m->graph_output, raw.data(), 0, out_bytes);
 
-    for (int t = 0; t < T_latent; t++) {
-        for (int c = 0; c < 64; c++) {
-            latent_out[t * 64 + c] = raw[c * T_latent + t];
-        }
-    }
+    vae_enc_extract_latents(raw.data(), T_latent, 0, T_latent, latent_out, 0, sampler);
 
-    fprintf(stderr, "[VAE-Enc] Encode: T_audio=%d -> T_latent=%d (%.2fs @ 48kHz)\n", T_audio, T_latent,
-            (float) T_audio / 48000.0f);
+    fprintf(stderr, "[VAE-Enc] Encode%s: T_audio=%d -> T_latent=%d (%.2fs @ 48kHz)\n",
+            sampler ? " sampled" : "", T_audio, T_latent, (float) T_audio / 48000.0f);
 
     return T_latent;
+}
+
+// Mean-only deterministic encode used by cover inference.
+static int vae_enc_encode(VAEEncoder *  m,
+                          const float * audio,
+                          int           T_audio,
+                          float *       latent_out,
+                          int           max_T_latent) {
+    return vae_enc_encode_with_sampler(m, audio, T_audio, latent_out, max_T_latent, nullptr);
+}
+
+// Posterior-sampled encode used when preparing training targets.
+static int vae_enc_encode_sampled(VAEEncoder *  m,
+                                  const float * audio,
+                                  int           T_audio,
+                                  float *       latent_out,
+                                  int           max_T_latent,
+                                  uint64_t      seed) {
+    VAEEncLatentSampler sampler(seed);
+    return vae_enc_encode_with_sampler(m, audio, T_audio, latent_out, max_T_latent, &sampler);
 }
 
 // Tiled encode for long audio (same chunking strategy as decoder)
@@ -295,7 +354,8 @@ static int vae_enc_encode_tiled(VAEEncoder *  m,
                                 float *       latent_out,  // [T_latent, 64] output, time-major
                                 int           max_T_latent,
                                 int           chunk_size = 256,
-                                int           overlap    = 64) {
+                                int           overlap    = 64,
+                                VAEEncLatentSampler * sampler = nullptr) {
     // Work in audio-sample space. Each latent frame = 1920 audio samples.
     int audio_chunk   = chunk_size * 1920;
     int audio_overlap = overlap * 1920;
@@ -307,7 +367,7 @@ static int vae_enc_encode_tiled(VAEEncoder *  m,
 
     // Short audio: encode directly
     if (T_audio <= audio_chunk) {
-        return vae_enc_encode(m, audio, T_audio, latent_out, max_T_latent);
+        return vae_enc_encode_with_sampler(m, audio, T_audio, latent_out, max_T_latent, sampler);
     }
 
     int audio_stride = audio_chunk - 2 * audio_overlap;
@@ -368,17 +428,13 @@ static int vae_enc_encode_tiled(VAEEncoder *  m,
             return -1;
         }
 
-        // Read tile output [ne0=tile_T, ne1=128], extract mean (ch 0..63), transpose
-        // Only read the first 64 channels (mean), skip scale channels 64..127
+        // Read tile output [ne0=tile_T, ne1=128], then transpose the retained region.
         size_t             out_bytes = (size_t) 128 * tile_T * sizeof(float);
         std::vector<float> raw(128 * tile_T);
         ggml_backend_tensor_get(m->graph_output, raw.data(), 0, out_bytes);
 
-        for (int t = 0; t < core_len; t++) {
-            for (int c = 0; c < 64; c++) {
-                latent_out[(latent_write_pos + t) * 64 + c] = raw[c * tile_T + (trim_start + t)];
-            }
-        }
+        vae_enc_extract_latents(
+            raw.data(), tile_T, trim_start, core_len, latent_out, latent_write_pos, sampler);
 
         latent_write_pos += core_len;
     }
@@ -387,6 +443,19 @@ static int vae_enc_encode_tiled(VAEEncoder *  m,
             latent_write_pos, (float) T_audio / 48000.0f);
 
     return latent_write_pos;
+}
+
+static int vae_enc_encode_tiled_sampled(VAEEncoder *  m,
+                                        const float * audio,
+                                        int           T_audio,
+                                        float *       latent_out,
+                                        int           max_T_latent,
+                                        uint64_t      seed,
+                                        int           chunk_size = 256,
+                                        int           overlap    = 64) {
+    VAEEncLatentSampler sampler(seed);
+    return vae_enc_encode_tiled(
+        m, audio, T_audio, latent_out, max_T_latent, chunk_size, overlap, &sampler);
 }
 
 // Free all resources

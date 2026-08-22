@@ -29,6 +29,16 @@ add_executable(test-dora-backend test-dora-backend.cpp)
 target_link_libraries(test-dora-backend PRIVATE acestep-core)
 link_ggml_backends(test-dora-backend)
 
+# test-vae-latent-sampling: verify training-only posterior sampling from VAE encoder output.
+add_executable(test-vae-latent-sampling test-vae-latent-sampling.cpp)
+target_link_libraries(test-vae-latent-sampling PRIVATE acestep-core)
+link_ggml_backends(test-vae-latent-sampling)
+
+# test-train-dataset: verify paired WAV/metadata discovery and conditioning fields.
+add_executable(test-train-dataset test-train-dataset.cpp)
+target_link_libraries(test-train-dataset PRIVATE acestep-core)
+link_ggml_backends(test-train-dataset)
+
 # test-train-adapter-state: verify Gary-compatible target profiles and initialization.
 add_executable(test-train-adapter-state test-train-adapter-state.cpp)
 target_link_libraries(test-train-adapter-state PRIVATE acestep-core)

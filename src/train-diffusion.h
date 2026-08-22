@@ -16,12 +16,15 @@ struct ACETrainDiffusionConfig {
     float timestep_mean = -0.4f;
     float timestep_std  = 1.0f;
     float cfg_dropout   = 0.15f;
+    bool  min_snr       = false;
+    float min_snr_gamma = 5.0f;
 };
 
 struct ACETrainDiffusionExample {
     std::vector<float> target_latents;
     std::vector<float> context_latents;
     std::vector<float> encoder_hidden;
+    int                real_temporal_length         = 0;
     int                real_encoder_sequence_length = 0;
 };
 
@@ -33,6 +36,7 @@ struct ACETrainDiffusionBatch {
     std::vector<float>       input_latents;
     std::vector<float>       encoder_hidden;
     std::vector<float>       target_velocity;
+    std::vector<float>       loss_weights;
     std::vector<float>       timesteps;
     std::vector<float>       reference_timesteps;
     std::vector<int32_t>     positions;
@@ -50,6 +54,13 @@ static float ace_train_sigmoid(float value) {
 
 static float ace_train_timestep_from_logits(float first, float second) {
     return std::max(ace_train_sigmoid(first), ace_train_sigmoid(second));
+}
+
+static float ace_train_flow_min_snr_weight(float timestep, float gamma) {
+    const float clamped = std::max(1e-4f, std::min(1.0f - 1e-4f, timestep));
+    const float ratio = (1.0f - clamped) / clamped;
+    const float snr = std::min(1e6f, ratio * ratio);
+    return std::min(snr, gamma) / std::max(snr, 1e-6f);
 }
 
 static bool ace_prepare_train_diffusion_batch(const DiTGGML &                              model,
@@ -71,7 +82,7 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
     }
     if (!std::isfinite(config.timestep_mean) || !std::isfinite(config.timestep_std) ||
         config.timestep_std < 0.0f || !std::isfinite(config.cfg_dropout) || config.cfg_dropout < 0.0f ||
-        config.cfg_dropout > 1.0f) {
+        config.cfg_dropout > 1.0f || !std::isfinite(config.min_snr_gamma) || config.min_snr_gamma <= 0.0f) {
         error = "invalid diffusion sampling configuration";
         return false;
     }
@@ -90,7 +101,8 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
     }
     for (const ACETrainDiffusionExample & example : examples) {
         if (example.target_latents.size() != target_size || example.context_latents.size() != context_size ||
-            example.encoder_hidden.size() != encoder_size || example.real_encoder_sequence_length < 0 ||
+            example.encoder_hidden.size() != encoder_size || example.real_temporal_length <= 0 ||
+            example.real_temporal_length > temporal_length || example.real_encoder_sequence_length < 0 ||
             example.real_encoder_sequence_length > encoder_sequence_length) {
             error = "diffusion example tensor shape does not match the requested batch";
             return false;
@@ -103,6 +115,7 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
     batch.input_latents.resize((size_t) model.cfg.in_channels * temporal_length * batch_size);
     batch.encoder_hidden.resize(encoder_size * batch_size);
     batch.target_velocity.resize(target_size * batch_size);
+    batch.loss_weights.resize((size_t) temporal_length * batch_size);
     batch.timesteps.resize(batch_size);
     batch.reference_timesteps.resize(batch_size);
     batch.positions.resize((size_t) sequence_length * batch_size);
@@ -144,6 +157,14 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
         const float timestep = ace_train_timestep_from_logits(first_logits[(size_t) sample], second_logit);
         batch.timesteps[(size_t) sample] = timestep;
         batch.reference_timesteps[(size_t) sample] = timestep;
+        const float sample_weight = config.min_snr ? ace_train_flow_min_snr_weight(timestep, config.min_snr_gamma)
+                                                   : 1.0f;
+        for (int time = 0; time < temporal_length; ++time) {
+            batch.loss_weights[(size_t) sample * temporal_length + time] =
+                time < examples[(size_t) sample].real_temporal_length
+                    ? sample_weight / (float) examples[(size_t) sample].real_temporal_length
+                    : 0.0f;
+        }
     }
 
     for (int sample = 0; sample < batch_size; ++sample) {
@@ -168,11 +189,14 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
         for (int position = 0; position < sequence_length; ++position) {
             batch.positions[(size_t) sample * sequence_length + position] = position;
         }
+        const int real_sequence_length =
+            (example.real_temporal_length + model.cfg.patch_size - 1) / model.cfg.patch_size;
         for (int query = 0; query < sequence_length; ++query) {
             for (int key = 0; key < sequence_length; ++key) {
                 const int distance = query > key ? query - key : key - query;
-                const bool visible = model.cfg.sliding_window <= 0 || sequence_length <= model.cfg.sliding_window ||
-                                     distance <= model.cfg.sliding_window;
+                const bool within_window = model.cfg.sliding_window <= 0 || sequence_length <= model.cfg.sliding_window ||
+                                           distance <= model.cfg.sliding_window;
+                const bool visible = key < real_sequence_length && within_window;
                 const size_t offset = (size_t) sample * sequence_length * sequence_length +
                                       (size_t) query * sequence_length + key;
                 batch.self_attention_mask[offset] = ggml_fp32_to_fp16(visible ? 0.0f : -INFINITY);
@@ -199,6 +223,7 @@ static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             trai
         !matches(training.input_latents, batch.input_latents) ||
         !matches(training.encoder_hidden, batch.encoder_hidden) ||
         !matches(training.target_velocity, batch.target_velocity) ||
+        !matches(training.loss_weights, batch.loss_weights) ||
         !matches(training.timestep, batch.timesteps) ||
         !matches(training.reference_timestep, batch.reference_timesteps) || !training.positions ||
         (size_t) ggml_nelements(training.positions) != batch.positions.size() || !training.self_attention_mask ||
@@ -217,6 +242,8 @@ static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             trai
                             batch.target_velocity.data(),
                             0,
                             batch.target_velocity.size() * sizeof(float));
+    ggml_backend_tensor_set(
+        training.loss_weights, batch.loss_weights.data(), 0, batch.loss_weights.size() * sizeof(float));
     ggml_backend_tensor_set(
         training.timestep, batch.timesteps.data(), 0, batch.timesteps.size() * sizeof(float));
     ggml_backend_tensor_set(training.reference_timestep,

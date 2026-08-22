@@ -22,6 +22,7 @@ struct ACETrainDiTGraph {
     struct ggml_tensor *   self_attention_mask;
     struct ggml_tensor *   cross_attention_mask;
     struct ggml_tensor *   target_velocity;
+    struct ggml_tensor *   loss_weights;
     struct ggml_tensor *   velocity;
     struct ggml_tensor *   loss;
     ACETrainAdapterGraphState adapters;
@@ -116,10 +117,17 @@ static bool ace_build_train_dit_graph(DiTGGML &                   model,
                                                   batch_size);
     ggml_set_name(training.target_velocity, "target_velocity");
     ggml_set_input(training.target_velocity);
+    training.loss_weights =
+        ggml_new_tensor_2d(training.ctx, GGML_TYPE_F32, temporal_length, batch_size);
+    ggml_set_name(training.loss_weights, "loss_weights");
+    ggml_set_input(training.loss_weights);
     struct ggml_tensor * squared_error =
         ggml_sqr(training.ctx, ggml_sub(training.ctx, training.velocity, training.target_velocity));
-    const float element_count = (float) ((int64_t) model.cfg.out_channels * temporal_length * batch_size);
-    training.loss = ggml_scale(training.ctx, ggml_sum(training.ctx, squared_error), 1.0f / element_count);
+    struct ggml_tensor * per_frame_error = ggml_sum_rows(training.ctx, squared_error);
+    per_frame_error = ggml_reshape_2d(training.ctx, per_frame_error, temporal_length, batch_size);
+    per_frame_error = ggml_scale(training.ctx, per_frame_error, 1.0f / (float) model.cfg.out_channels);
+    struct ggml_tensor * weighted_error = ggml_mul(training.ctx, per_frame_error, training.loss_weights);
+    training.loss = ggml_scale(training.ctx, ggml_sum(training.ctx, weighted_error), 1.0f / (float) batch_size);
     ggml_set_name(training.loss, "flow_matching_loss");
     ggml_set_loss(training.loss);
     ggml_set_output(training.loss);

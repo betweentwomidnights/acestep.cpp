@@ -367,6 +367,7 @@ int main() {
                                       ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f) };
     const ggml_fp16_t cross_mask[] = { ggml_fp32_to_fp16(0.0f), ggml_fp32_to_fp16(0.0f) };
     const float timestep = 0.5f;
+    const float loss_weights[] = { 0.5f, 0.5f };
     ggml_backend_tensor_set(tiny_training.input_latents, latent_data, 0, sizeof(latent_data));
     ggml_backend_tensor_set(tiny_training.encoder_hidden, encoder_data, 0, sizeof(encoder_data));
     ggml_backend_tensor_set(tiny_training.target_velocity, target_data, 0, sizeof(target_data));
@@ -375,6 +376,7 @@ int main() {
     ggml_backend_tensor_set(tiny_training.cross_attention_mask, cross_mask, 0, sizeof(cross_mask));
     ggml_backend_tensor_set(tiny_training.timestep, &timestep, 0, sizeof(timestep));
     ggml_backend_tensor_set(tiny_training.reference_timestep, &timestep, 0, sizeof(timestep));
+    ggml_backend_tensor_set(tiny_training.loss_weights, loss_weights, 0, sizeof(loss_weights));
     ggml_graph_reset(tiny_training.graph);
     if (ggml_backend_graph_compute(tiny.backend, tiny_training.graph) != GGML_STATUS_SUCCESS) {
         ace_free_train_dit_graph(tiny_training);
@@ -454,20 +456,33 @@ int main() {
     examples[0].context_latents = { 0.5f, 0.6f, 0.7f, 0.8f };
     examples[0].encoder_hidden = { 0.2f, -0.1f, 0.05f, 0.3f };
     examples[0].real_encoder_sequence_length = 1;
+    examples[0].real_temporal_length = 1;
     examples[1].target_latents = { -0.4f, 0.3f, -0.2f, 0.1f };
     examples[1].context_latents = { -0.8f, -0.7f, -0.6f, -0.5f };
     examples[1].encoder_hidden = { -0.3f, 0.05f, -0.1f, 0.2f };
     examples[1].real_encoder_sequence_length = 1;
+    examples[1].real_temporal_length = 2;
     const std::vector<float> null_condition = { 0.9f, 0.8f, 0.7f, 0.6f };
     ACETrainDiffusionConfig diffusion_config;
     diffusion_config.timestep_mean = 0.0f;
     diffusion_config.timestep_std = 0.0f;
     diffusion_config.cfg_dropout = 1.0f;
+    diffusion_config.min_snr = true;
+    diffusion_config.min_snr_gamma = 5.0f;
     if (std::fabs(ace_train_timestep_from_logits(-2.0f, 1.0f) - ace_train_sigmoid(1.0f)) > 1e-7f) {
         ggml_backend_free(tiny.backend);
         ggml_free(tiny_ctx);
         ggml_free(ctx);
         return fail("ACE-Step timestep sampling must keep the maximum of the sampled pair");
+    }
+    const float expected_low_t_weight = 5.0f / 81.0f;
+    if (std::fabs(ace_train_flow_min_snr_weight(0.1f, 5.0f) - expected_low_t_weight) > 1e-6f ||
+        ace_train_flow_min_snr_weight(0.5f, 5.0f) != 1.0f ||
+        ace_train_flow_min_snr_weight(0.9f, 5.0f) != 1.0f) {
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("flow Min-SNR weights do not match Gary's timestep convention");
     }
     ACETrainDiffusionBatch batch;
     if (!ace_prepare_train_diffusion_batch(
@@ -480,12 +495,23 @@ int main() {
     }
     if (batch.timesteps.size() != 2 || batch.timesteps[0] != 0.5f || batch.timesteps[1] != 0.5f ||
         batch.reference_timesteps != batch.timesteps || batch.input_latents.size() != 16 ||
-        batch.target_velocity.size() != 8 || batch.encoder_hidden.size() != 8 ||
+        batch.target_velocity.size() != 8 || batch.encoder_hidden.size() != 8 || batch.loss_weights.size() != 4 ||
+        batch.loss_weights != std::vector<float>({ 1.0f, 0.0f, 0.5f, 0.5f }) ||
         batch.positions != std::vector<int32_t>({ 0, 1, 0, 1 })) {
         ggml_backend_free(tiny.backend);
         ggml_free(tiny_ctx);
         ggml_free(ctx);
         return fail("prepared diffusion batch dimensions or fixed timesteps are incorrect");
+    }
+    if (!std::isinf(ggml_fp16_to_fp32(batch.self_attention_mask[1])) ||
+        ggml_fp16_to_fp32(batch.self_attention_mask[1]) >= 0.0f ||
+        ggml_fp16_to_fp32(batch.self_attention_mask[0]) != 0.0f ||
+        ggml_fp16_to_fp32(batch.self_attention_mask[2]) != 0.0f ||
+        !std::isinf(ggml_fp16_to_fp32(batch.self_attention_mask[3]))) {
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("self attention must hide padded keys without creating an all-masked padded query");
     }
     for (size_t sample = 0; sample < examples.size(); ++sample) {
         for (int time = 0; time < 2; ++time) {
