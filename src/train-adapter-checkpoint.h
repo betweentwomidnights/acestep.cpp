@@ -170,7 +170,7 @@ static bool ace_save_train_adapter_checkpoint(const std::string &          direc
         tensors.push_back({ module + ".lora_A.weight", { param.target.rank, param.target.in }, &param.a });
         tensors.push_back({ module + ".lora_B.weight", { param.target.out, param.target.rank }, &param.b });
         if (state.adapter_type == "dora-rows") {
-            tensors.push_back({ module + ".lora_magnitude_vector.weight", { param.target.out }, &param.magnitude });
+            tensors.push_back({ module + ".lora_magnitude_vector", { param.target.out }, &param.magnitude });
         }
     }
 
@@ -199,6 +199,15 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
     }
     if (config.rank != targets.front().base_rank || config.lora_alpha != targets.front().base_alpha) {
         error = "checkpoint base rank or alpha does not match the requested training configuration";
+        return false;
+    }
+    const std::set<std::string> saved_modules(config.target_modules.begin(), config.target_modules.end());
+    std::set<std::string>       requested_modules;
+    for (const ACETrainAdapterTarget & target : targets) {
+        requested_modules.insert(target.module_name);
+    }
+    if (saved_modules.size() != config.target_modules.size() || saved_modules != requested_modules) {
+        error = "checkpoint target modules do not match the requested module profile";
         return false;
     }
     for (const ACETrainAdapterTarget & target : targets) {
@@ -235,12 +244,15 @@ static bool ace_load_train_adapter_checkpoint(const std::string &               
         const std::string module = ace_checkpoint_module_path(target.weight_name);
         const STEntry *   a = find_entry(module + ".lora_A.weight");
         const STEntry *   b = find_entry(module + ".lora_B.weight");
-        const STEntry *   magnitude = find_entry(module + ".lora_magnitude_vector.weight");
+        const STEntry *   magnitude = find_entry(module + ".lora_magnitude_vector");
         if (!a) {
             a = find_entry(module + ".lora_A.default.weight");
         }
         if (!b) {
             b = find_entry(module + ".lora_B.default.weight");
+        }
+        if (!magnitude) {
+            magnitude = find_entry(module + ".lora_magnitude_vector.weight");
         }
         if (!magnitude) {
             magnitude = find_entry(module + ".lora_magnitude_vector.default");

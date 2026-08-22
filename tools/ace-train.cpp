@@ -340,11 +340,12 @@ static bool train_adapter(const ACETrainCommand &                   command,
     ACETrainAdapterOptimizer optimizer;
     int completed_epochs = 0;
     if (command.resume_dir) {
-        const std::filesystem::path resume_path(command.resume_dir);
-        const bool complete_checkpoint =
-            std::filesystem::is_regular_file(resume_path / "trainer_state.json") &&
-            std::filesystem::is_regular_file(resume_path / "optimizer_state.safetensors");
-        const bool loaded = complete_checkpoint ?
+        ACETrainCheckpointKind checkpoint_kind;
+        if (!ace_train_checkpoint_kind(command.resume_dir, checkpoint_kind, error)) {
+            dit_ggml_free(&model);
+            return false;
+        }
+        const bool loaded = checkpoint_kind == ACE_TRAIN_CHECKPOINT_FULL ?
                                 ace_load_train_checkpoint(command.resume_dir,
                                                           targets,
                                                           state,
@@ -435,7 +436,7 @@ static bool train_adapter(const ACETrainCommand &                   command,
             }
             float loss = 0.0f;
             if (!ace_compute_train_adapter_gradients(graph, batch, loss, error) ||
-                !ace_train_adapter_accumulate_gradients(graph, accumulator, error)) {
+                !ace_train_adapter_accumulate_gradients(graph, accumulator, (int) collated.size(), error)) {
                 ace_free_train_dit_graph(graph);
                 dit_ggml_free(&model);
                 return false;

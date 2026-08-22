@@ -14,6 +14,7 @@ struct adapter_config {
     int                        rank       = 0;
     int                        lora_alpha = 0;
     bool                       use_dora   = false;
+    std::vector<std::string>   target_modules;
     std::map<std::string, int> rank_pattern;
     std::map<std::string, int> alpha_pattern;
 };
@@ -28,6 +29,19 @@ static void adapter_read_pattern(yyjson_val * value, std::map<std::string, int> 
         yyjson_val * item = yyjson_obj_iter_get_val(key);
         if (yyjson_is_str(key) && yyjson_is_int(item) && yyjson_get_int(item) > 0) {
             pattern[yyjson_get_str(key)] = (int) yyjson_get_int(item);
+        }
+    }
+}
+
+static void adapter_read_target_modules(yyjson_val * value, std::vector<std::string> & modules) {
+    if (!value || !yyjson_is_arr(value)) {
+        return;
+    }
+    yyjson_arr_iter iterator = yyjson_arr_iter_with(value);
+    yyjson_val *    item;
+    while ((item = yyjson_arr_iter_next(&iterator))) {
+        if (yyjson_is_str(item)) {
+            modules.emplace_back(yyjson_get_str(item));
         }
     }
 }
@@ -82,6 +96,7 @@ static bool adapter_read_config(const char * dir, adapter_config & config) {
     if (use_dora && yyjson_is_bool(use_dora)) {
         config.use_dora = yyjson_get_bool(use_dora);
     }
+    adapter_read_target_modules(yyjson_obj_get(root, "target_modules"), config.target_modules);
     adapter_read_pattern(yyjson_obj_get(root, "rank_pattern"), config.rank_pattern);
     adapter_read_pattern(yyjson_obj_get(root, "alpha_pattern"), config.alpha_pattern);
     yyjson_doc_free(document);

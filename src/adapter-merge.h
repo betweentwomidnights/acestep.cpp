@@ -132,7 +132,13 @@ static bool lora_is_b(const std::string & key) {
 }
 
 static bool lora_is_magnitude(const std::string & key) {
-    return key.find(".lora_magnitude_vector.") != std::string::npos;
+    const std::string marker = ".lora_magnitude_vector";
+    const size_t      position = key.find(marker);
+    if (position == std::string::npos) {
+        return false;
+    }
+    const size_t end = position + marker.size();
+    return end == key.size() || key[end] == '.';
 }
 
 // Read linear_dim from LyCORIS __metadata__.lokr_config for LoKr payloads.

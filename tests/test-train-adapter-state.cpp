@@ -15,7 +15,9 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -228,7 +230,7 @@ int main() {
     const std::string expected_b_key =
         "base_model.model.layers.0.self_attn.q_proj.lora_B.weight";
     const std::string expected_magnitude_key =
-        "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector.weight";
+        "base_model.model.layers.0.self_attn.q_proj.lora_magnitude_vector";
     const STEntry * saved_a = nullptr;
     const STEntry * saved_b = nullptr;
     const STEntry * saved_magnitude = nullptr;
@@ -253,6 +255,7 @@ int main() {
     st_close(&saved_adapter);
     adapter_config config;
     if (!adapter_read_config(checkpoint_dir.string().c_str(), config) || config.rank != 64 || !config.use_dora ||
+        std::set<std::string>(config.target_modules.begin(), config.target_modules.end()).size() != 11 ||
         config.rank_pattern["self_attn.q_proj"] != 16 || config.rank_pattern["self_attn.v_proj"] != 80 ||
         config.alpha_pattern["self_attn.q_proj"] != 32 || config.alpha_pattern["self_attn.v_proj"] != 160 ||
         adapter_config_value_for_weight(config.alpha_pattern,
@@ -276,6 +279,30 @@ int main() {
         ggml_free(ctx);
         return 1;
     }
+
+    ACETrainAdapterState rejected_profile;
+    if (ace_load_train_adapter_checkpoint(checkpoint_dir.string(), attention, rejected_profile, error)) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("checkpoint resume must reject a different target module inventory");
+    }
+    ACETrainCheckpointKind checkpoint_kind;
+    if (!ace_train_checkpoint_kind(checkpoint_dir.string(), checkpoint_kind, error) ||
+        checkpoint_kind != ACE_TRAIN_CHECKPOINT_ADAPTER) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("PEFT-only checkpoint must remain eligible for weight-only resume");
+    }
+    {
+        std::ofstream progress(checkpoint_dir / "trainer_state.json");
+        progress << "{}\n";
+    }
+    if (ace_train_checkpoint_kind(checkpoint_dir.string(), checkpoint_kind, error)) {
+        std::filesystem::remove_all(checkpoint_dir);
+        ggml_free(ctx);
+        return fail("checkpoint resume must reject a single native companion file");
+    }
+    std::filesystem::remove(checkpoint_dir / "trainer_state.json");
 
     ACETrainAdapterState incompatible_config = state;
     incompatible_config.base_alpha            = 64;
@@ -463,12 +490,51 @@ int main() {
         return fail("warmup and cosine learning-rate schedule does not match the trainer contract");
     }
     ACETrainAdapterGradientAccumulator accumulated_gradients;
-    if (!ace_train_adapter_accumulate_gradients(tiny_training, accumulated_gradients, error) ||
-        !ace_train_adapter_accumulate_gradients(tiny_training, accumulated_gradients, error) ||
+    if (!ace_train_adapter_accumulate_gradients(tiny_training, accumulated_gradients, 2, error) ||
+        !ace_train_adapter_accumulate_gradients(tiny_training, accumulated_gradients, 1, error) ||
         accumulated_gradients.microbatch_count != 2 ||
-        !ace_train_adapter_adamw_step_accumulated(
+        accumulated_gradients.example_count != 3) {
+        std::fprintf(stderr, "FAIL: native gradient accumulation: %s\n", error.c_str());
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    auto matches_weighted_gradient = [&](ggml_tensor * parameter, const std::vector<float> & sum) {
+        if (!parameter) {
+            return sum.empty();
+        }
+        ggml_tensor * gradient = ggml_graph_get_grad(tiny_training.graph, parameter);
+        if (!gradient) {
+            gradient = ggml_graph_get_grad_acc(tiny_training.graph, parameter);
+        }
+        if (!gradient || sum.size() != (size_t) ggml_nelements(gradient)) {
+            return false;
+        }
+        std::vector<float> values(sum.size());
+        ggml_backend_tensor_get(gradient, values.data(), 0, values.size() * sizeof(float));
+        for (size_t i = 0; i < values.size(); ++i) {
+            const float expected = values[i] * 3.0f;
+            const float tolerance = std::max(1e-7f, std::fabs(expected) * 1e-5f);
+            if (std::fabs(sum[i] - expected) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    };
+    bool weighted_accumulation = true;
+    for (size_t i = 0; i < tiny_training.adapters.params.size(); ++i) {
+        const ACETrainAdapterGraphParam & graph_param = tiny_training.adapters.params[i];
+        const ACETrainAdapterGradientParam & sum = accumulated_gradients.params[i];
+        weighted_accumulation = weighted_accumulation && matches_weighted_gradient(graph_param.a, sum.a) &&
+                                matches_weighted_gradient(graph_param.b, sum.b) &&
+                                matches_weighted_gradient(graph_param.magnitude, sum.magnitude);
+    }
+    if (!weighted_accumulation || !ace_train_adapter_adamw_step_accumulated(
             tiny_training, tiny_state, optimizer, optimizer_config, accumulated_gradients, error) ||
-        optimizer.step != 1 || accumulated_gradients.microbatch_count != 0) {
+        optimizer.step != 1 || accumulated_gradients.microbatch_count != 0 ||
+        accumulated_gradients.example_count != 0) {
         std::fprintf(stderr, "FAIL: native AdamW step: %s\n", error.c_str());
         ace_free_train_dit_graph(tiny_training);
         ggml_backend_free(tiny.backend);

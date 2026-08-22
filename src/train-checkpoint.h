@@ -13,6 +13,26 @@
 #include <string>
 #include <vector>
 
+enum ACETrainCheckpointKind {
+    ACE_TRAIN_CHECKPOINT_ADAPTER,
+    ACE_TRAIN_CHECKPOINT_FULL,
+};
+
+static bool ace_train_checkpoint_kind(const std::string &      directory,
+                                      ACETrainCheckpointKind & kind,
+                                      std::string &            error) {
+    const std::filesystem::path path(directory);
+    const bool has_progress = std::filesystem::is_regular_file(path / "trainer_state.json");
+    const bool has_optimizer = std::filesystem::is_regular_file(path / "optimizer_state.safetensors");
+    if (has_progress != has_optimizer) {
+        error = "training checkpoint is incomplete";
+        return false;
+    }
+    kind = has_progress ? ACE_TRAIN_CHECKPOINT_FULL : ACE_TRAIN_CHECKPOINT_ADAPTER;
+    error.clear();
+    return true;
+}
+
 static std::string ace_optimizer_tensor_name(const ACETrainAdapterTarget & target,
                                              const char *                  parameter,
                                              const char *                  moment) {
