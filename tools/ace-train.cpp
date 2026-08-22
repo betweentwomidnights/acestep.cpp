@@ -300,15 +300,11 @@ static bool preprocess_dataset(const ACETrainCommand &             command,
         return false;
     }
 
-    prepared.resize(sources.size());
-    for (size_t i = 0; i < sources.size(); ++i) {
-        std::fprintf(stderr, "[Ace-Train] Preprocess %zu/%zu: %s\n", i + 1, sources.size(), sources[i].name.c_str());
-        if (!ace_prepare_training_example(
-                synth, sources[i], command.seed + (uint64_t) i, command.preprocess, prepared[i], error)) {
-            ace_synth_free(synth);
-            store_free(store);
-            return false;
-        }
+    std::fprintf(stderr, "[Ace-Train] Preprocessing %zu examples in model phases\n", sources.size());
+    if (!ace_prepare_training_dataset(synth, sources, command.seed, command.preprocess, prepared, error)) {
+        ace_synth_free(synth);
+        store_free(store);
+        return false;
     }
     const DiTMeta * metadata = store_dit_meta(store, dit_entry.path.c_str());
     if (!metadata || !ace_training_null_condition(synth, null_condition, error)) {

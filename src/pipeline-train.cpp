@@ -70,15 +70,17 @@ bool ace_validate_training_audio(const std::string & path, int & samples, std::s
     return true;
 }
 
-bool ace_prepare_training_example(AceSynth *                       synth,
-                                  const ACETrainingExample &       source,
-                                  uint64_t                         seed,
-                                  const ACETrainPreprocessConfig & config,
-                                  ACETrainDiffusionExample &       prepared,
-                                  std::string &                    error) {
+static bool ace_prepare_training_audio(AceSynth *                 synth,
+                                       VAEEncoder *               encoder,
+                                       const ACETrainingExample & source,
+                                       uint64_t                   seed,
+                                       ACETrainDiffusionExample & prepared,
+                                       float &                    duration,
+                                       std::string &              error) {
     prepared = {};
+    duration = 0.0f;
     error.clear();
-    if (!synth || !synth->store || !synth->meta || synth->Oc <= 0 || synth->ctx_ch < synth->Oc ||
+    if (!synth || !encoder || !synth->meta || synth->Oc <= 0 || synth->ctx_ch < synth->Oc ||
         synth->meta->cfg.patch_size <= 0) {
         error = "invalid ACE-Step synthesis context for training preprocessing";
         return false;
@@ -100,24 +102,14 @@ bool ace_prepare_training_example(AceSynth *                       synth,
 
     const int maximum_latent_length = audio_length / 1920 + 64;
     std::vector<float> target((size_t) maximum_latent_length * synth->Oc);
-    int real_temporal_length = -1;
-    {
-        VAEEncoder * encoder = store_require_vae_enc(synth->store, synth->vae_enc_key);
-        if (!encoder) {
-            free(audio);
-            error = "could not load the VAE encoder for training preprocessing";
-            return false;
-        }
-        ModelHandle encoder_guard(synth->store, encoder);
-        real_temporal_length = vae_enc_encode_tiled_sampled(encoder,
-                                                            audio,
-                                                            audio_length,
-                                                            target.data(),
-                                                            maximum_latent_length,
-                                                            seed,
-                                                            synth->params.vae_chunk,
-                                                            synth->params.vae_overlap);
-    }
+    const int real_temporal_length = vae_enc_encode_tiled_sampled(encoder,
+                                                                  audio,
+                                                                  audio_length,
+                                                                  target.data(),
+                                                                  maximum_latent_length,
+                                                                  seed,
+                                                                  synth->params.vae_chunk,
+                                                                  synth->params.vae_overlap);
     free(audio);
     if (real_temporal_length <= 0) {
         error = "VAE training posterior encoding failed: " + source.audio_path.string();
@@ -133,25 +125,7 @@ bool ace_prepare_training_example(AceSynth *                       synth,
     }
     target.resize((size_t) temporal_length * synth->Oc, 0.0f);
 
-    const float duration = (float) audio_length / 48000.0f;
-    const AceRequest request = ace_training_request(source, duration, config);
-    SynthState state = {};
-    state.Oc                = synth->Oc;
-    state.ctx_ch            = synth->ctx_ch;
-    state.rr                = request;
-    state.duration          = duration;
-    state.instruction_str   = DIT_INSTR_TEXT2MUSIC;
-    state.use_source_context = false;
-    state.is_repaint        = false;
-    state.is_lego_region    = false;
-    debug_init(&state.dbg, synth->params.dump_dir);
-    ops_encode_timbre(synth, nullptr, 0, nullptr, 0, state);
-    if (ops_encode_text(synth, &request, 1, state) != 0 || state.per_enc_S.empty() || state.per_enc_S[0] <= 0 ||
-        state.enc_hidden.empty()) {
-        error = "ACE-Step text conditioning failed for training example: " + source.metadata_path.string();
-        return false;
-    }
-
+    duration = (float) audio_length / 48000.0f;
     prepared.target_latents = std::move(target);
     prepared.context_latents.resize((size_t) temporal_length * synth->ctx_ch);
     for (int time = 0; time < temporal_length; ++time) {
@@ -160,8 +134,84 @@ bool ace_prepare_training_example(AceSynth *                       synth,
         std::copy(silence, silence + synth->Oc, destination);
         std::fill(destination + synth->Oc, destination + synth->ctx_ch, 1.0f);
     }
-    prepared.encoder_hidden = std::move(state.enc_hidden);
     prepared.real_temporal_length = real_temporal_length;
-    prepared.real_encoder_sequence_length = state.per_enc_S[0];
+    return true;
+}
+
+bool ace_prepare_training_dataset(AceSynth *                              synth,
+                                  const std::vector<ACETrainingExample> & sources,
+                                  uint64_t                                seed,
+                                  const ACETrainPreprocessConfig &        config,
+                                  std::vector<ACETrainDiffusionExample> & prepared,
+                                  std::string &                           error) {
+    prepared.clear();
+    error.clear();
+    if (!synth || !synth->store || sources.empty()) {
+        error = "training preprocessing requires a model context and at least one example";
+        return false;
+    }
+
+    prepared.resize(sources.size());
+    std::vector<float> durations(sources.size());
+    {
+        VAEEncoder * encoder = store_require_vae_enc(synth->store, synth->vae_enc_key);
+        if (!encoder) {
+            error = "could not load the VAE encoder for training preprocessing";
+            return false;
+        }
+        ModelHandle encoder_guard(synth->store, encoder);
+        for (size_t i = 0; i < sources.size(); ++i) {
+            if (!ace_prepare_training_audio(
+                    synth, encoder, sources[i], seed + (uint64_t) i, prepared[i], durations[i], error)) {
+                return false;
+            }
+        }
+    }
+
+    std::vector<AceRequest> requests;
+    requests.reserve(sources.size());
+    for (size_t i = 0; i < sources.size(); ++i) {
+        requests.push_back(ace_training_request(sources[i], durations[i], config));
+    }
+    SynthState state = {};
+    state.Oc                 = synth->Oc;
+    state.ctx_ch             = synth->ctx_ch;
+    state.rr                 = requests[0];
+    state.duration           = durations[0];
+    state.instruction_str    = DIT_INSTR_TEXT2MUSIC;
+    state.use_source_context = false;
+    state.is_repaint         = false;
+    state.is_lego_region     = false;
+    debug_init(&state.dbg, synth->params.dump_dir);
+    ops_encode_timbre(synth, nullptr, 0, nullptr, 0, state);
+    if (ops_encode_text(synth, requests.data(), (int) requests.size(), state) != 0 ||
+        state.per_enc_S.size() != sources.size() || state.max_enc_S <= 0 || state.enc_hidden.empty() ||
+        state.enc_hidden.size() % ((size_t) state.max_enc_S * sources.size()) != 0) {
+        error = "ACE-Step text conditioning failed for the training dataset";
+        return false;
+    }
+
+    const size_t hidden_size = state.enc_hidden.size() / ((size_t) state.max_enc_S * sources.size());
+    const size_t sample_size = (size_t) state.max_enc_S * hidden_size;
+    for (size_t i = 0; i < prepared.size(); ++i) {
+        const float * first = state.enc_hidden.data() + i * sample_size;
+        prepared[i].encoder_hidden.assign(first, first + sample_size);
+        prepared[i].real_encoder_sequence_length = state.per_enc_S[i];
+    }
+    return true;
+}
+
+bool ace_prepare_training_example(AceSynth *                       synth,
+                                  const ACETrainingExample &       source,
+                                  uint64_t                         seed,
+                                  const ACETrainPreprocessConfig & config,
+                                  ACETrainDiffusionExample &       prepared,
+                                  std::string &                    error) {
+    std::vector<ACETrainDiffusionExample> examples;
+    if (!ace_prepare_training_dataset(synth, { source }, seed, config, examples, error)) {
+        prepared = {};
+        return false;
+    }
+    prepared = std::move(examples[0]);
     return true;
 }

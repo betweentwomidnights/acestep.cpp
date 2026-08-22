@@ -467,7 +467,8 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
         for (int b = 0; b < batch_n; b++) {
             std::string text_str;
             std::string lyric_str;
-            build_prompt_strings(reqs[b], s.instruction_str, s.duration, text_str, lyric_str);
+            const float duration = reqs[b].duration > 0.0f ? reqs[b].duration : s.duration;
+            build_prompt_strings(reqs[b], s.instruction_str, duration, text_str, lyric_str);
 
             auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
             auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);
@@ -486,7 +487,8 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             for (int b = 0; b < batch_n; b++) {
                 std::string text_str;
                 std::string lyric_str;
-                build_prompt_strings(reqs[b], DIT_INSTR_TEXT2MUSIC, s.duration, text_str, lyric_str);
+                const float duration = reqs[b].duration > 0.0f ? reqs[b].duration : s.duration;
+                build_prompt_strings(reqs[b], DIT_INSTR_TEXT2MUSIC, duration, text_str, lyric_str);
 
                 auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
                 auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);

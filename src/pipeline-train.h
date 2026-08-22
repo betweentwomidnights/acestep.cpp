@@ -33,6 +33,13 @@ bool ace_prepare_training_example(AceSynth *                       synth,
                                   ACETrainDiffusionExample &       prepared,
                                   std::string &                    error);
 
+bool ace_prepare_training_dataset(AceSynth *                              synth,
+                                  const std::vector<ACETrainingExample> & sources,
+                                  uint64_t                                seed,
+                                  const ACETrainPreprocessConfig &        config,
+                                  std::vector<ACETrainDiffusionExample> & prepared,
+                                  std::string &                           error);
+
 bool ace_training_null_condition(const AceSynth * synth, std::vector<float> & condition, std::string & error);
 
 bool ace_validate_training_audio(const std::string & path, int & samples, std::string & error);
