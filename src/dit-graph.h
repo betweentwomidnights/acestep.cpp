@@ -383,7 +383,8 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
                                                  struct ggml_tensor *  ca_mask,    // [enc_S, S, 1, N] or NULL
                                                  int                   S,
                                                  int                   enc_S,
-                                                 int                   N) {
+                                                 int                   N,
+                                                 bool                  debug_outputs = true) {
     DiTGGMLConfig & c  = m->cfg;
     DiTGGMLLayer *  ly = &m->layers[layer_idx];
     int             H  = c.hidden_size;
@@ -412,22 +413,23 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
     struct ggml_tensor * norm_sa  = dit_ggml_rms_norm_weighted(ctx, hidden, ly->self_attn_norm, c.rms_norm_eps);
     norm_sa                       = dit_ggml_adaln(ctx, norm_sa, scale_sa, shift_sa, m->scalar_one);
 
-    if (layer_idx == 0) {
+    if (debug_outputs && layer_idx == 0) {
         ggml_set_name(norm_sa, "layer0_sa_input");
         ggml_set_output(norm_sa);
     }
 
     // sa_mask is pre-selected by the caller (sliding window for layer_type=0, NULL for layer_type=1)
-    struct ggml_tensor * sa_out = dit_ggml_build_self_attn(ctx, m, ly, norm_sa, positions, sa_mask, S, N, layer_idx);
+    struct ggml_tensor * sa_out =
+        dit_ggml_build_self_attn(ctx, m, ly, norm_sa, positions, sa_mask, S, N, debug_outputs ? layer_idx : -1);
 
-    if (layer_idx == 0) {
+    if (debug_outputs && layer_idx == 0) {
         ggml_set_name(sa_out, "layer0_sa_output");
         ggml_set_output(sa_out);
     }
 
     hidden = dit_ggml_gated_add(ctx, residual, sa_out, gate_sa);
 
-    if (layer_idx == 0) {
+    if (debug_outputs && layer_idx == 0) {
         ggml_set_name(hidden, "layer0_after_self_attn");
         ggml_set_output(hidden);
     }
@@ -440,7 +442,7 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
         hidden = ggml_add(ctx, hidden, ca_out);
     }
 
-    if (layer_idx == 0) {
+    if (debug_outputs && layer_idx == 0) {
         ggml_set_name(hidden, "layer0_after_cross_attn");
         ggml_set_output(hidden);
     }

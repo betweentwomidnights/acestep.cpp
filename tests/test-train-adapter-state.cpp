@@ -578,6 +578,79 @@ int main() {
         ggml_free(ctx);
         return fail("tiny training graph must produce finite loss and a nonzero adapter gradient");
     }
+
+    ACETrainDiffusionBatch parity_batch;
+    parity_batch.batch_size              = 1;
+    parity_batch.temporal_length         = 2;
+    parity_batch.encoder_sequence_length = 1;
+    parity_batch.input_latents.assign(latent_data, latent_data + 8);
+    parity_batch.encoder_hidden.assign(encoder_data, encoder_data + 4);
+    parity_batch.target_velocity.assign(target_data, target_data + 4);
+    parity_batch.loss_weights.assign(loss_weights, loss_weights + 2);
+    parity_batch.timesteps.assign(1, timestep);
+    parity_batch.reference_timesteps.assign(1, timestep);
+    parity_batch.positions.assign(position_data, position_data + 2);
+    parity_batch.self_attention_mask.assign(self_mask, self_mask + 4);
+    parity_batch.full_self_attention_mask.assign(self_mask, self_mask + 4);
+    parity_batch.cross_attention_mask.assign(cross_mask, cross_mask + 2);
+
+    ACETrainAdapterGradientAccumulator monolithic_parity;
+    if (!ace_train_adapter_accumulate_gradients(tiny_training, monolithic_parity, 1, error)) {
+        std::fprintf(stderr, "FAIL: monolithic parity gradients: %s\n", error.c_str());
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    ACETrainDiTCheckpoint              checkpointed_training;
+    ACETrainAdapterGradientAccumulator checkpointed_parity;
+    float                              checkpointed_loss = 0.0f;
+    if (!ace_build_train_dit_checkpoint(tiny, tiny_state, 2, 1, 1, checkpointed_training, error) ||
+        !tiny.use_flash_attn ||
+        !ace_compute_train_adapter_gradients_checkpointed(checkpointed_training, parity_batch, checkpointed_parity, 1,
+                                                          checkpointed_loss, error)) {
+        std::fprintf(stderr, "FAIL: checkpointed tiny training: %s\n", error.c_str());
+        ace_free_train_dit_checkpoint(checkpointed_training);
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return 1;
+    }
+    auto gradient_vectors_match = [](const std::vector<float> & first_values,
+                                     const std::vector<float> & second_values) {
+        if (first_values.size() != second_values.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < first_values.size(); ++i) {
+            const float tolerance = std::max(2e-6f, std::fabs(first_values[i]) * 2e-4f);
+            if (std::fabs(first_values[i] - second_values[i]) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    };
+    bool checkpoint_gradients_match = monolithic_parity.params.size() == checkpointed_parity.params.size();
+    for (size_t i = 0; checkpoint_gradients_match && i < monolithic_parity.params.size(); ++i) {
+        checkpoint_gradients_match =
+            gradient_vectors_match(monolithic_parity.params[i].a, checkpointed_parity.params[i].a) &&
+            gradient_vectors_match(monolithic_parity.params[i].b, checkpointed_parity.params[i].b) &&
+            gradient_vectors_match(monolithic_parity.params[i].magnitude, checkpointed_parity.params[i].magnitude);
+    }
+    if (std::fabs(tiny_loss - checkpointed_loss) > 1e-6f || !checkpoint_gradients_match ||
+        checkpointed_parity.microbatch_count != 1 || checkpointed_parity.example_count != 1) {
+        std::fprintf(stderr, "FAIL: checkpoint parity monolithic_loss=%f checkpoint_loss=%f\n", tiny_loss,
+                     checkpointed_loss);
+        ace_free_train_dit_checkpoint(checkpointed_training);
+        ace_free_train_dit_graph(tiny_training);
+        ggml_backend_free(tiny.backend);
+        ggml_free(tiny_ctx);
+        ggml_free(ctx);
+        return fail("checkpointed backward must match monolithic loss and adapter gradients");
+    }
+    ace_free_train_dit_checkpoint(checkpointed_training);
+
     std::vector<float> parameters_before;
     for (const ACETrainAdapterParam & param : tiny_state.params) {
         parameters_before.insert(parameters_before.end(), param.a.begin(), param.a.end());

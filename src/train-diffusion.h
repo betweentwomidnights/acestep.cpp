@@ -4,6 +4,7 @@
 #pragma once
 
 #include "train-adapter-optimizer.h"
+#include "train-dit-checkpoint.h"
 
 #include <algorithm>
 #include <cmath>
@@ -286,9 +287,10 @@ static bool ace_prepare_train_diffusion_batch(const DiTGGML &                   
     return true;
 }
 
-static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             training,
-                                             const ACETrainDiffusionBatch & batch,
-                                             std::string &                  error) {
+template <typename TrainingGraph>
+static bool ace_upload_train_diffusion_batch_impl(TrainingGraph &                training,
+                                                  const ACETrainDiffusionBatch & batch,
+                                                  std::string &                  error) {
     error.clear();
     auto matches = [](const ggml_tensor * tensor, const std::vector<float> & values) {
         return tensor && (size_t) ggml_nelements(tensor) == values.size();
@@ -335,6 +337,18 @@ static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             trai
     return true;
 }
 
+static bool ace_upload_train_diffusion_batch(ACETrainDiTGraph &             training,
+                                             const ACETrainDiffusionBatch & batch,
+                                             std::string &                  error) {
+    return ace_upload_train_diffusion_batch_impl(training, batch, error);
+}
+
+static bool ace_upload_train_diffusion_batch(ACETrainDiTCheckpoint &        training,
+                                             const ACETrainDiffusionBatch & batch,
+                                             std::string &                  error) {
+    return ace_upload_train_diffusion_batch_impl(training, batch, error);
+}
+
 static bool ace_compute_train_adapter_gradients(ACETrainDiTGraph &             training,
                                                 const ACETrainDiffusionBatch & batch,
                                                 float &                        loss,
@@ -358,6 +372,62 @@ static bool ace_compute_train_adapter_gradients(ACETrainDiTGraph &             t
         error = "DiT training loss is not finite";
         return false;
     }
+    return true;
+}
+
+static bool ace_compute_train_adapter_gradients_checkpointed(ACETrainDiTCheckpoint &              training,
+                                                             const ACETrainDiffusionBatch &       batch,
+                                                             ACETrainAdapterGradientAccumulator & accumulator,
+                                                             int                                  example_count,
+                                                             float &                              loss,
+                                                             std::string &                        error) {
+    loss = 0.0f;
+    if (!training.backend) {
+        error = "DiT training backend is not initialized";
+        return false;
+    }
+    if (!ace_upload_train_diffusion_batch(training, batch, error)) {
+        return false;
+    }
+    auto compute = [&](struct ggml_cgraph * graph, const char * segment) {
+        const enum ggml_status status = ggml_backend_graph_compute(training.backend, graph);
+        if (status != GGML_STATUS_SUCCESS) {
+            error = std::string("checkpointed DiT ") + segment + " graph execution failed";
+            return false;
+        }
+        return true;
+    };
+
+    if (!compute(training.forward_graph, "forward")) {
+        return false;
+    }
+    ggml_graph_reset(training.tail_graph);
+    if (!compute(training.tail_graph, "tail")) {
+        return false;
+    }
+    ggml_backend_tensor_get(training.loss, &loss, 0, sizeof(loss));
+    if (!std::isfinite(loss)) {
+        error = "checkpointed DiT training loss is not finite";
+        return false;
+    }
+
+    for (int layer = training.layer_count - 1; layer >= 0; --layer) {
+        ACETrainDiTCheckpointBlock & block = training.blocks[(size_t) layer];
+        if (!ggml_gallocr_alloc_graph(block.allocator, block.graph)) {
+            error = "failed to allocate checkpointed DiT block graph";
+            return false;
+        }
+        ggml_graph_reset(block.graph);
+        if (!compute(block.graph, "block")) {
+            return false;
+        }
+        if (!ace_train_adapter_accumulate_gradient_subset(training.adapters, block.graph, block.param_indices,
+                                                          accumulator, example_count, false, error)) {
+            return false;
+        }
+    }
+    accumulator.microbatch_count += 1;
+    accumulator.example_count += example_count;
     return true;
 }
 

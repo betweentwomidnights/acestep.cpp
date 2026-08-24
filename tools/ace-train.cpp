@@ -21,31 +21,32 @@
 #include <vector>
 
 struct ACETrainCommand {
-    const char *             models_dir       = nullptr;
-    const char *             dataset_dir      = nullptr;
-    const char *             output_dir       = nullptr;
-    const char *             resume_dir       = nullptr;
-    const char *             dit_name         = nullptr;
-    const char *             text_name        = nullptr;
-    const char *             vae_name         = nullptr;
-    std::string              adapter_type     = "dora-rows";
-    std::string              module_profile   = "balanced";
-    int                      rank             = 64;
-    int                      alpha            = 128;
-    int                      epochs           = 10;
-    int                      batch_size       = 1;
-    int                      accumulation     = 1;
-    int                      warmup_steps     = 10;
-    int                      restart_count    = 1;
-    uint64_t                 seed             = 42;
-    float                    learning_rate    = 1e-4f;
-    float                    weight_decay     = 0.01f;
-    float                    max_grad_norm    = 1.0f;
-    float                    cfg_dropout      = 0.15f;
-    bool                     min_snr          = false;
-    float                    min_snr_gamma    = 5.0f;
-    bool                     validate_dataset = false;
-    ACETrainSchedule         schedule         = ACE_TRAIN_SCHEDULE_COSINE;
+    const char *             models_dir          = nullptr;
+    const char *             dataset_dir         = nullptr;
+    const char *             output_dir          = nullptr;
+    const char *             resume_dir          = nullptr;
+    const char *             dit_name            = nullptr;
+    const char *             text_name           = nullptr;
+    const char *             vae_name            = nullptr;
+    std::string              adapter_type        = "dora-rows";
+    std::string              module_profile      = "balanced";
+    int                      rank                = 64;
+    int                      alpha               = 128;
+    int                      epochs              = 10;
+    int                      batch_size          = 1;
+    int                      accumulation        = 1;
+    int                      warmup_steps        = 10;
+    int                      restart_count       = 1;
+    uint64_t                 seed                = 42;
+    float                    learning_rate       = 1e-4f;
+    float                    weight_decay        = 0.01f;
+    float                    max_grad_norm       = 1.0f;
+    float                    cfg_dropout         = 0.15f;
+    bool                     min_snr             = false;
+    float                    min_snr_gamma       = 5.0f;
+    bool                     checkpoint_backward = true;
+    bool                     validate_dataset    = false;
+    ACETrainSchedule         schedule            = ACE_TRAIN_SCHEDULE_COSINE;
     ACETrainPreprocessConfig preprocess;
 };
 
@@ -77,6 +78,7 @@ static void usage(const char * program) {
                  "  --restart-count <N>         Cosine restart cycles (default: 1)\n"
                  "  --cfg-dropout <F>           Conditioning dropout (default: 0.15)\n"
                  "  --min-snr [gamma]           Enable flow Min-SNR weighting (default gamma: 5)\n"
+                 "  --checkpoint-backward <B>  Recompute layers during backward (default: true)\n"
                  "  --seed <N>                  Deterministic seed (default: 42)\n\n"
                  "Conditioning:\n"
                  "  --use-genre                 Use genre instead of caption when available\n"
@@ -126,6 +128,21 @@ static bool read_float(const char * value, float & result) {
     }
     result = parsed;
     return true;
+}
+
+static bool read_bool(const char * value, bool & result) {
+    if (!value) {
+        return false;
+    }
+    if (!std::strcmp(value, "true") || !std::strcmp(value, "1") || !std::strcmp(value, "on")) {
+        result = true;
+        return true;
+    }
+    if (!std::strcmp(value, "false") || !std::strcmp(value, "0") || !std::strcmp(value, "off")) {
+        result = false;
+        return true;
+    }
+    return false;
 }
 
 static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
@@ -216,6 +233,10 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
                 if (!read_float(next(), command.min_snr_gamma)) {
                     return false;
                 }
+            }
+        } else if (!std::strcmp(option, "--checkpoint-backward")) {
+            if (!read_bool(next(), command.checkpoint_backward)) {
+                return false;
             }
         } else if (!std::strcmp(option, "--schedule")) {
             const char * value = next();
@@ -410,15 +431,33 @@ static bool train_adapter(const ACETrainCommand &                       command,
                 dit_ggml_free(&model);
                 return false;
             }
-            ACETrainDiTGraph graph;
-            if (!ace_build_train_dit_graph(model, state, temporal_length, encoder_sequence_length,
-                                           (int) collated.size(), graph, error)) {
-                dit_ggml_free(&model);
-                return false;
+            ACETrainDiTGraph            graph;
+            ACETrainDiTCheckpoint       checkpoint;
+            ACETrainAdapterGraphState * graph_adapters = nullptr;
+            if (command.checkpoint_backward) {
+                if (!ace_build_train_dit_checkpoint(model, state, temporal_length, encoder_sequence_length,
+                                                    (int) collated.size(), checkpoint, error)) {
+                    dit_ggml_free(&model);
+                    return false;
+                }
+                graph_adapters = &checkpoint.adapters;
+            } else {
+                if (!ace_build_train_dit_graph(model, state, temporal_length, encoder_sequence_length,
+                                               (int) collated.size(), graph, error)) {
+                    dit_ggml_free(&model);
+                    return false;
+                }
+                graph_adapters = &graph.adapters;
             }
-            float loss = 0.0f;
-            if (!ace_compute_train_adapter_gradients(graph, batch, loss, error) ||
-                !ace_train_adapter_accumulate_gradients(graph, accumulator, (int) collated.size(), error)) {
+            float      loss = 0.0f;
+            const bool gradients_ok =
+                command.checkpoint_backward ?
+                    ace_compute_train_adapter_gradients_checkpointed(checkpoint, batch, accumulator,
+                                                                     (int) collated.size(), loss, error) :
+                    (ace_compute_train_adapter_gradients(graph, batch, loss, error) &&
+                     ace_train_adapter_accumulate_gradients(graph, accumulator, (int) collated.size(), error));
+            if (!gradients_ok) {
+                ace_free_train_dit_checkpoint(checkpoint);
                 ace_free_train_dit_graph(graph);
                 dit_ggml_free(&model);
                 return false;
@@ -432,8 +471,9 @@ static bool train_adapter(const ACETrainCommand &                       command,
                 optimizer_config.learning_rate =
                     ace_train_learning_rate(command.learning_rate, optimizer.step, total_steps, command.warmup_steps,
                                             command.schedule, command.restart_count);
-                if (!ace_train_adapter_adamw_step_accumulated(graph, state, optimizer, optimizer_config, accumulator,
-                                                              error)) {
+                if (!ace_train_adapter_adamw_step_accumulated(*graph_adapters, state, optimizer, optimizer_config,
+                                                              accumulator, error)) {
+                    ace_free_train_dit_checkpoint(checkpoint);
                     ace_free_train_dit_graph(graph);
                     dit_ggml_free(&model);
                     return false;
@@ -442,6 +482,7 @@ static bool train_adapter(const ACETrainCommand &                       command,
                              command.epochs, optimizer.step, total_steps, batch_index + 1, batches_per_epoch, loss,
                              optimizer_config.learning_rate);
             }
+            ace_free_train_dit_checkpoint(checkpoint);
             ace_free_train_dit_graph(graph);
         }
         const std::string checkpoint =
