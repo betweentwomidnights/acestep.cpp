@@ -138,6 +138,25 @@ GGML_BACKEND=MTL0 ./build/ace-train \
     --profile balanced
 ```
 
+Memory-bounded training can select a deterministic, rotating latent-space
+window for every song and epoch without modifying the dataset:
+
+```bash
+GGML_BACKEND=CUDA0 ./build/ace-train \
+    --models ./models \
+    --dataset ./training-data \
+    --output ./adapters/my-windowed-adapter \
+    --window-min-seconds 45 \
+    --window-max-seconds 60 \
+    --checkpoint-backward true
+```
+
+This baseline crops only the audio latents. The complete caption, lyrics, and
+full-song duration from the sidecar remain attached to every window, and each
+logged window includes its reproducible song name, offset, and duration.
+`--examples-per-epoch N` can bound diagnostic runs while preserving
+deterministic epoch-level resume; zero uses the complete dataset.
+
 Use `CUDA0`, `Vulkan0`, `MTL0`, or `CPU` for `GGML_BACKEND`. The output
 directory contains PEFT-compatible adapter files and complete native optimizer
 state. Pass an epoch checkpoint or PEFT adapter directory to `--resume`. Run

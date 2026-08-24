@@ -44,6 +44,11 @@ add_executable(test-train-dataset test-train-dataset.cpp)
 target_link_libraries(test-train-dataset PRIVATE acestep-core)
 link_ggml_backends(test-train-dataset)
 
+# test-train-window: verify deterministic latent cropping and conditioning preservation.
+add_executable(test-train-window test-train-window.cpp)
+target_link_libraries(test-train-window PRIVATE acestep-core)
+link_ggml_backends(test-train-window)
+
 # test-train-adapter-state: verify Gary-compatible target profiles and initialization.
 add_executable(test-train-adapter-state test-train-adapter-state.cpp)
 target_link_libraries(test-train-adapter-state PRIVATE acestep-core)
@@ -64,6 +69,7 @@ ace_register_test(test-dora-backend)
 ace_register_test(test-adapter-merge)
 ace_register_test(test-vae-latent-sampling)
 ace_register_test(test-train-dataset)
+ace_register_test(test-train-window)
 ace_register_test(test-train-adapter-state)
 
 set_tests_properties(
@@ -71,6 +77,7 @@ set_tests_properties(
     test-adapter-merge
     test-vae-latent-sampling
     test-train-dataset
+    test-train-window
     test-train-adapter-state
     PROPERTIES LABELS "ace;training;unit")
 

@@ -8,6 +8,7 @@
 #include "pipeline-train.h"
 #include "train-checkpoint.h"
 #include "train-diffusion.h"
+#include "train-window.h"
 #include "version.h"
 
 #include <algorithm>
@@ -46,6 +47,8 @@ struct ACETrainCommand {
     float                    min_snr_gamma       = 5.0f;
     bool                     checkpoint_backward = true;
     bool                     validate_dataset    = false;
+    int                      examples_per_epoch  = 0;
+    ACETrainWindowConfig     window;
     ACETrainSchedule         schedule            = ACE_TRAIN_SCHEDULE_COSINE;
     ACETrainPreprocessConfig preprocess;
 };
@@ -79,6 +82,9 @@ static void usage(const char * program) {
                  "  --cfg-dropout <F>           Conditioning dropout (default: 0.15)\n"
                  "  --min-snr [gamma]           Enable flow Min-SNR weighting (default gamma: 5)\n"
                  "  --checkpoint-backward <B>  Recompute layers during backward (default: true)\n"
+                 "  --window-min-seconds <F>   Minimum rotating audio crop; 0 disables (default: 0)\n"
+                 "  --window-max-seconds <F>   Maximum rotating audio crop; set with minimum\n"
+                 "  --examples-per-epoch <N>   Deterministic epoch subset; 0 uses all (default: 0)\n"
                  "  --seed <N>                  Deterministic seed (default: 42)\n\n"
                  "Conditioning:\n"
                  "  --use-genre                 Use genre instead of caption when available\n"
@@ -238,6 +244,18 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
             if (!read_bool(next(), command.checkpoint_backward)) {
                 return false;
             }
+        } else if (!std::strcmp(option, "--window-min-seconds")) {
+            if (!read_float(next(), command.window.min_seconds)) {
+                return false;
+            }
+        } else if (!std::strcmp(option, "--window-max-seconds")) {
+            if (!read_float(next(), command.window.max_seconds)) {
+                return false;
+            }
+        } else if (!std::strcmp(option, "--examples-per-epoch")) {
+            if (!read_integer(next(), command.examples_per_epoch)) {
+                return false;
+            }
         } else if (!std::strcmp(option, "--schedule")) {
             const char * value = next();
             if (!value) {
@@ -285,6 +303,7 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
            command.accumulation > 0 && command.restart_count > 0 && command.learning_rate > 0.0f &&
            command.weight_decay >= 0.0f && command.max_grad_norm >= 0.0f && command.cfg_dropout >= 0.0f &&
            command.cfg_dropout <= 1.0f && command.min_snr_gamma > 0.0f &&
+           ace_train_window_config_valid(command.window) &&
            (command.adapter_type == "lora" || command.adapter_type == "dora-rows") &&
            (command.module_profile == "attention" || command.module_profile == "balanced");
 }
@@ -301,12 +320,18 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
                                const ModelEntry &                      text_entry,
                                const ModelEntry &                      vae_entry,
                                std::vector<ACETrainDiffusionExample> & prepared,
+                               std::vector<std::string> &             example_names,
                                std::vector<float> &                    silence_latents,
                                std::vector<float> &                    null_condition,
                                std::string &                           error) {
     std::vector<ACETrainingExample> sources;
     if (!ace_training_load_dataset(command.dataset_dir, sources, error)) {
         return false;
+    }
+    example_names.clear();
+    example_names.reserve(sources.size());
+    for (const ACETrainingExample & source : sources) {
+        example_names.push_back(source.name);
     }
     ModelStore *   store = store_create(EVICT_STRICT);
     AceSynthParams params;
@@ -342,10 +367,15 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
 static bool train_adapter(const ACETrainCommand &                       command,
                           const ModelEntry &                            dit_entry,
                           const std::vector<ACETrainDiffusionExample> & prepared,
+                          const std::vector<std::string> &              example_names,
                           const std::vector<float> &                    silence_latents,
                           const std::vector<float> &                    null_condition,
                           std::string &                                 error) {
     std::string base_model_fingerprint;
+    if (prepared.empty() || example_names.size() != prepared.size()) {
+        error = "prepared training examples and source names do not match";
+        return false;
+    }
     if (!ace_file_fingerprint(dit_entry.path, base_model_fingerprint, error)) {
         return false;
     }
@@ -383,7 +413,10 @@ static bool train_adapter(const ACETrainCommand &                       command,
         return false;
     }
 
-    const int batches_per_epoch = ((int) prepared.size() + command.batch_size - 1) / command.batch_size;
+    const int examples_per_epoch = command.examples_per_epoch > 0 ?
+                                       std::min(command.examples_per_epoch, (int) prepared.size()) :
+                                       (int) prepared.size();
+    const int batches_per_epoch = (examples_per_epoch + command.batch_size - 1) / command.batch_size;
     const int updates_per_epoch = (batches_per_epoch + command.accumulation - 1) / command.accumulation;
     const int total_steps       = updates_per_epoch * command.epochs;
     if (completed_epochs > command.epochs) {
@@ -401,19 +434,49 @@ static bool train_adapter(const ACETrainCommand &                       command,
     diffusion_config.min_snr_gamma = command.min_snr_gamma;
 
     std::vector<size_t> order(prepared.size());
-    std::iota(order.begin(), order.end(), 0);
+    if (command.window.max_seconds > 0.0f) {
+        std::fprintf(stderr,
+                     "[Ace-Train] Rotating windows %.2f-%.2fs, full-song caption/lyrics/duration conditioning retained\n",
+                     command.window.min_seconds, command.window.max_seconds);
+    }
+    if (examples_per_epoch != (int) prepared.size()) {
+        std::fprintf(stderr, "[Ace-Train] Using %d/%zu examples per epoch (deterministic shuffled subset)\n",
+                     examples_per_epoch, prepared.size());
+    }
     for (int epoch = completed_epochs; epoch < command.epochs; ++epoch) {
+        std::iota(order.begin(), order.end(), 0);
         std::mt19937_64 shuffle(command.seed + (uint64_t) epoch);
         std::shuffle(order.begin(), order.end(), shuffle);
         double epoch_loss    = 0.0;
         int    epoch_batches = 0;
         for (int batch_index = 0; batch_index < batches_per_epoch; ++batch_index) {
             const int                             first = batch_index * command.batch_size;
-            const int                             last  = std::min(first + command.batch_size, (int) prepared.size());
+            const int                             last  = std::min(first + command.batch_size, examples_per_epoch);
             std::vector<ACETrainDiffusionExample> sources;
             sources.reserve((size_t) (last - first));
             for (int i = first; i < last; ++i) {
-                sources.push_back(prepared[order[(size_t) i]]);
+                const size_t                  source_index = order[(size_t) i];
+                ACETrainDiffusionExample      windowed;
+                ACETrainWindow                window;
+                const int output_channels  = model.cfg.out_channels;
+                const int context_channels = model.cfg.in_channels - output_channels;
+                if (!ace_train_crop_example(prepared[source_index], output_channels, context_channels,
+                                            model.cfg.patch_size, command.window, command.seed, epoch, source_index,
+                                            windowed, window, error)) {
+                    dit_ggml_free(&model);
+                    return false;
+                }
+                const float full_seconds =
+                    (float) prepared[source_index].real_temporal_length / ACE_TRAIN_LATENTS_PER_SECOND;
+                const float offset_seconds = (float) window.first_latent / ACE_TRAIN_LATENTS_PER_SECOND;
+                const float window_seconds = (float) windowed.real_temporal_length / ACE_TRAIN_LATENTS_PER_SECOND;
+                if (command.window.max_seconds > 0.0f) {
+                    std::fprintf(stderr,
+                                 "[Ace-Train] window epoch=%d example=\"%s\" offset=%.2fs duration=%.2fs full=%.2fs conditioning=full-song\n",
+                                 epoch + 1, example_names[source_index].c_str(), offset_seconds, window_seconds,
+                                 full_seconds);
+                }
+                sources.push_back(std::move(windowed));
             }
 
             std::vector<ACETrainDiffusionExample> collated;
@@ -431,8 +494,8 @@ static bool train_adapter(const ACETrainCommand &                       command,
                 dit_ggml_free(&model);
                 return false;
             }
-            ACETrainDiTGraph            graph;
-            ACETrainDiTCheckpoint       checkpoint;
+            ACETrainDiTGraph            graph      = {};
+            ACETrainDiTCheckpoint       checkpoint = {};
             ACETrainAdapterGraphState * graph_adapters = nullptr;
             if (command.checkpoint_backward) {
                 if (!ace_build_train_dit_checkpoint(model, state, temporal_length, encoder_sequence_length,
@@ -487,6 +550,7 @@ static bool train_adapter(const ACETrainCommand &                       command,
         }
         const std::string checkpoint =
             std::string(command.output_dir) + "/checkpoint-epoch-" + std::to_string(epoch + 1);
+        std::fprintf(stderr, "[Ace-Train] saving epoch checkpoint=%s\n", checkpoint.c_str());
         if (!ace_save_train_checkpoint(checkpoint, state, optimizer, epoch + 1, base_model_fingerprint, error)) {
             dit_ggml_free(&model);
             return false;
@@ -544,10 +608,12 @@ int main(int argc, char ** argv) {
 
     std::string                           error;
     std::vector<ACETrainDiffusionExample> prepared;
+    std::vector<std::string>              example_names;
     std::vector<float>                    silence_latents;
     std::vector<float>                    null_condition;
-    if (!preprocess_dataset(command, *dit, *text_encoder, *vae, prepared, silence_latents, null_condition, error) ||
-        !train_adapter(command, *dit, prepared, silence_latents, null_condition, error)) {
+    if (!preprocess_dataset(command, *dit, *text_encoder, *vae, prepared, example_names, silence_latents,
+                            null_condition, error) ||
+        !train_adapter(command, *dit, prepared, example_names, silence_latents, null_condition, error)) {
         std::fprintf(stderr, "[Ace-Train] ERROR: %s\n", error.c_str());
         return 1;
     }
