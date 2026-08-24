@@ -23,7 +23,7 @@ static bool adapter_checkpoint_directory(const std::filesystem::path & requested
     }
     const std::filesystem::path        pointer        = requested / "checkpoint.current";
     const std::filesystem::file_status pointer_status = std::filesystem::symlink_status(pointer, filesystem_error);
-    if (filesystem_error == std::make_error_code(std::errc::no_such_file_or_directory)) {
+    if (filesystem_error == std::make_error_condition(std::errc::no_such_file_or_directory)) {
         filesystem_error.clear();
     }
     if (filesystem_error) {

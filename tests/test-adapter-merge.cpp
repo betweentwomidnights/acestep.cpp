@@ -28,6 +28,29 @@ static bool nearly_equal(float actual, float expected) {
     return std::fabs(actual - expected) < 1e-4f * std::fmax(1.0f, std::fabs(expected));
 }
 
+static bool q4_k_host_roundtrip() {
+    const int64_t       ne0 = 256;
+    const int64_t       ne1 = 2;
+    std::vector<float>  source((size_t) ne0 * ne1);
+    std::vector<float>  decoded(source.size());
+    std::vector<uint8_t> quantized(ggml_row_size(GGML_TYPE_Q4_K, ne0) * (size_t) ne1);
+    for (size_t i = 0; i < source.size(); ++i) {
+        source[i] = std::sin((float) i * 0.071f) * 2.0f + std::cos((float) i * 0.013f) * 0.25f;
+    }
+    const size_t encoded =
+        adapter_requant(source.data(), quantized.data(), (int64_t) source.size(), ne0, GGML_TYPE_Q4_K);
+    if (encoded != quantized.size() ||
+        !adapter_dequant(quantized.data(), decoded.data(), ne0, ne1, GGML_TYPE_Q4_K)) {
+        return false;
+    }
+    double squared_error = 0.0;
+    for (size_t i = 0; i < source.size(); ++i) {
+        const double difference = (double) decoded[i] - source[i];
+        squared_error += difference * difference;
+    }
+    return squared_error / (double) source.size() < 0.02;
+}
+
 static ACETrainAdapterParam make_param(const char *       weight_name,
                                        const char *       module_name,
                                        int                rank,
@@ -172,6 +195,11 @@ static bool rejects_adapter_merge(const std::filesystem::path &     directory,
 }
 
 int main() {
+    if (!q4_k_host_roundtrip()) {
+        std::fputs("Q4_K host adapter decode/requant roundtrip failed\n", stderr);
+        return 1;
+    }
+
     temporary_directory directory{
         std::filesystem::temp_directory_path() / ("ace-adapter-merge-" + std::to_string(std::random_device{}())),
     };

@@ -17,9 +17,11 @@
 // even when destined for a fused QKV tensor. We patch each one separately,
 // so fusion proceeds normally on already merged data.
 //
-// Performance: one backend graph per tensor runs the full pipeline. The base
-// weight is uploaded in its native GGUF type directly from the mmap, the
-// backend dequantizes it to F32 via ggml_cast, the adapter delta is built
+// Performance: one backend graph per tensor runs the full pipeline. Plain
+// floating-point base weights are uploaded in their native GGUF type and cast
+// to F32 by the backend. Quantized bases are decoded row-by-row on the host
+// because CUDA does not implement every native -> F32 copy (notably Q4_K).
+// The adapter delta is built
 // from adapter factors at their serialized precision, added to base, DoRA
 // rescaled when requested, then cast back to the native GGUF type when the
 // backend supports that encode direction. LyCORIS deltas retain their BF16
@@ -28,9 +30,8 @@
 // ACE-Step GGUFs ship in BF16, Q8_0, Q4_K_M, Q5_K_M, and Q6_K. On CUDA the
 // backend encode cast handles F32 -> BF16 and F32 -> Q8_0 directly; the
 // K-quants have no F32 -> native kernel so the graph terminates at F32 and
-// ggml_quantize_chunk completes the job on host. Either way the base upload
-// PCIe is cut vs a prior F32 upload, and the dequant, add, optional BF16 round and
-// DoRA rescale all run on the backend.
+// ggml_quantize_chunk completes the job on host. The add, optional BF16 round,
+// and DoRA rescale all run on the backend.
 // PendingCopy lookup is O(1) via hashmap.
 
 #include "adapter-checkpoint-directory.h"
@@ -232,6 +233,26 @@ static size_t adapter_requant(const float * src, void * dst, int64_t nel, int64_
     return 0;
 }
 
+// Decode a native GGML tensor to host F32 one row at a time. Quantized GGML
+// conversion routines require row-aligned input, so keeping ne0 as the row
+// width is important for K-quants.
+static bool adapter_dequant(const void * src, float * dst, int64_t ne0, int64_t ne1, enum ggml_type type) {
+    if (type == GGML_TYPE_F32) {
+        memcpy(dst, src, (size_t) ne0 * (size_t) ne1 * sizeof(float));
+        return true;
+    }
+    const struct ggml_type_traits * traits = ggml_get_type_traits(type);
+    if (!traits->to_float) {
+        fprintf(stderr, "[Adapter] WARNING: no dequant for type %d\n", type);
+        return false;
+    }
+    const size_t row_size = ggml_row_size(type, ne0);
+    for (int64_t row = 0; row < ne1; ++row) {
+        traits->to_float((const uint8_t *) src + (size_t) row * row_size, dst + row * ne0, ne0);
+    }
+    return true;
+}
+
 // True when the backend has an F32 -> native encode cast kernel for this type.
 // Probed via ggml_backend_supports_op on a throwaway GGML_OP_CPY tensor: the
 // backend only inspects src[0]->type and src[1]->type so no buffer allocation
@@ -321,7 +342,7 @@ static bool adapter_detect_lokr(const STFile & st) {
 //           major (out_feat, in_feat). The lambda is also responsible for
 //           uploading its own adapter factors to the backend inside the
 //           helper's alloc_ctx_tensors sweep (see pattern below).
-//   helper: upload base in native type from mmap, dequant to F32 on backend,
+//   helper: decode quantized base weights on the host when required, upload F32,
 //           apply payload-specific delta semantics, add base + delta, encode
 //           back to native when supported, and download into staging.
 //
@@ -370,6 +391,7 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     int64_t nel       = ne0 * ne1;
     size_t  base_nb   = ggml_row_size(ttype, ne0) * (size_t) ne1;
     bool    encode_ok = adapter_backend_can_encode(backend, ttype);
+    bool    host_decode = ggml_get_type_traits(ttype)->is_quantized;
 
     // slack for the largest graph (DoRA + optional BF16 round + cast in/out + caller subgraph)
     size_t                  meta   = ggml_tensor_overhead() * 64 + ggml_graph_overhead() + 32 * 1024;
@@ -379,9 +401,20 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         return false;
     }
 
-    // base uploaded in native type, dequant to F32 on backend via ggml_cast
-    struct ggml_tensor * tbase_native = ggml_new_tensor_2d(ctx, ttype, ne0, ne1);
-    struct ggml_tensor * tbase_f32    = ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
+    // CUDA cannot directly copy all quantized types to F32. Decode those on the
+    // host; retain the backend cast path for BF16/F16/F32 bases.
+    struct ggml_tensor * tbase_native = host_decode ? NULL : ggml_new_tensor_2d(ctx, ttype, ne0, ne1);
+    struct ggml_tensor * tbase_f32 =
+        host_decode ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1) :
+                      ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
+    std::vector<float> base_f32;
+    if (host_decode) {
+        base_f32.resize((size_t) nel);
+        if (!adapter_dequant(base_ptr, base_f32.data(), ne0, ne1, ttype)) {
+            ggml_free(ctx);
+            return false;
+        }
+    }
 
     // DoRA scale vector, one F32 per output row when dora_scale is set
     struct ggml_tensor * tds = ds ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, ne1) : NULL;
@@ -435,8 +468,13 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         return false;
     }
 
-    // helper-owned uploads: base in native type from mmap, ds if DoRA
-    ggml_backend_tensor_set(tbase_native, base_ptr, 0, base_nb);
+    // helper-owned uploads: host-decoded F32 for quantized bases, otherwise the
+    // native mmap bytes; ds if DoRA.
+    if (host_decode) {
+        ggml_backend_tensor_set(tbase_f32, base_f32.data(), 0, (size_t) nel * sizeof(float));
+    } else {
+        ggml_backend_tensor_set(tbase_native, base_ptr, 0, base_nb);
+    }
     if (tds) {
         ggml_backend_tensor_set(tds, ds, 0, (size_t) ne1 * sizeof(float));
     }

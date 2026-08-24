@@ -71,7 +71,8 @@ static bool ace_sync_checkpoint_path(const std::filesystem::path & path, bool di
     }
     const DWORD flags = directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
     HANDLE      handle =
-        CreateFileW(path.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        CreateFileW(path.wstring().c_str(), GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     nullptr, OPEN_EXISTING, flags, nullptr);
     if (handle == INVALID_HANDLE_VALUE || !FlushFileBuffers(handle)) {
         if (handle != INVALID_HANDLE_VALUE) {
@@ -150,7 +151,7 @@ static bool ace_publish_peft_checkpoint(const std::filesystem::path & directory,
     std::error_code             filesystem_error;
     auto inspect = [&](const std::filesystem::path & path, std::filesystem::file_status & status) {
         status = std::filesystem::symlink_status(path, filesystem_error);
-        if (filesystem_error == std::make_error_code(std::errc::no_such_file_or_directory)) {
+        if (filesystem_error == std::make_error_condition(std::errc::no_such_file_or_directory)) {
             filesystem_error.clear();
         }
         if (filesystem_error) {
