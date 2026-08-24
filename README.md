@@ -155,7 +155,9 @@ This baseline crops only the audio latents. The complete caption, lyrics, and
 full-song duration from the sidecar remain attached to every window, and each
 logged window includes its reproducible song name, offset, and duration.
 `--examples-per-epoch N` can bound diagnostic runs while preserving
-deterministic epoch-level resume; zero uses the complete dataset.
+deterministic epoch-level resume; zero uses the complete dataset. Large
+optimizer checkpoints can be throttled with `--checkpoint-every N`; zero
+disables intermediate checkpoints, and the final state is always saved once.
 
 Use `CUDA0`, `Vulkan0`, `MTL0`, or `CPU` for `GGML_BACKEND`. The output
 directory contains PEFT-compatible adapter files and complete native optimizer

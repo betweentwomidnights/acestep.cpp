@@ -38,6 +38,7 @@ struct ACETrainCommand {
     int                      accumulation        = 1;
     int                      warmup_steps        = 10;
     int                      restart_count       = 1;
+    int                      checkpoint_every     = 1;
     uint64_t                 seed                = 42;
     float                    learning_rate       = 1e-4f;
     float                    weight_decay        = 0.01f;
@@ -82,6 +83,7 @@ static void usage(const char * program) {
                  "  --cfg-dropout <F>           Conditioning dropout (default: 0.15)\n"
                  "  --min-snr [gamma]           Enable flow Min-SNR weighting (default gamma: 5)\n"
                  "  --checkpoint-backward <B>  Recompute layers during backward (default: true)\n"
+                 "  --checkpoint-every <N>     Save intermediate state every N epochs; 0 disables (default: 1)\n"
                  "  --window-min-seconds <F>   Minimum rotating audio crop; 0 disables (default: 0)\n"
                  "  --window-max-seconds <F>   Maximum rotating audio crop; set with minimum\n"
                  "  --examples-per-epoch <N>   Deterministic epoch subset; 0 uses all (default: 0)\n"
@@ -242,6 +244,10 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
             }
         } else if (!std::strcmp(option, "--checkpoint-backward")) {
             if (!read_bool(next(), command.checkpoint_backward)) {
+                return false;
+            }
+        } else if (!std::strcmp(option, "--checkpoint-every")) {
+            if (!read_integer(next(), command.checkpoint_every)) {
                 return false;
             }
         } else if (!std::strcmp(option, "--window-min-seconds")) {
@@ -548,17 +554,26 @@ static bool train_adapter(const ACETrainCommand &                       command,
             ace_free_train_dit_checkpoint(checkpoint);
             ace_free_train_dit_graph(graph);
         }
-        const std::string checkpoint =
-            std::string(command.output_dir) + "/checkpoint-epoch-" + std::to_string(epoch + 1);
-        std::fprintf(stderr, "[Ace-Train] saving epoch checkpoint=%s\n", checkpoint.c_str());
-        if (!ace_save_train_checkpoint(checkpoint, state, optimizer, epoch + 1, base_model_fingerprint, error)) {
-            dit_ggml_free(&model);
-            return false;
+        const bool final_epoch = epoch + 1 == command.epochs;
+        const bool checkpoint_due =
+            !final_epoch && command.checkpoint_every > 0 && (epoch + 1) % command.checkpoint_every == 0;
+        if (checkpoint_due) {
+            const std::string checkpoint =
+                std::string(command.output_dir) + "/checkpoint-epoch-" + std::to_string(epoch + 1);
+            std::fprintf(stderr, "[Ace-Train] saving epoch checkpoint=%s\n", checkpoint.c_str());
+            if (!ace_save_train_checkpoint(checkpoint, state, optimizer, epoch + 1, base_model_fingerprint, error)) {
+                dit_ggml_free(&model);
+                return false;
+            }
+            std::fprintf(stderr, "[Ace-Train] epoch=%d mean_loss=%.6f checkpoint=%s\n", epoch + 1,
+                         epoch_loss / (double) epoch_batches, checkpoint.c_str());
+        } else {
+            std::fprintf(stderr, "[Ace-Train] epoch=%d mean_loss=%.6f\n", epoch + 1,
+                         epoch_loss / (double) epoch_batches);
         }
-        std::fprintf(stderr, "[Ace-Train] epoch=%d mean_loss=%.6f checkpoint=%s\n", epoch + 1,
-                     epoch_loss / (double) epoch_batches, checkpoint.c_str());
     }
 
+    std::fprintf(stderr, "[Ace-Train] saving final checkpoint=%s\n", command.output_dir);
     const bool saved =
         ace_save_train_checkpoint(command.output_dir, state, optimizer, command.epochs, base_model_fingerprint, error);
     dit_ggml_free(&model);
