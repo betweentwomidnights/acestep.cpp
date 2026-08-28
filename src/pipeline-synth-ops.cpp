@@ -35,8 +35,7 @@ static const char * scan_num(const char * first, const char * last, int & v) {
 }
 
 static const char * scan_num(const char * first, const char * last, float & v) {
-#if defined(_LIBCPP_VERSION) && (_LIBCPP_VERSION < 200000 || \
-                                 !_LIBCPP_AVAILABILITY_HAS_FROM_CHARS_FLOATING_POINT)
+#if defined(_LIBCPP_VERSION) && (_LIBCPP_VERSION < 200000 || !_LIBCPP_AVAILABILITY_HAS_FROM_CHARS_FLOATING_POINT)
     const char * p   = first;
     bool         neg = false;
     if (p < last && (*p == '+' || *p == '-')) {
