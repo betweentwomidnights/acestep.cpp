@@ -168,7 +168,7 @@ static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
 //   *out_enc_S:   total sequence length
 //
 // Layout: all arrays in ggml order (ne[0]=dim contiguous, then sequence)
-static void cond_ggml_forward(CondGGML *           m,
+static bool cond_ggml_forward(CondGGML *           m,
                               const float *        text_hidden,
                               int                  S_text,
                               const float *        lyric_embed,
@@ -177,6 +177,8 @@ static void cond_ggml_forward(CondGGML *           m,
                               int                  S_ref,
                               std::vector<float> & enc_hidden,
                               int *                out_enc_S) {
+    enc_hidden.clear();
+    *out_enc_S      = 0;
     int  H          = 2048;
     bool has_timbre = (timbre_feats != NULL && S_ref > 0);
     int  S_timbre   = has_timbre ? S_ref + (m->use_timbre_cls ? 1 : 0) : 0;
@@ -289,7 +291,9 @@ static void cond_ggml_forward(CondGGML *           m,
     // Allocate and set inputs
     if (!ggml_backend_sched_alloc_graph(m->sched, gf)) {
         fprintf(stderr, "[CondEncoder] FATAL: failed to allocate graph\n");
-        exit(1);
+        ggml_backend_sched_reset(m->sched);
+        ggml_free(ctx);
+        return false;
     }
 
     ggml_backend_tensor_set(t_lyric_in, lyric_embed, 0, 1024 * S_lyric * sizeof(float));
@@ -347,7 +351,13 @@ static void cond_ggml_forward(CondGGML *           m,
     }
 
     // Compute
-    ggml_backend_sched_graph_compute(m->sched, gf);
+    const enum ggml_status status = ggml_backend_sched_graph_compute(m->sched, gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "[CondEncoder] FATAL: graph compute failed with status %d\n", (int) status);
+        ggml_backend_sched_reset(m->sched);
+        ggml_free(ctx);
+        return false;
+    }
 
     // Read outputs and pack on CPU
     // Pack order: lyric, timbre[0:1], text_proj
@@ -377,6 +387,7 @@ static void cond_ggml_forward(CondGGML *           m,
 
     ggml_backend_sched_reset(m->sched);
     ggml_free(ctx);
+    return true;
 }
 
 // Free

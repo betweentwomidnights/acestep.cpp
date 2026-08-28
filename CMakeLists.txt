@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
 project(acestep-ggml LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -21,7 +23,7 @@ find_package(Threads REQUIRED)
 
 # Suppress MSVC fopen/sprintf deprecation warnings
 if(MSVC)
-    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS "$<$<COMPILE_LANGUAGE:CXX>:NOMINMAX>")
 endif()
 
 # Put executables and backend .so in the same directory (build root).
@@ -43,11 +45,26 @@ endif()
 # Users can override with -DCMAKE_CUDA_ARCHITECTURES=native for local builds.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     find_package(CUDAToolkit QUIET)
+    set(_ace_cuda_architectures 75-virtual 80-virtual 86-real 89-real)
     if(CUDAToolkit_FOUND AND CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
-        set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real;120a-real;121a-real")
-    else()
-        set(CMAKE_CUDA_ARCHITECTURES "75-virtual;80-virtual;86-real;89-real")
+        list(APPEND _ace_cuda_architectures 120a-real)
+
+        # CUDA 12.8 knows Blackwell 120a but not 121a.  Ask nvcc instead of
+        # guessing from the toolkit version so future toolkits add 121a only
+        # when their compiler can actually accept it.
+        if(CUDAToolkit_NVCC_EXECUTABLE)
+            execute_process(
+                COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}" --list-gpu-arch
+                RESULT_VARIABLE _ace_nvcc_arch_result
+                OUTPUT_VARIABLE _ace_nvcc_architectures
+                ERROR_QUIET
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+            if(_ace_nvcc_arch_result EQUAL 0 AND _ace_nvcc_architectures MATCHES "compute_121a")
+                list(APPEND _ace_cuda_architectures 121a-real)
+            endif()
+        endif()
     endif()
+    set(CMAKE_CUDA_ARCHITECTURES "${_ace_cuda_architectures}")
 endif()
 
 # ggml as subdirectory, inherits GGML_CUDA, GGML_METAL, etc. from cmake flags
@@ -116,6 +133,7 @@ add_library(acestep-core STATIC
     src/pipeline-lm.cpp
     src/pipeline-synth.cpp
     src/pipeline-synth-ops.cpp
+    src/pipeline-train.cpp
     src/pipeline-understand.cpp
 )
 target_link_libraries(acestep-core PUBLIC yyjson)
@@ -125,6 +143,11 @@ link_ggml_backends(acestep-core)
 add_executable(ace-synth tools/ace-synth.cpp)
 target_link_libraries(ace-synth PRIVATE acestep-core)
 link_ggml_backends(ace-synth)
+
+# ace-train: native LoRA and DoRA-row adapter training.
+add_executable(ace-train tools/ace-train.cpp)
+target_link_libraries(ace-train PRIVATE acestep-core)
+link_ggml_backends(ace-train)
 
 # ace-lm: LLM inference (CoT + audio codes)
 add_executable(ace-lm tools/ace-lm.cpp)
@@ -180,4 +203,6 @@ else()
 endif()
 target_link_libraries(mp3-codec PRIVATE Threads::Threads)
 
-add_subdirectory(tests)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

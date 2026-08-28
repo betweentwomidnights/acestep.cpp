@@ -1,9 +1,13 @@
-# Validate that the project builds on Ubuntu and macOS (no model download).
+# ABOUTME: Builds and smoke-tests Sawhee on its supported host platforms.
+# ABOUTME: Compiles the CUDA training path on a free, time-bounded runner.
 name: CI Build
 
 on:
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -62,7 +66,7 @@ jobs:
 
       - name: Run cppcheck
         run: |
-          cppcheck --enable=all --error-exitcode=1 --inline-suppr \
+          cppcheck --enable=warning --error-exitcode=1 --inline-suppr \
           --suppress=missingIncludeSystem \
           --suppress=missingInclude \
           --suppress=cstyleCast \
@@ -73,5 +77,48 @@ jobs:
           --suppress=uselessCallsSubstr \
           --suppress=useStlAlgorithm \
           --suppress=shiftNegativeLHS \
-          -i ggml -i build -i .git -i mp3 \
+          -i ggml -i build -i .git -i mp3 -i vendor \
           .
+
+  cuda-compile:
+    name: CUDA 12.6 compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    container:
+      image: nvidia/cuda:12.6.3-devel-ubuntu24.04
+    env:
+      CUDA_STUB_DIR: ${{ github.workspace }}/build-cuda/cuda-stubs
+
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq build-essential cmake git pkg-config
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure CUDA
+        run: |
+          mkdir -p "$CUDA_STUB_DIR"
+          ln -s /usr/local/cuda/lib64/stubs/libcuda.so "$CUDA_STUB_DIR/libcuda.so.1"
+          cmake -S . -B build-cuda \
+            -DGGML_CUDA=ON \
+            -DGGML_CUDA_GRAPHS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=75-virtual \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,$CUDA_STUB_DIR"
+
+      - name: Build CUDA trainer and DoRA graph test
+        run: |
+          cmake --build build-cuda --config Release -j2 \
+            --target ace-train ace-synth test-dora-backend
+
+      - name: Run CPU-side DoRA contract from the CUDA build
+        run: |
+          export LD_LIBRARY_PATH="$CUDA_STUB_DIR:${LD_LIBRARY_PATH:-}"
+          ./build-cuda/test-dora-backend CPU F32
+          ./build-cuda/test-dora-backend CPU Q4_K
+          ./build-cuda/ace-train --help

@@ -1,4 +1,30 @@
-# acestep.cpp
+# Sawhee
+
+Sawhee is a native ACE-Step inference and adapter-training runtime. It adds
+LoRA and DoRA-row training to
+[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) by porting the
+training-capable GGML work from
+[sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp) onto ACE-Step's GGML
+base.
+
+Sawhee targets CPU, CUDA, Vulkan, and Metal with PEFT-compatible artifacts and
+a command-line contract suitable for a future drop-in backend for
+[gary-localhost-installer](https://github.com/betweentwomidnights/gary-localhost-installer).
+Gary itself remains outside this repository's scope.
+
+## Status
+
+The full ACE-Step fork and native trainer are present at the repository root.
+Backend-resident DoRA-row graphs with F32, Q8_0, Q4_K, Q5_K, and Q6_K frozen
+weights pass on CPU, Metal, and Vulkan. A supplied real-audio slice completed
+DoRA-row training, full-state resume, PEFT reload, and fixed-seed inference on
+Metal. The CUDA path compiles in CI, but still requires execution on matching
+hardware.
+
+See [the research report](docs/research.md) and
+[the OpenSpec proposal](openspec/changes/acestep-dora-training/proposal.md).
+
+## Runtime
 
 Local AI music generation server with browser UI, powered by GGML.
 Describe a song, get stereo 48kHz audio. Runs on CPU, CUDA, Metal, Vulkan.
@@ -27,13 +53,11 @@ Alternative: `./models.sh` downloads the default set automatically (needs `pip i
 ## Build
 
 ```
-git clone --recurse-submodules https://github.com/ServeurpersoCom/acestep.cpp.git
-cd acestep.cpp
+git clone --recurse-submodules https://github.com/twilwa/sawhee.git
+cd sawhee
 ```
 
 ### Windows
-
-Pre-built binaries (until CI is set up): https://www.serveurperso.com/temp/acestep.cpp-win64/
 
 To build from source, install
 [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
@@ -75,9 +99,71 @@ automatically when you pick a different one in the UI.
 ## Adapters
 
 Drop adapters in the `adapters/` folder and restart the server.
-Supports LoRA today in two flavours: PEFT directories (with
-`adapter_model.safetensors` + `adapter_config.json`) and ComfyUI single
-`.safetensors` files. Select the active adapter from the WebUI.
+Select the active adapter from the WebUI. See the
+[adapter format reference](adapters/README.md) for supported LoRA and DoRA
+layouts.
+
+## Train an adapter
+
+The native trainer accepts basename-matched WAV and metadata files. Each
+metadata file must contain all of these fields; lyrics can continue on lines
+after `lyrics:`.
+
+```text
+caption: Bright electronic pop with a driving beat
+genre: electronic pop
+bpm: 120
+key: C major
+signature: 4
+is_instrumental: false
+custom_tag: energetic
+lyrics: First lyric line
+Second lyric line
+```
+
+Validate the dataset before loading any models:
+
+```bash
+./build/ace-train --dataset ./training-data --validate-dataset
+```
+
+Run LoRA or DoRA-row training on a selected GGML backend:
+
+```bash
+GGML_BACKEND=MTL0 ./build/ace-train \
+    --models ./models \
+    --dataset ./training-data \
+    --output ./adapters/my-adapter \
+    --adapter-type dora-rows \
+    --profile balanced
+```
+
+Memory-bounded training can select a deterministic, rotating latent-space
+window for every song and epoch without modifying the dataset:
+
+```bash
+GGML_BACKEND=CUDA0 ./build/ace-train \
+    --models ./models \
+    --dataset ./training-data \
+    --output ./adapters/my-windowed-adapter \
+    --window-min-seconds 45 \
+    --window-max-seconds 60 \
+    --checkpoint-backward true
+```
+
+This baseline crops only the audio latents. The complete caption, lyrics, and
+full-song duration from the sidecar remain attached to every window, and each
+logged window includes its reproducible song name, offset, and duration.
+`--examples-per-epoch N` can bound diagnostic runs while preserving
+deterministic epoch-level resume; zero uses the complete dataset. Large
+optimizer checkpoints can be throttled with `--checkpoint-every N`; zero
+disables intermediate checkpoints, and the final state is always saved once.
+
+Use `CUDA0`, `Vulkan0`, `MTL0`, or `CPU` for `GGML_BACKEND`. The output
+directory contains PEFT-compatible adapter files and complete native optimizer
+state. Pass an epoch checkpoint or PEFT adapter directory to `--resume`. Run
+`./build/ace-train --help` for optimizer, scheduling, batching, and model
+selection options.
 
 ## Server options
 
@@ -89,6 +175,7 @@ Required:
 
 Adapter:
   --adapters <dir>        Directory of adapters
+  --adapter-mode <mode>   functional or merge (default: merge)
 
 Memory control:
   --keep-loaded           Keep models in VRAM between requests

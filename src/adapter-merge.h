@@ -1,3 +1,6 @@
+// ABOUTME: Merges LoRA, DoRA, and LoKr adapters into GGUF weights on the selected backend.
+// ABOUTME: Loads PEFT and LyCORIS metadata before pending weights are uploaded or fused.
+
 #pragma once
 // adapter-merge.h: runtime adapter merge into GGUF weights before QKV fusion.
 //
@@ -14,22 +17,25 @@
 // even when destined for a fused QKV tensor. We patch each one separately,
 // so fusion proceeds normally on already merged data.
 //
-// Performance: one backend graph per tensor runs the full pipeline. The base
-// weight is uploaded in its native GGUF type directly from the mmap, the
-// backend dequantizes it to F32 via ggml_cast, the adapter delta is built
-// from adapter factors, BF16 rounded in a cast chain, added to base, DoRA
+// Performance: one backend graph per tensor runs the full pipeline. Plain
+// floating-point base weights are uploaded in their native GGUF type and cast
+// to F32 by the backend. Quantized bases are decoded row-by-row on the host
+// because CUDA does not implement every native -> F32 copy (notably Q4_K).
+// The adapter delta is built
+// from adapter factors at their serialized precision, added to base, DoRA
 // rescaled when requested, then cast back to the native GGUF type when the
-// backend supports that encode direction. The result is downloaded straight
-// into the PendingCopy staging buffer.
+// backend supports that encode direction. LyCORIS deltas retain their BF16
+// weight-decomposition rule. The result is downloaded into PendingCopy staging.
 //
 // ACE-Step GGUFs ship in BF16, Q8_0, Q4_K_M, Q5_K_M, and Q6_K. On CUDA the
 // backend encode cast handles F32 -> BF16 and F32 -> Q8_0 directly; the
 // K-quants have no F32 -> native kernel so the graph terminates at F32 and
-// ggml_quantize_chunk completes the job on host. Either way the base upload
-// PCIe is cut vs a prior F32 upload, and the dequant, add, BF16 round and
-// DoRA rescale all run on the backend.
+// ggml_quantize_chunk completes the job on host. The add, optional BF16 round,
+// and DoRA rescale all run on the backend.
 // PendingCopy lookup is O(1) via hashmap.
 
+#include "adapter-checkpoint-directory.h"
+#include "adapter-config.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml.h"
@@ -50,6 +56,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -127,55 +134,35 @@ static bool lora_is_b(const std::string & key) {
     return key.find(".lora_B.") != std::string::npos || key.find(".lora_up.") != std::string::npos;
 }
 
-// Read adapter_config.json for alpha. Returns alpha or 0 if not found.
-// Rank is always read from the actual tensor shapes (more reliable).
-static int adapter_read_alpha(const char * dir) {
-    std::string path = std::string(dir) + "/adapter_config.json";
-
-    FILE * f = fopen(path.c_str(), "rb");
-    if (!f) {
-        return 0;
+static bool lora_is_magnitude(const std::string & key) {
+    const std::string marker   = ".lora_magnitude_vector";
+    const size_t      position = key.find(marker);
+    if (position == std::string::npos) {
+        return false;
     }
+    const size_t end = position + marker.size();
+    return end == key.size() || key[end] == '.';
+}
 
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    std::vector<char> buf((size_t) len + 1);
-    size_t            nr = fread(buf.data(), 1, (size_t) len, f);
-    fclose(f);
-    if (nr != (size_t) len) {
-        return 0;
+static std::string adapter_module_for_weight(const std::string & weight_name) {
+    std::string module = weight_name;
+    if (module.compare(0, 8, "decoder.") == 0) {
+        module.erase(0, 8);
     }
-    buf[(size_t) len] = '\0';
+    if (module.size() >= 7 && module.compare(module.size() - 7, 7, ".weight") == 0) {
+        module.resize(module.size() - 7);
+    }
+    return module;
+}
 
-    const char * json  = buf.data();
-    int          alpha = 0;
-
-    // look for "lora_alpha": <int>
-    const char * p = strstr(json, "\"lora_alpha\"");
-    if (p) {
-        p = strchr(p + 12, ':');
-        if (p) {
-            alpha = atoi(p + 1);
+static bool adapter_config_targets_weight(const adapter_config & config, const std::string & weight_name) {
+    const std::string module = adapter_module_for_weight(weight_name);
+    for (const std::string & target : config.target_modules) {
+        if (adapter_module_matches_pattern(module, target)) {
+            return true;
         }
     }
-
-    // fallback: try "alpha": <int> (some configs use this)
-    if (alpha == 0) {
-        p = strstr(json, "\"alpha\"");
-        if (p) {
-            p = strchr(p + 7, ':');
-            if (p) {
-                alpha = atoi(p + 1);
-            }
-        }
-    }
-
-    if (alpha > 0) {
-        fprintf(stderr, "[Adapter] adapter_config.json: alpha=%d\n", alpha);
-    }
-    return alpha;
+    return false;
 }
 
 // Read linear_dim from LyCORIS __metadata__.lokr_config for LoKr payloads.
@@ -244,6 +231,26 @@ static size_t adapter_requant(const float * src, void * dst, int64_t nel, int64_
 
     fprintf(stderr, "[Adapter] WARNING: no requant for type %d\n", type);
     return 0;
+}
+
+// Decode a native GGML tensor to host F32 one row at a time. Quantized GGML
+// conversion routines require row-aligned input, so keeping ne0 as the row
+// width is important for K-quants.
+static bool adapter_dequant(const void * src, float * dst, int64_t ne0, int64_t ne1, enum ggml_type type) {
+    if (type == GGML_TYPE_F32) {
+        memcpy(dst, src, (size_t) ne0 * (size_t) ne1 * sizeof(float));
+        return true;
+    }
+    const struct ggml_type_traits * traits = ggml_get_type_traits(type);
+    if (!traits->to_float) {
+        fprintf(stderr, "[Adapter] WARNING: no dequant for type %d\n", type);
+        return false;
+    }
+    const size_t row_size = ggml_row_size(type, ne0);
+    for (int64_t row = 0; row < ne1; ++row) {
+        traits->to_float((const uint8_t *) src + (size_t) row * row_size, dst + row * ne0, ne0);
+    }
+    return true;
 }
 
 // True when the backend has an F32 -> native encode cast kernel for this type.
@@ -335,9 +342,9 @@ static bool adapter_detect_lokr(const STFile & st) {
 //           major (out_feat, in_feat). The lambda is also responsible for
 //           uploading its own adapter factors to the backend inside the
 //           helper's alloc_ctx_tensors sweep (see pattern below).
-//   helper: upload base in native type from mmap, dequant to F32 on backend,
-//           BF16 round delta, add base + delta (plain or DoRA), encode back
-//           to native on backend when supported, download into staging.
+//   helper: decode quantized base weights on the host when required, upload F32,
+//           apply payload-specific delta semantics, add base + delta, encode
+//           back to native when supported, and download into staging.
 //
 // Upload pattern for caller-owned tensors: the lambda allocates tensors in
 // the shared ctx. The helper calls alloc_ctx_tensors once after the lambda
@@ -352,6 +359,13 @@ struct adapter_delta_build {
     std::function<void()> upload;
 };
 
+enum class adapter_merge_semantics {
+    lora,
+    peft_dora,
+    lokr,
+    lycoris_dora,
+};
+
 // Execute the unified merge graph for one tensor. Returns true on success.
 // See adapter_delta_build for the caller contract.
 static bool adapter_merge_on_backend(WeightCtx *                                                       wctx,
@@ -362,25 +376,24 @@ static bool adapter_merge_on_backend(WeightCtx *                                
                                      int64_t                                                           ne1,
                                      const float *                                                     ds,
                                      float                                                             user_scale,
+                                     adapter_merge_semantics                                           merge_semantics,
                                      ggml_backend_t                                                    backend,
                                      const char *                                                      gguf_name,
                                      const std::function<adapter_delta_build(struct ggml_context *)> & build_delta) {
-    // torch.finfo(torch.bfloat16).eps, used verbatim in LyCORIS apply_weight_decompose
-    const float eps = 7.8125e-3f;
-
     // locate the pending copy upfront: no point computing if we can't apply
     auto pc_it = pending_idx.find(base_ptr);
     if (pc_it == pending_idx.end()) {
-        fprintf(stderr, "[Adapter] WARNING: no PendingCopy for %s, skipping\n", gguf_name);
+        fprintf(stderr, "[Adapter] FATAL: no PendingCopy for %s\n", gguf_name);
         return false;
     }
     WeightCtx::PendingCopy * pc = &wctx->pending[pc_it->second];
 
-    int64_t nel       = ne0 * ne1;
-    size_t  base_nb   = ggml_row_size(ttype, ne0) * (size_t) ne1;
-    bool    encode_ok = adapter_backend_can_encode(backend, ttype);
+    int64_t nel         = ne0 * ne1;
+    size_t  base_nb     = ggml_row_size(ttype, ne0) * (size_t) ne1;
+    bool    encode_ok   = adapter_backend_can_encode(backend, ttype);
+    bool    host_decode = ggml_get_type_traits(ttype)->is_quantized;
 
-    // slack for the largest graph (DoRA + BF16 round + cast in/out + caller subgraph)
+    // slack for the largest graph (DoRA + optional BF16 round + cast in/out + caller subgraph)
     size_t                  meta   = ggml_tensor_overhead() * 64 + ggml_graph_overhead() + 32 * 1024;
     struct ggml_init_params params = { meta, NULL, true };
     struct ggml_context *   ctx    = ggml_init(params);
@@ -388,9 +401,19 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         return false;
     }
 
-    // base uploaded in native type, dequant to F32 on backend via ggml_cast
-    struct ggml_tensor * tbase_native = ggml_new_tensor_2d(ctx, ttype, ne0, ne1);
-    struct ggml_tensor * tbase_f32    = ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
+    // CUDA cannot directly copy all quantized types to F32. Decode those on the
+    // host; retain the backend cast path for BF16/F16/F32 bases.
+    struct ggml_tensor * tbase_native = host_decode ? NULL : ggml_new_tensor_2d(ctx, ttype, ne0, ne1);
+    struct ggml_tensor * tbase_f32 =
+        host_decode ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1) : ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
+    std::vector<float> base_f32;
+    if (host_decode) {
+        base_f32.resize((size_t) nel);
+        if (!adapter_dequant(base_ptr, base_f32.data(), ne0, ne1, ttype)) {
+            ggml_free(ctx);
+            return false;
+        }
+    }
 
     // DoRA scale vector, one F32 per output row when dora_scale is set
     struct ggml_tensor * tds = ds ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, ne1) : NULL;
@@ -398,28 +421,40 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     // caller builds the delta subgraph and returns its upload closure
     adapter_delta_build db = build_delta(ctx);
 
-    // BF16 round mirrors LyCORIS diff.to(base.dtype) and PEFT merge_and_unload
-    // intermediate cast. Cast chain runs entirely on backend.
-    struct ggml_tensor * tdelta_bf = ggml_cast(ctx, db.tdelta, GGML_TYPE_BF16);
-    struct ggml_tensor * tdelta_f  = ggml_cast(ctx, tdelta_bf, GGML_TYPE_F32);
+    const bool lokr_semantics =
+        merge_semantics == adapter_merge_semantics::lokr || merge_semantics == adapter_merge_semantics::lycoris_dora;
+    struct ggml_tensor * tdelta_f =
+        lokr_semantics ? ggml_cast(ctx, ggml_cast(ctx, db.tdelta, GGML_TYPE_BF16), GGML_TYPE_F32) : db.tdelta;
 
-    // merge: plain scaled add for no DoRA, weight decompose otherwise
+    // merge: plain scaled add, legacy full-delta interpolation for PEFT-formatted
+    // DoRA, or LyCORIS weight decomposition. The DoRA interpolation here is NOT
+    // PEFT's runtime set_scale behavior (which scales BA before normalization).
     struct ggml_tensor * tmerged;
     if (!tds) {
         struct ggml_tensor * td_u = (user_scale != 1.0f) ? ggml_scale(ctx, tdelta_f, user_scale) : tdelta_f;
         tmerged                   = ggml_add(ctx, tbase_f32, td_u);
     } else {
-        // DoRA per output row: scale = user * (ds / sqrt(sum_sq(m_pre)) + eps) + (1 - user)
-        struct ggml_tensor * tm_pre  = ggml_add(ctx, tbase_f32, tdelta_f);
-        struct ggml_tensor * tsq     = ggml_sqr(ctx, tm_pre);
-        struct ggml_tensor * tss     = ggml_sum_rows(ctx, tsq);  // ne=(1, out)
-        struct ggml_tensor * trn     = ggml_sqrt(ctx, tss);
-        struct ggml_tensor * trn_eps = ggml_scale_bias(ctx, trn, 1.0f, eps);
-        struct ggml_tensor * tscale  = ggml_div(ctx, tds, trn_eps);
-        struct ggml_tensor * tscale_m =
-            (user_scale != 1.0f) ? ggml_scale_bias(ctx, tscale, user_scale, 1.0f - user_scale) : tscale;
-        // broadcast (in, out) * (1, out)
-        tmerged = ggml_mul(ctx, tm_pre, tscale_m);
+        struct ggml_tensor * tm_pre = ggml_add(ctx, tbase_f32, tdelta_f);
+        struct ggml_tensor * tsq    = ggml_sqr(ctx, tm_pre);
+        struct ggml_tensor * tss    = ggml_sum_rows(ctx, tsq);  // ne=(1, out)
+        struct ggml_tensor * trn    = ggml_sqrt(ctx, tss);
+        if (merge_semantics == adapter_merge_semantics::peft_dora) {
+            struct ggml_tensor * tscale = ggml_div(ctx, tds, trn);
+            struct ggml_tensor * tfull  = ggml_mul(ctx, tm_pre, tscale);
+            if (user_scale == 1.0f) {
+                tmerged = tfull;
+            } else {
+                struct ggml_tensor * tdifference = ggml_sub(ctx, tfull, tbase_f32);
+                tmerged                          = ggml_add(ctx, tbase_f32, ggml_scale(ctx, tdifference, user_scale));
+            }
+        } else {
+            const float          eps     = 7.8125e-3f;
+            struct ggml_tensor * trn_eps = ggml_scale_bias(ctx, trn, 1.0f, eps);
+            struct ggml_tensor * tscale  = ggml_div(ctx, tds, trn_eps);
+            struct ggml_tensor * tscale_m =
+                (user_scale != 1.0f) ? ggml_scale_bias(ctx, tscale, user_scale, 1.0f - user_scale) : tscale;
+            tmerged = ggml_mul(ctx, tm_pre, tscale_m);
+        }
     }
 
     // output: native type when the backend can encode, else F32 for host requant
@@ -434,15 +469,25 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         return false;
     }
 
-    // helper-owned uploads: base in native type from mmap, ds if DoRA
-    ggml_backend_tensor_set(tbase_native, base_ptr, 0, base_nb);
+    // helper-owned uploads: host-decoded F32 for quantized bases, otherwise the
+    // native mmap bytes; ds if DoRA.
+    if (host_decode) {
+        ggml_backend_tensor_set(tbase_f32, base_f32.data(), 0, (size_t) nel * sizeof(float));
+    } else {
+        ggml_backend_tensor_set(tbase_native, base_ptr, 0, base_nb);
+    }
     if (tds) {
         ggml_backend_tensor_set(tds, ds, 0, (size_t) ne1 * sizeof(float));
     }
     // caller-owned uploads for adapter factors
     db.upload();
 
-    ggml_backend_graph_compute(backend, graph);
+    if (ggml_backend_graph_compute(backend, graph) != GGML_STATUS_SUCCESS) {
+        fprintf(stderr, "[Adapter] WARNING: backend merge graph failed for %s\n", gguf_name);
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctx);
+        return false;
+    }
 
     // allocate a staging slot sized for the native encoded weight, then download
     size_t n_floats    = (base_nb + sizeof(float) - 1) / sizeof(float);
@@ -479,18 +524,39 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 //   delta = (alpha / rank) * scale * B @ A
 // Applied to base weights in place. Alpha is read per tensor if present
 // (ComfyUI baked), else from adapter_config.json, else defaults to rank.
-static bool adapter_merge_lora(WeightCtx *         wctx,
-                               const GGUFModel &   gf,
-                               const STFile &      st,
-                               const std::string & cfg_dir,
-                               float               scale,
-                               ggml_backend_t      backend) {
-    int alpha_cfg = adapter_read_alpha(cfg_dir.c_str());
+// An optional consumer reuses the exact same parsing/validation for functional
+// inference without changing any pending base-weight copies.
+using adapter_lora_consumer = std::function<bool(const std::string &,
+                                                 const void *,
+                                                 enum ggml_type,
+                                                 int64_t,
+                                                 int64_t,
+                                                 int64_t,
+                                                 float,
+                                                 const std::vector<float> &,
+                                                 const std::vector<float> &,
+                                                 const std::vector<float> &)>;
+
+static bool adapter_merge_lora(WeightCtx *                   wctx,
+                               const GGUFModel &             gf,
+                               const STFile &                st,
+                               const std::string &           cfg_dir,
+                               bool                          peft_directory,
+                               float                         scale,
+                               ggml_backend_t                backend,
+                               const adapter_lora_consumer & consume = {}) {
+    adapter_config config;
+    const bool     config_loaded = adapter_read_config(cfg_dir.c_str(), config);
+    if (peft_directory && !config_loaded) {
+        fprintf(stderr, "[Adapter] PEFT adapter_config.json is missing or invalid\n");
+        return false;
+    }
 
     // group lora_A and lora_B entries by their GGUF base tensor name.
     // also collect per tensor alpha scalars (ComfyUI baked format).
-    std::map<std::string, const STEntry *> a_map, b_map;
+    std::map<std::string, const STEntry *> a_map, b_map, magnitude_map;
     std::map<std::string, float>           alpha_map;
+    bool                                   duplicate_entry = false;
     for (const auto & e : st.entries) {
         // per tensor alpha: "base_model.model.layers.0.self_attn.q_proj.alpha"
         // scalar F32 with shape [] containing the baked alpha value
@@ -503,7 +569,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             if (!base.empty()) {
                 float val = 0.0f;
                 memcpy(&val, st_data(st, e), sizeof(float));
-                alpha_map[base] = val;
+                duplicate_entry = !alpha_map.emplace(base, val).second || duplicate_entry;
             }
             continue;
         }
@@ -512,11 +578,18 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         if (base.empty()) {
             continue;
         }
-        if (lora_is_a(e.name)) {
-            a_map[base] = &e;
+        if (lora_is_magnitude(e.name)) {
+            duplicate_entry = !magnitude_map.emplace(base, &e).second || duplicate_entry;
+        } else if (lora_is_a(e.name)) {
+            duplicate_entry = !a_map.emplace(base, &e).second || duplicate_entry;
         } else if (lora_is_b(e.name)) {
-            b_map[base] = &e;
+            duplicate_entry = !b_map.emplace(base, &e).second || duplicate_entry;
         }
+    }
+
+    if (duplicate_entry) {
+        fprintf(stderr, "[Adapter] adapter contains duplicate tensor aliases\n");
+        return false;
     }
 
     std::unordered_map<const void *, size_t> pending_idx;
@@ -525,8 +598,91 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         pending_idx[wctx->pending[i].src] = i;
     }
 
-    int merged  = 0;
-    int skipped = 0;
+    if (peft_directory) {
+        if (a_map.empty() || a_map.size() != b_map.size() ||
+            (config.use_dora ? magnitude_map.size() != a_map.size() : !magnitude_map.empty()) ||
+            config.target_modules.empty()) {
+            fprintf(stderr, "[Adapter] PEFT adapter tensor inventory does not match adapter_config.json\n");
+            return false;
+        }
+        for (const auto & entry : b_map) {
+            if (a_map.count(entry.first) == 0) {
+                fprintf(stderr, "[Adapter] PEFT adapter contains lora_B without lora_A for %s\n", entry.first.c_str());
+                return false;
+            }
+        }
+        for (const auto & entry : magnitude_map) {
+            if (a_map.count(entry.first) == 0) {
+                fprintf(stderr, "[Adapter] PEFT adapter contains magnitude without factors for %s\n",
+                        entry.first.c_str());
+                return false;
+            }
+        }
+        for (const auto & entry : a_map) {
+            const std::string & gguf_name = entry.first;
+            const STEntry *     a         = entry.second;
+            auto                b         = b_map.find(gguf_name);
+            auto                magnitude = magnitude_map.find(gguf_name);
+            if (b == b_map.end() || (config.use_dora && magnitude == magnitude_map.end()) || a->n_dims != 2 ||
+                b->second->n_dims != 2 || a->shape[0] <= 0 || a->shape[1] <= 0 || b->second->shape[0] <= 0 ||
+                b->second->shape[1] != a->shape[0] ||
+                a->shape[0] != adapter_config_value_for_weight(config.rank_pattern, gguf_name, config.rank) ||
+                (config.use_dora &&
+                 (magnitude->second->n_dims != 1 || magnitude->second->shape[0] != b->second->shape[0]))) {
+                fprintf(stderr, "[Adapter] PEFT adapter tensor shapes are invalid for %s\n", gguf_name.c_str());
+                return false;
+            }
+            int64_t              tensor_index = gguf_find_tensor(gf.gguf, gguf_name.c_str());
+            struct ggml_tensor * tensor = tensor_index >= 0 ? ggml_get_tensor(gf.meta, gguf_name.c_str()) : nullptr;
+            if (!adapter_config_targets_weight(config, gguf_name) || !tensor || tensor->ne[0] != a->shape[1] ||
+                tensor->ne[1] != b->second->shape[0]) {
+                fprintf(stderr, "[Adapter] PEFT adapter target does not match GGUF tensor %s\n", gguf_name.c_str());
+                return false;
+            }
+            const size_t offset = gguf_get_tensor_offset(gf.gguf, tensor_index);
+            const void * base   = gf.mapping + gf.data_offset + offset;
+            if (pending_idx.count(base) == 0) {
+                fprintf(stderr, "[Adapter] PEFT adapter target is not staged for merge: %s\n", gguf_name.c_str());
+                return false;
+            }
+        }
+        std::set<std::string> serialized_targets;
+        for (const auto & entry : a_map) {
+            serialized_targets.insert(entry.first);
+        }
+        std::set<std::string> staged_targets;
+        const int64_t         tensor_count = gguf_get_n_tensors(gf.gguf);
+        for (int64_t tensor_index = 0; tensor_index < tensor_count; ++tensor_index) {
+            const char * name = gguf_get_tensor_name(gf.gguf, tensor_index);
+            if (!name || !adapter_config_targets_weight(config, name)) {
+                continue;
+            }
+            const size_t offset = gguf_get_tensor_offset(gf.gguf, tensor_index);
+            const void * base   = gf.mapping + gf.data_offset + offset;
+            if (pending_idx.count(base) != 0) {
+                staged_targets.insert(name);
+            }
+        }
+        if (serialized_targets != staged_targets) {
+            fprintf(stderr, "[Adapter] PEFT adapter module-instance inventory does not match staged GGUF targets\n");
+            return false;
+        }
+        for (const std::string & target : config.target_modules) {
+            bool target_present = false;
+            for (const auto & entry : a_map) {
+                target_present =
+                    target_present || adapter_module_matches_pattern(adapter_module_for_weight(entry.first), target);
+            }
+            if (!target_present) {
+                fprintf(stderr, "[Adapter] PEFT target module has no serialized tensors: %s\n", target.c_str());
+                return false;
+            }
+        }
+    }
+
+    int merged     = 0;
+    int skipped    = 0;
+    int dora_count = 0;
 
     for (const auto & kv : a_map) {
         const std::string & gguf_name = kv.first;
@@ -574,19 +730,18 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             continue;
         }
 
-        // alpha: prefer per tensor (ComfyUI baked), then config, fallback to rank
+        // alpha: prefer per tensor (ComfyUI baked), then module config, then global config, fallback to rank
         float alpha;
         auto  alpha_it = alpha_map.find(gguf_name);
         if (alpha_it != alpha_map.end()) {
             alpha = alpha_it->second;
-        } else if (alpha_cfg > 0) {
-            alpha = (float) alpha_cfg;
         } else {
-            alpha = (float) rank;
+            alpha = (float) adapter_config_value_for_weight(config.alpha_pattern, gguf_name,
+                                                            config.lora_alpha > 0 ? config.lora_alpha : (int) rank);
         }
-        float scaling = (alpha / (float) rank) * scale;
+        float scaling = alpha / (float) rank;
 
-        // load A and B to F32, PEFT rounds them through BF16 before the GEMM
+        // load A and B to F32 while preserving the values stored by the adapter
         int64_t            a_nel = rank * in_feat;
         int64_t            b_nel = out_feat * rank;
         std::vector<float> a_f32((size_t) a_nel);
@@ -596,9 +751,41 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             skipped++;
             continue;
         }
+
+        std::vector<float> magnitude;
+        auto               magnitude_it = magnitude_map.find(gguf_name);
+        if (magnitude_it != magnitude_map.end()) {
+            const STEntry * em            = magnitude_it->second;
+            int64_t         magnitude_nel = 1;
+            for (int dimension = 0; dimension < em->n_dims; ++dimension) {
+                magnitude_nel *= em->shape[dimension];
+            }
+            if (magnitude_nel != out_feat) {
+                fprintf(stderr,
+                        "[Adapter] WARNING: DoRA magnitude shape mismatch for %s: got %lld values, expected %lld\n",
+                        gguf_name.c_str(), (long long) magnitude_nel, (long long) out_feat);
+                skipped++;
+                continue;
+            }
+            magnitude.resize((size_t) magnitude_nel);
+            if (!adapter_to_f32(st_data(st, *em), magnitude.data(), magnitude_nel, em->dtype)) {
+                fprintf(stderr, "[Adapter] WARNING: unsupported dtype %s for DoRA magnitude\n", em->dtype.c_str());
+                skipped++;
+                continue;
+            }
+        }
         if (!adapter_to_f32(st_data(st, *eb), b_f32.data(), b_nel, eb->dtype)) {
             fprintf(stderr, "[Adapter] WARNING: unsupported dtype %s for lora_B\n", eb->dtype.c_str());
             skipped++;
+            continue;
+        }
+
+        if (consume) {
+            if (!consume(gguf_name, base_ptr, ttype, ne0, ne1, rank, scaling, a_f32, b_f32, magnitude)) {
+                return false;
+            }
+            dora_count += !magnitude.empty();
+            merged++;
             continue;
         }
 
@@ -608,11 +795,8 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         auto build = [&](struct ggml_context * ctx) {
             struct ggml_tensor * ta     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in_feat, rank);
             struct ggml_tensor * tb     = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rank, out_feat);
-            // PEFT BF16 round on A and B before the GEMM, done on backend.
-            struct ggml_tensor * ta_br  = ggml_cast(ctx, ggml_cast(ctx, ta, GGML_TYPE_BF16), GGML_TYPE_F32);
-            struct ggml_tensor * tb_br  = ggml_cast(ctx, ggml_cast(ctx, tb, GGML_TYPE_BF16), GGML_TYPE_F32);
-            struct ggml_tensor * ta_t   = ggml_cont(ctx, ggml_transpose(ctx, ta_br));
-            struct ggml_tensor * tdelta = ggml_scale(ctx, ggml_mul_mat(ctx, ta_t, tb_br), scaling);
+            struct ggml_tensor * ta_t   = ggml_cont(ctx, ggml_transpose(ctx, ta));
+            struct ggml_tensor * tdelta = ggml_scale(ctx, ggml_mul_mat(ctx, ta_t, tb), scaling);
 
             adapter_delta_build db;
             db.tdelta = tdelta;
@@ -623,16 +807,22 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             return db;
         };
 
-        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, nullptr, 1.0f, backend,
-                                      gguf_name.c_str(), build)) {
-            skipped++;
-            continue;
+        const float *                 magnitude_data = magnitude.empty() ? nullptr : magnitude.data();
+        const adapter_merge_semantics merge_semantics =
+            magnitude_data ? adapter_merge_semantics::peft_dora : adapter_merge_semantics::lora;
+        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, magnitude_data, scale,
+                                      merge_semantics, backend, gguf_name.c_str(), build)) {
+            return false;
+        }
+        if (magnitude_data) {
+            dora_count++;
         }
         merged++;
     }
 
-    fprintf(stderr, "[Adapter] LoRA merged %d pairs (skipped %d), scale=%.2f\n", merged, skipped, scale);
-    return merged > 0;
+    fprintf(stderr, "[Adapter] LoRA %s %d pairs (%d DoRA, skipped %d), scale=%.2f\n",
+            consume ? "loaded functionally" : "merged", merged, dora_count, skipped, scale);
+    return merged > 0 && (!consume || skipped == 0);
 }
 
 // LoKr merge path. Matches the LyCORIS runtime forward for LoKr at
@@ -928,10 +1118,11 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
             return db;
         };
 
-        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, user_scale, backend,
-                                      gguf_name.c_str(), build)) {
-            skipped++;
-            continue;
+        const adapter_merge_semantics merge_semantics =
+            ds_ptr ? adapter_merge_semantics::lycoris_dora : adapter_merge_semantics::lokr;
+        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, user_scale, merge_semantics,
+                                      backend, gguf_name.c_str(), build)) {
+            return false;
         }
         if (ds_ptr) {
             dora_count++;
@@ -957,41 +1148,41 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
 //   LyCORIS file    : a flat .safetensors file (LoRA ComfyUI or LoKr)
 // Directories exist only for PEFT. LyCORIS ships as a single file for both LoRA
 // and LoKr payloads.
-static bool adapter_merge(WeightCtx *       wctx,
-                          const GGUFModel & gf,
-                          const char *      adapter_path,
-                          float             scale,
-                          ggml_backend_t    backend) {
-    std::string sf_path;
-    std::string cfg_dir;
+static bool adapter_merge(WeightCtx *                   wctx,
+                          const GGUFModel &             gf,
+                          const char *                  adapter_path,
+                          float                         scale,
+                          ggml_backend_t                backend,
+                          const adapter_lora_consumer & consume = {}) {
+    std::string           sf_path;
+    std::string           cfg_dir;
+    bool                  peft_directory = false;
+    std::filesystem::path resolved_path;
+    std::string           directory_error;
+    if (!adapter_checkpoint_directory(adapter_path, resolved_path, directory_error)) {
+        fprintf(stderr, "[Adapter] %s\n", directory_error.c_str());
+        return false;
+    }
+    const std::string resolved_adapter_path = resolved_path.string();
 
     struct stat sb;
-    if (stat(adapter_path, &sb) != 0) {
+    if (stat(resolved_adapter_path.c_str(), &sb) != 0) {
         fprintf(stderr, "[Adapter] path does not exist: %s\n", adapter_path);
         return false;
     }
 
     if (S_ISDIR(sb.st_mode)) {
-        // PEFT directory: adapter_model.safetensors is mandatory
-        sf_path = std::string(adapter_path) + "/adapter_model.safetensors";
-        cfg_dir = adapter_path;
+        peft_directory = true;
+        sf_path        = resolved_adapter_path + "/adapter_model.safetensors";
+        cfg_dir        = resolved_adapter_path;
         if (stat(sf_path.c_str(), &sb) != 0) {
             fprintf(stderr, "[Adapter] directory %s is not a PEFT layout, missing adapter_model.safetensors\n",
                     adapter_path);
             return false;
         }
-        // warn if adapter_config.json is missing, alpha lives there for PEFT so
-        // the merge silently falls back to alpha=rank (scaling=1) otherwise
-        std::string cfg_path = cfg_dir + "/adapter_config.json";
-        if (stat(cfg_path.c_str(), &sb) != 0) {
-            fprintf(stderr,
-                    "[Adapter] WARNING: PEFT directory %s missing adapter_config.json, alpha falls back to rank "
-                    "(scaling=1.0). If training used lora_alpha != rank, the merge will be under or over scaled.\n",
-                    adapter_path);
-        }
     } else {
         // LyCORIS flat file, LoRA or LoKr
-        sf_path    = adapter_path;
+        sf_path    = resolved_adapter_path;
         size_t sep = sf_path.find_last_of("/\\");
         cfg_dir    = (sep != std::string::npos) ? sf_path.substr(0, sep) : ".";
     }
@@ -1003,9 +1194,12 @@ static bool adapter_merge(WeightCtx *       wctx,
 
     bool ok;
     if (adapter_detect_lokr(st)) {
-        ok = adapter_merge_lokr(wctx, gf, st, scale, backend);
+        if (consume) {
+            fprintf(stderr, "[Adapter] Functional inference supports LoRA/PEFT DoRA only; use merge mode for LoKr\n");
+        }
+        ok = !consume && !peft_directory && adapter_merge_lokr(wctx, gf, st, scale, backend);
     } else {
-        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, scale, backend);
+        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, peft_directory, scale, backend, consume);
     }
 
     st_close(&st);

@@ -1556,6 +1556,7 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     yyjson_mut_val * cli = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "cli", cli);
     yyjson_mut_obj_add_int(doc, cli, "max_batch", g_max_batch);
+    yyjson_mut_obj_add_str(doc, cli, "adapter_mode", g_synth_params.functional_adapter ? "functional" : "merge");
 
     // default: full AceRequest with all defaults from request_init().
     // the webui reads this to populate LM placeholders.
@@ -1609,6 +1610,7 @@ static void usage(const char * prog) {
             "\n"
             "Adapter:\n"
             "  --adapters <dir>        Directory of adapters\n"
+            "  --adapter-mode <mode>   functional or merge (default: merge)\n"
             "\n"
             "Memory control:\n"
             "  --keep-loaded           Keep models in VRAM between requests\n"
@@ -1648,6 +1650,13 @@ int main(int argc, char ** argv) {
             models_dir = argv[++i];
         } else if (!strcmp(argv[i], "--adapters") && i + 1 < argc) {
             adapters_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--adapter-mode") && i + 1 < argc) {
+            const char * mode = argv[++i];
+            if (strcmp(mode, "functional") && strcmp(mode, "merge")) {
+                fprintf(stderr, "[Server] ERROR: adapter-mode must be functional or merge\n");
+                return 1;
+            }
+            g_synth_params.functional_adapter = !strcmp(mode, "functional");
         } else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc) {
             g_lm_params.max_seq = atoi(argv[++i]);
 
@@ -1711,6 +1720,7 @@ int main(int argc, char ** argv) {
     if (adapters_dir) {
         fprintf(stderr, "[Server] Scanning adapters in %s\n", adapters_dir);
         registry_scan_adapters(&g_registry, adapters_dir);
+        fprintf(stderr, "[Server] Adapter mode: %s\n", g_synth_params.functional_adapter ? "functional" : "merge");
     }
 
     // validate pipeline

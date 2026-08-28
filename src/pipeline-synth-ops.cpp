@@ -24,16 +24,18 @@ static const int FRAMES_PER_SECOND = 25;
 
 // Locale immune scalar reader. std::from_chars handles ints on every stdlib
 // and floats on every stdlib except libc++ before v20 (AppleClang ships an
-// old libc++). There we hand roll a tiny C locale parser supporting decimal
-// and optional exponent. Returns ptr past consumed bytes, or first on parse
-// failure.
+// old libc++). libc++ v20+ also marks the floating point overloads unavailable
+// when the deployment target predates their OS release, which is the usual case
+// on macOS with a newer SDK, so gate on availability as well as version. There
+// we hand roll a tiny C locale parser supporting decimal and optional exponent.
+// Returns ptr past consumed bytes, or first on parse failure.
 static const char * scan_num(const char * first, const char * last, int & v) {
     auto r = std::from_chars(first, last, v);
     return r.ec == std::errc{} ? r.ptr : first;
 }
 
 static const char * scan_num(const char * first, const char * last, float & v) {
-#if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 200000
+#if defined(_LIBCPP_VERSION) && (_LIBCPP_VERSION < 200000 || !_LIBCPP_AVAILABILITY_HAS_FROM_CHARS_FLOATING_POINT)
     const char * p   = first;
     bool         neg = false;
     if (p < last && (*p == '+' || *p == '-')) {
@@ -467,7 +469,8 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
         for (int b = 0; b < batch_n; b++) {
             std::string text_str;
             std::string lyric_str;
-            build_prompt_strings(reqs[b], s.instruction_str, s.duration, text_str, lyric_str);
+            const float duration = reqs[b].duration > 0.0f ? reqs[b].duration : s.duration;
+            build_prompt_strings(reqs[b], s.instruction_str, duration, text_str, lyric_str);
 
             auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
             auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);
@@ -477,16 +480,23 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             main_fwd[b].S_text  = S_text;
             main_fwd[b].S_lyric = S_lyric;
             main_fwd[b].text_hidden.resize((size_t) H_text * S_text);
-            qwen3_forward(te, text_ids.data(), S_text, main_fwd[b].text_hidden.data());
+            if (!qwen3_forward(te, text_ids.data(), S_text, main_fwd[b].text_hidden.data())) {
+                fprintf(stderr, "[Encode-Text] FATAL: text encoder compute failed\n");
+                return -1;
+            }
             main_fwd[b].lyric_embed.resize((size_t) H_text * S_lyric);
-            qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, main_fwd[b].lyric_embed.data());
+            if (!qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, main_fwd[b].lyric_embed.data())) {
+                fprintf(stderr, "[Encode-Text] FATAL: lyric embedding compute failed\n");
+                return -1;
+            }
         }
 
         if (s.need_enc_switch) {
             for (int b = 0; b < batch_n; b++) {
                 std::string text_str;
                 std::string lyric_str;
-                build_prompt_strings(reqs[b], DIT_INSTR_TEXT2MUSIC, s.duration, text_str, lyric_str);
+                const float duration = reqs[b].duration > 0.0f ? reqs[b].duration : s.duration;
+                build_prompt_strings(reqs[b], DIT_INSTR_TEXT2MUSIC, duration, text_str, lyric_str);
 
                 auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
                 auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);
@@ -496,9 +506,15 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
                 nc_fwd[b].S_text  = S_text;
                 nc_fwd[b].S_lyric = S_lyric;
                 nc_fwd[b].text_hidden.resize((size_t) H_text * S_text);
-                qwen3_forward(te, text_ids.data(), S_text, nc_fwd[b].text_hidden.data());
+                if (!qwen3_forward(te, text_ids.data(), S_text, nc_fwd[b].text_hidden.data())) {
+                    fprintf(stderr, "[Encode-Text] FATAL: non-cover text encoder compute failed\n");
+                    return -1;
+                }
                 nc_fwd[b].lyric_embed.resize((size_t) H_text * S_lyric);
-                qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, nc_fwd[b].lyric_embed.data());
+                if (!qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, nc_fwd[b].lyric_embed.data())) {
+                    fprintf(stderr, "[Encode-Text] FATAL: non-cover lyric embedding compute failed\n");
+                    return -1;
+                }
             }
         }
 
@@ -535,9 +551,11 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
         for (int b = 0; b < batch_n; b++) {
             s.timer.reset();
-            cond_ggml_forward(ce, main_fwd[b].text_hidden.data(), main_fwd[b].S_text, main_fwd[b].lyric_embed.data(),
-                              main_fwd[b].S_lyric, s.timbre_feats.data(), s.S_ref_timbre, s.per_enc[b],
-                              &s.per_enc_S[b]);
+            if (!cond_ggml_forward(ce, main_fwd[b].text_hidden.data(), main_fwd[b].S_text,
+                                   main_fwd[b].lyric_embed.data(), main_fwd[b].S_lyric, s.timbre_feats.data(),
+                                   s.S_ref_timbre, s.per_enc[b], &s.per_enc_S[b])) {
+                return -1;
+            }
             fprintf(stderr, "[Encode-Text Batch%d] %d+%d tokens -> enc_S=%d, %.1f ms\n", b, main_fwd[b].S_text,
                     main_fwd[b].S_lyric, s.per_enc_S[b], s.timer.ms());
         }
@@ -545,9 +563,11 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
         if (s.need_enc_switch) {
             for (int b = 0; b < batch_n; b++) {
-                cond_ggml_forward(ce, nc_fwd[b].text_hidden.data(), nc_fwd[b].S_text, nc_fwd[b].lyric_embed.data(),
-                                  nc_fwd[b].S_lyric, s.timbre_feats.data(), s.S_ref_timbre, s.per_enc_nc[b],
-                                  &s.per_enc_S_nc[b]);
+                if (!cond_ggml_forward(ce, nc_fwd[b].text_hidden.data(), nc_fwd[b].S_text, nc_fwd[b].lyric_embed.data(),
+                                       nc_fwd[b].S_lyric, s.timbre_feats.data(), s.S_ref_timbre, s.per_enc_nc[b],
+                                       &s.per_enc_S_nc[b])) {
+                    return -1;
+                }
                 fprintf(stderr, "[Encode-Text Batch%d] non-cover: %d+%d tokens -> enc_S=%d\n", b, nc_fwd[b].S_text,
                         nc_fwd[b].S_lyric, s.per_enc_S_nc[b]);
             }

@@ -1,3 +1,5 @@
+// ABOUTME: Defines ACE-Step's GGML diffusion transformer weights and runtime state.
+// ABOUTME: Loads the DiT model and exposes the optional functional linear transform hook.
 #pragma once
 // dit.h: ACE-Step DiT (Diffusion Transformer) via ggml compute graph
 // Ported from Python ACE-Step-1.5 reference. Same weights, loaded from GGUF.
@@ -8,6 +10,7 @@
 // ggml ops used: rms_norm, mul_mat, rope_ext, flash_attn_ext, swiglu_split,
 //                conv_transpose_1d, add, mul, scale, view, reshape, permute.
 
+#include "adapter-functional.h"
 #include "adapter-merge.h"
 #include "backend.h"
 #include "ggml-backend.h"
@@ -84,6 +87,11 @@ struct DiTGGMLLayer {
 // Full model
 #define DIT_GGML_MAX_LAYERS 32
 
+using DiTGGMLLinearTransform = struct ggml_tensor * (*) (struct ggml_context * ctx,
+                                                         void *                data,
+                                                         struct ggml_tensor *  weight,
+                                                         struct ggml_tensor *  input);
+
 struct DiTGGML {
     DiTGGMLConfig cfg;
 
@@ -122,7 +130,15 @@ struct DiTGGML {
 
     // Pre-allocated constant for AdaLN (1+scale) fusion
     struct ggml_tensor * scalar_one;  // [1] = 1.0f, broadcast in ggml_add
+
+    AdapterFunctional functional_adapter;
+
+    // Optional functional transform for training or unmerged inference adapters.
+    DiTGGMLLinearTransform linear_transform;
+    void *                 linear_transform_data;
 };
+
+static void dit_ggml_free(DiTGGML * m);
 
 // Load timestep embedding weights
 static void dit_ggml_load_temb(DiTGGMLTembWeights * w,
@@ -255,8 +271,18 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
 // Load full DiT model from GGUF
 static bool dit_ggml_load(DiTGGML *    m,
                           const char * gguf_path,
-                          const char * adapter_path  = nullptr,
-                          float        adapter_scale = 1.0f) {
+                          const char * adapter_path,
+                          float        adapter_scale,
+                          bool         fuse_projections,
+                          bool         functional_adapter,
+                          bool         normalized_adapter_strength = false) {
+    if (normalized_adapter_strength && !functional_adapter) {
+        fprintf(stderr, "[Adapter] Normalized strength requires functional mode\n");
+        return false;
+    }
+    if (adapter_path && functional_adapter) {
+        fuse_projections = false;
+    }
     // Backend init. flash_attn_ext accumulates in F16 on CPU, causing audible
     // drift over 24 layers x 8 steps: use F32 manual attention on CPU instead.
     BackendPair bp    = backend_init("DiT");
@@ -268,6 +294,7 @@ static bool dit_ggml_load(DiTGGML *    m,
     GGUFModel gf;
     if (!gf_load(&gf, gguf_path)) {
         fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
+        dit_ggml_free(m);
         return false;
     }
 
@@ -292,6 +319,7 @@ static bool dit_ggml_load(DiTGGML *    m,
         cfg.rope_theta <= 0.0f || cfg.rms_norm_eps <= 0.0f || block_count > (uint32_t) DIT_GGML_MAX_LAYERS) {
         fprintf(stderr, "[Load] FATAL: invalid DiT config in GGUF\n");
         gf_close(&gf);
+        dit_ggml_free(m);
         return false;
     }
 
@@ -322,11 +350,15 @@ static bool dit_ggml_load(DiTGGML *    m,
 
         // Self-attention: try full QKV, partial QK, separate
         ly.self_attn_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn_norm.weight");
-        ly.sa_qkv = gf_load_qkv_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
-                                      p + ".self_attn.v_proj.weight");
+        ly.sa_qkv         = fuse_projections ?
+                                gf_load_qkv_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight",
+                                                  p + ".self_attn.v_proj.weight") :
+                                nullptr;
         if (!ly.sa_qkv) {
             // Try Q+K fusion (same input, often same type in K-quants)
-            ly.sa_qk = gf_load_pair_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight", p + ".self_attn.k_proj.weight");
+            ly.sa_qk = fuse_projections ? gf_load_pair_fused(&m->wctx, gf, p + ".self_attn.q_proj.weight",
+                                                             p + ".self_attn.k_proj.weight") :
+                                          nullptr;
             if (ly.sa_qk) {
                 ly.sa_v_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
                 if (i == 0) {
@@ -351,13 +383,16 @@ static bool dit_ggml_load(DiTGGML *    m,
 
         // Cross-attention: try full QKV, K+V fused, separate
         ly.cross_attn_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn_norm.weight");
-        ly.ca_qkv = gf_load_qkv_fused(&m->wctx, gf, p + ".cross_attn.q_proj.weight", p + ".cross_attn.k_proj.weight",
-                                      p + ".cross_attn.v_proj.weight");
+        ly.ca_qkv          = fuse_projections ?
+                                 gf_load_qkv_fused(&m->wctx, gf, p + ".cross_attn.q_proj.weight",
+                                                   p + ".cross_attn.k_proj.weight", p + ".cross_attn.v_proj.weight") :
+                                 nullptr;
         if (!ly.ca_qkv) {
             ly.ca_q_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_proj.weight");
             // Try K+V fusion (same input enc, may share type)
-            ly.ca_kv =
-                gf_load_pair_fused(&m->wctx, gf, p + ".cross_attn.k_proj.weight", p + ".cross_attn.v_proj.weight");
+            ly.ca_kv     = fuse_projections ? gf_load_pair_fused(&m->wctx, gf, p + ".cross_attn.k_proj.weight",
+                                                                 p + ".cross_attn.v_proj.weight") :
+                                              nullptr;
             if (ly.ca_kv) {
                 if (i == 0) {
                     fprintf(stderr, "[DiT] Cross-attn: Q separate, K+V fused\n");
@@ -380,7 +415,9 @@ static bool dit_ggml_load(DiTGGML *    m,
 
         // MLP: try gate+up fusion (same input, same pattern as QKV)
         ly.mlp_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".mlp_norm.weight");
-        ly.gate_up  = gf_load_pair_fused(&m->wctx, gf, p + ".mlp.gate_proj.weight", p + ".mlp.up_proj.weight");
+        ly.gate_up  = fuse_projections ?
+                          gf_load_pair_fused(&m->wctx, gf, p + ".mlp.gate_proj.weight", p + ".mlp.up_proj.weight") :
+                          nullptr;
         if (ly.gate_up) {
             if (i == 0) {
                 fprintf(stderr, "[DiT] MLP: gate+up fused\n");
@@ -418,35 +455,65 @@ static bool dit_ggml_load(DiTGGML *    m,
     m->scalar_one              = ggml_new_tensor_1d(m->wctx.ctx, GGML_TYPE_F32, 1);
     m->wctx.pending.push_back({ m->scalar_one, &one_val, sizeof(float), 0 });
 
-    // Merge adapter deltas into projection weights (before GPU upload and QKV fusion)
+    // Load adapter factors or merge deltas before base GPU upload.
     if (adapter_path) {
-        Timer adapter_timer;
-        if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
-            fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
+        Timer      adapter_timer;
+        const bool loaded = functional_adapter ?
+                                adapter_functional_load(m->functional_adapter, &m->wctx, gf, adapter_path,
+                                                        adapter_scale, m->backend, normalized_adapter_strength) :
+                                adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend);
+        if (!loaded) {
+            fprintf(stderr, "[Adapter] FATAL: adapter loading failed (see diagnostics above)\n");
             gf_close(&gf);
+            dit_ggml_free(m);
             return false;
         }
-        fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
+        fprintf(stderr, "[Adapter] %s time: %.1f ms\n", functional_adapter ? "Functional load" : "Merge",
+                adapter_timer.ms());
     }
 
     // Allocate backend buffer and copy weights
     if (!wctx_alloc(&m->wctx, m->backend)) {
         gf_close(&gf);
+        dit_ggml_free(m);
         return false;
     }
     gf_close(&gf);
+
+    if (adapter_path && functional_adapter) {
+        Timer timer;
+        if (!adapter_functional_prepare(m->functional_adapter, m->backend)) {
+            fprintf(stderr, "[Adapter] Functional preparation failed\n");
+            dit_ggml_free(m);
+            return false;
+        }
+        m->linear_transform      = adapter_functional_linear;
+        m->linear_transform_data = &m->functional_adapter;
+        fprintf(stderr, "[Adapter] Functional prepare time: %.1f ms\n", timer.ms());
+    }
 
     fprintf(stderr, "[Load] DiT: %d layers, H=%d, Nh=%d/%d, D=%d\n", cfg.n_layers, cfg.hidden_size, cfg.n_heads,
             cfg.n_kv_heads, cfg.head_dim);
     return true;
 }
 
+// Preserve the existing training/inference loader signature for callers that
+// do not opt into functional inference.
+static bool dit_ggml_load(DiTGGML *    m,
+                          const char * path,
+                          const char * adapter = nullptr,
+                          float        scale   = 1.0f,
+                          bool         fuse    = true) {
+    return dit_ggml_load(m, path, adapter, scale, fuse, false);
+}
+
 static void dit_ggml_free(DiTGGML * m) {
     if (m->sched) {
         ggml_backend_sched_free(m->sched);
     }
-    backend_release(m->backend, m->cpu_backend);
+    adapter_functional_free(m->functional_adapter);
     wctx_free(&m->wctx);
+    backend_release(m->backend, m->cpu_backend);
     *m = {};
 }
 

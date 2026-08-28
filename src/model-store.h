@@ -80,6 +80,8 @@ struct ModelKey {
     // DiT-only extras (ignored for other kinds):
     std::string adapter_path;   // "" when no adapter
     float       adapter_scale;  // 1.0f default, significant when adapter_path is set
+    bool        functional_adapter          = false;
+    bool        normalized_adapter_strength = false;
 };
 
 enum EvictPolicy {

@@ -1,0 +1,180 @@
+// ABOUTME: Builds ACE-Step DiT forward-and-backward graphs for native LoRA and DoRA-row training.
+// ABOUTME: Owns adapter parameters, flow-matching inputs, loss, gradients, and reusable graph allocation.
+
+#pragma once
+
+#include "dit-graph.h"
+#include "ggml-alloc.h"
+#include "train-adapter-state.h"
+
+#include <string>
+
+struct ACETrainDiTGraph {
+    ggml_backend_t            backend;
+    struct ggml_context *     ctx;
+    ggml_gallocr_t            allocator;
+    struct ggml_cgraph *      graph;
+    struct ggml_tensor *      input_latents;
+    struct ggml_tensor *      encoder_hidden;
+    struct ggml_tensor *      timestep;
+    struct ggml_tensor *      reference_timestep;
+    struct ggml_tensor *      positions;
+    struct ggml_tensor *      self_attention_mask;
+    struct ggml_tensor *      full_self_attention_mask;
+    struct ggml_tensor *      cross_attention_mask;
+    struct ggml_tensor *      target_velocity;
+    struct ggml_tensor *      loss_weights;
+    struct ggml_tensor *      velocity;
+    struct ggml_tensor *      velocity_snapshot;
+    struct ggml_tensor *      loss;
+    ACETrainAdapterGraphState adapters;
+};
+
+static void ace_free_train_dit_graph(ACETrainDiTGraph & training) {
+    if (training.allocator) {
+        ggml_gallocr_free(training.allocator);
+    }
+    if (training.ctx) {
+        ggml_free(training.ctx);
+    }
+    training = {};
+}
+
+static bool ace_build_train_dit_graph(DiTGGML &                    model,
+                                      const ACETrainAdapterState & state,
+                                      int                          temporal_length,
+                                      int                          encoder_sequence_length,
+                                      int                          batch_size,
+                                      ACETrainDiTGraph &           training,
+                                      std::string &                error,
+                                      bool                         retain_velocity = false) {
+    training = {};
+    error.clear();
+    if (!model.backend) {
+        error = "DiT backend is not initialized";
+        return false;
+    }
+    training.backend = model.backend;
+    if (temporal_length <= 0 || encoder_sequence_length <= 0 || batch_size <= 0 || model.cfg.patch_size <= 0 ||
+        temporal_length % model.cfg.patch_size != 0) {
+        error = "invalid DiT training graph dimensions";
+        return false;
+    }
+
+    const size_t graph_capacity = 65536;
+    const size_t context_size =
+        graph_capacity * ggml_tensor_overhead() + ggml_graph_overhead_custom(graph_capacity, true) + 64 * 1024 * 1024;
+    struct ggml_init_params params = {
+        /*.mem_size   =*/context_size,
+        /*.mem_buffer =*/nullptr,
+        /*.no_alloc   =*/true,
+    };
+    training.ctx = ggml_init(params);
+    if (!training.ctx) {
+        error = "failed to create DiT training graph context";
+        return false;
+    }
+
+    if (!ace_build_train_adapter_graph_state(training.ctx, state, training.adapters, error)) {
+        ace_free_train_dit_graph(training);
+        return false;
+    }
+
+    DiTGGMLLinearTransform saved_transform       = model.linear_transform;
+    void *                 saved_data            = model.linear_transform_data;
+    const bool             saved_flash_attention = model.use_flash_attn;
+    model.linear_transform                       = dit_adapter_linear_transform;
+    model.linear_transform_data                  = &training.adapters.transform;
+    model.use_flash_attn                         = false;
+    training.graph = dit_ggml_build_graph(&model, training.ctx, temporal_length, encoder_sequence_length, batch_size,
+                                          &training.input_latents, &training.velocity, true);
+    model.linear_transform      = saved_transform;
+    model.linear_transform_data = saved_data;
+    model.use_flash_attn        = saved_flash_attention;
+    if (!training.graph || !training.velocity) {
+        error = "failed to build DiT forward graph";
+        ace_free_train_dit_graph(training);
+        return false;
+    }
+    if (retain_velocity) {
+        // Backward execution may reuse the prediction buffer. Preserve a
+        // dedicated copy only for reference diagnostics so production graphs
+        // do not pay the full-song allocation cost.
+        training.velocity_snapshot = ggml_dup(training.ctx, training.velocity);
+        ggml_set_name(training.velocity_snapshot, "velocity_snapshot");
+        ggml_set_output(training.velocity_snapshot);
+        ggml_build_forward_expand(training.graph, training.velocity_snapshot);
+    }
+
+    training.encoder_hidden           = ggml_graph_get_tensor(training.graph, "enc_hidden");
+    training.timestep                 = ggml_graph_get_tensor(training.graph, "t");
+    training.reference_timestep       = ggml_graph_get_tensor(training.graph, "t_r");
+    training.positions                = ggml_graph_get_tensor(training.graph, "positions");
+    training.self_attention_mask      = ggml_graph_get_tensor(training.graph, "sa_mask_sw");
+    training.full_self_attention_mask = ggml_graph_get_tensor(training.graph, "sa_mask");
+    training.cross_attention_mask     = ggml_graph_get_tensor(training.graph, "ca_mask");
+    bool needs_sliding_mask           = false;
+    bool needs_full_mask              = false;
+    for (int i = 0; i < model.cfg.n_layers; ++i) {
+        needs_sliding_mask = needs_sliding_mask || model.layers[i].layer_type == 0;
+        needs_full_mask    = needs_full_mask || model.layers[i].layer_type == 1;
+    }
+    if (!training.encoder_hidden || !training.timestep || !training.reference_timestep || !training.positions ||
+        (needs_sliding_mask && !training.self_attention_mask) ||
+        (needs_full_mask && !training.full_self_attention_mask) || !training.cross_attention_mask) {
+        error = "DiT training graph is missing a required input";
+        ace_free_train_dit_graph(training);
+        return false;
+    }
+
+    training.target_velocity =
+        ggml_new_tensor_3d(training.ctx, GGML_TYPE_F32, model.cfg.out_channels, temporal_length, batch_size);
+    ggml_set_name(training.target_velocity, "target_velocity");
+    ggml_set_input(training.target_velocity);
+    training.loss_weights = ggml_new_tensor_2d(training.ctx, GGML_TYPE_F32, temporal_length, batch_size);
+    ggml_set_name(training.loss_weights, "loss_weights");
+    ggml_set_input(training.loss_weights);
+    struct ggml_tensor * squared_error =
+        ggml_sqr(training.ctx, ggml_sub(training.ctx, training.velocity, training.target_velocity));
+    struct ggml_tensor * per_frame_error = ggml_sum_rows(training.ctx, squared_error);
+    per_frame_error                      = ggml_reshape_2d(training.ctx, per_frame_error, temporal_length, batch_size);
+    per_frame_error = ggml_scale(training.ctx, per_frame_error, 1.0f / (float) model.cfg.out_channels);
+    struct ggml_tensor * weighted_error = ggml_mul(training.ctx, per_frame_error, training.loss_weights);
+    training.loss = ggml_scale(training.ctx, ggml_sum(training.ctx, weighted_error), 1.0f / (float) batch_size);
+    ggml_set_name(training.loss, "flow_matching_loss");
+    ggml_set_loss(training.loss);
+    ggml_set_output(training.loss);
+    ggml_build_forward_expand(training.graph, training.loss);
+    ggml_build_backward_expand(training.ctx, training.graph, nullptr);
+
+    for (const ACETrainAdapterGraphParam & param : training.adapters.params) {
+        struct ggml_tensor * trainable[] = { param.a, param.b, param.magnitude };
+        for (struct ggml_tensor * tensor : trainable) {
+            if (!tensor) {
+                continue;
+            }
+            struct ggml_tensor * gradient = ggml_graph_get_grad(training.graph, tensor);
+            if (!gradient) {
+                gradient = ggml_graph_get_grad_acc(training.graph, tensor);
+            }
+            if (!gradient) {
+                error = "adapter parameter has no gradient: " + std::string(ggml_get_name(tensor));
+                ace_free_train_dit_graph(training);
+                return false;
+            }
+            ggml_set_output(gradient);
+        }
+    }
+
+    training.allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(model.backend));
+    if (!training.allocator || !ggml_gallocr_alloc_graph(training.allocator, training.graph)) {
+        error = "failed to allocate DiT training graph";
+        ace_free_train_dit_graph(training);
+        return false;
+    }
+    if (!ace_upload_train_adapter_state(training.adapters, state, error)) {
+        ace_free_train_dit_graph(training);
+        return false;
+    }
+    return true;
+}

@@ -142,18 +142,17 @@ static inline void dcw_haar_double_inplace(float *       xt,
     if (low_scaler == 0.0f && high_scaler == 0.0f) {
         return;
     }
-    int Tl  = (T + 1) / 2;
-    int n_L = Tl * C;
-    int n_H = Tl * C;
+    int Tl                 = (T + 1) / 2;
+    int band_element_count = Tl * C;
     dwt_haar_fwd_tc(xt, T, C, tmp_xL, tmp_xH);
     dwt_haar_fwd_tc(denoised, T, C, tmp_yL, tmp_yH);
     if (low_scaler != 0.0f) {
-        for (int i = 0; i < n_L; i++) {
+        for (int i = 0; i < band_element_count; i++) {
             tmp_xL[i] = tmp_xL[i] + low_scaler * (tmp_xL[i] - tmp_yL[i]);
         }
     }
     if (high_scaler != 0.0f) {
-        for (int i = 0; i < n_H; i++) {
+        for (int i = 0; i < band_element_count; i++) {
             tmp_xH[i] = tmp_xH[i] + high_scaler * (tmp_xH[i] - tmp_yH[i]);
         }
     }

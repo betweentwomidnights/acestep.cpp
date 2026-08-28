@@ -31,6 +31,8 @@ static void usage(const char * prog) {
             "  --request <json...>     One or more request JSONs (from ace-lm --request)\n\n"
             "Optional:\n"
             "  --adapters <dir>        Directory of adapter files (enables JSON adapter field)\n"
+            "  --adapter-mode <mode>   functional or merge (default: merge)\n"
+            "  --adapter-strength-mode <mode>  delta or normalized (default: delta; normalized requires functional)\n"
             "  --src-audio <path>      Source audio (WAV or MP3)\n"
             "  --ref-audio <path>      Timbre reference audio (WAV or MP3)\n\n"
             "Memory control:\n"
@@ -77,6 +79,20 @@ int main(int argc, char ** argv) {
             models_dir = argv[++i];
         } else if (!strcmp(argv[i], "--adapters") && i + 1 < argc) {
             adapters_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--adapter-mode") && i + 1 < argc) {
+            const char * mode = argv[++i];
+            if (strcmp(mode, "functional") && strcmp(mode, "merge")) {
+                fprintf(stderr, "[CLI] adapter-mode must be functional or merge\n");
+                return 1;
+            }
+            params.functional_adapter = !strcmp(mode, "functional");
+        } else if (!strcmp(argv[i], "--adapter-strength-mode") && i + 1 < argc) {
+            const char * mode = argv[++i];
+            if (strcmp(mode, "delta") && strcmp(mode, "normalized")) {
+                fprintf(stderr, "[CLI] adapter-strength-mode must be delta or normalized\n");
+                return 1;
+            }
+            params.normalized_adapter_strength = !strcmp(mode, "normalized");
         } else if (!strcmp(argv[i], "--src-audio") && i + 1 < argc) {
             src_audio_path = argv[++i];
         } else if (!strcmp(argv[i], "--ref-audio") && i + 1 < argc) {
@@ -103,6 +119,10 @@ int main(int argc, char ** argv) {
         }
     }
 
+    if (params.normalized_adapter_strength && !params.functional_adapter) {
+        fprintf(stderr, "[CLI] normalized adapter strength requires --adapter-mode functional\n");
+        return 1;
+    }
     if (!models_dir) {
         fprintf(stderr, "[CLI] ERROR: --models required\n");
         usage(argv[0]);
