@@ -41,13 +41,15 @@ cmake -S . -B build-metal -DCMAKE_BUILD_TYPE=Release \
   -DGGML_METAL=ON -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DBUILD_TESTING=ON
 cmake --build build-metal --parallel 4
 ctest --test-dir build-metal --output-on-failure
-./build-metal/test-adapter-functional Metal
+./build-metal/test-adapter-functional MTL0
 for type in F32 Q8_0 Q4_K Q5_K Q6_K; do
-  ./build-metal/test-dora-backend Metal "$type" || exit 1
+  ./build-metal/test-dora-backend MTL0 "$type" || exit 1
 done
 ```
 
-Confirm the registered device is Metal; do not count CPU fallback as a Metal pass.
+The backend argument is the GGML *device* name, which is `MTL0` under GGML 0.17, not
+`Metal`; passing the wrong name fails backend init rather than testing anything. Confirm the
+registered device is the Metal one; do not count CPU fallback as a Metal pass.
 The explicit graph tests above complement the CPU-oriented CTests.
 
 Then validate real models and adapters using local M4 model/data paths:

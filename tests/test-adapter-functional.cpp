@@ -4,8 +4,18 @@
 #include "backend.h"
 #include "train-adapter-checkpoint.h"
 
+#include <cstdio>
 #include <filesystem>
 #include <random>
+
+static void print_available_backends() {
+    ggml_backend_load_all();
+    std::fputs("Available devices:", stderr);
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        std::fprintf(stderr, " %s", ggml_backend_dev_name(ggml_backend_dev_get(i)));
+    }
+    std::fputc('\n', stderr);
+}
 
 static bool run_case(ggml_backend_t       backend,
                      ggml_type            type,
@@ -187,8 +197,11 @@ static bool run_case(ggml_backend_t       backend,
 
 int main(int argc, char ** argv) {
     ggml_backend_load_all();
-    auto backend = ggml_backend_init_by_name(argc > 1 ? argv[1] : "CPU", nullptr);
+    const char * backend_name = argc > 1 ? argv[1] : "CPU";
+    auto         backend      = ggml_backend_init_by_name(backend_name, nullptr);
     if (!backend) {
+        std::fprintf(stderr, "failed to initialize backend device: %s\n", backend_name);
+        print_available_backends();
         return 1;
     }
     bool ok = true;
