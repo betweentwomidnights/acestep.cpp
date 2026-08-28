@@ -38,12 +38,12 @@ static uint64_t ace_train_window_mix(uint64_t value) {
 }
 
 static ACETrainWindow ace_train_select_window(int                          real_temporal_length,
-                                               int                          padded_temporal_length,
-                                               int                          patch_size,
-                                               const ACETrainWindowConfig & config,
-                                               uint64_t                     seed,
-                                               int                          epoch,
-                                               size_t                       example_index) {
+                                              int                          padded_temporal_length,
+                                              int                          patch_size,
+                                              const ACETrainWindowConfig & config,
+                                              uint64_t                     seed,
+                                              int                          epoch,
+                                              size_t                       example_index) {
     ACETrainWindow result;
     result.latent_length = padded_temporal_length;
     if (!ace_train_window_config_valid(config) || config.max_seconds == 0.0f || real_temporal_length <= 0 ||
@@ -57,13 +57,13 @@ static ACETrainWindow ace_train_select_window(int                          real_
     if (available_patches < minimum_patches) {
         return result;
     }
-    const int maximum_patches = std::min(
-        available_patches,
-        std::max(minimum_patches,
-                 (int) std::floor(config.max_seconds * ACE_TRAIN_LATENTS_PER_SECOND / (float) patch_size)));
+    const int maximum_patches =
+        std::min(available_patches,
+                 std::max(minimum_patches,
+                          (int) std::floor(config.max_seconds * ACE_TRAIN_LATENTS_PER_SECOND / (float) patch_size)));
 
-    uint64_t random = ace_train_window_mix(seed ^ ((uint64_t) (epoch + 1) * 0xd1b54a32d192ed03ULL) ^
-                                           ((uint64_t) (example_index + 1) * 0x94d049bb133111ebULL));
+    uint64_t  random         = ace_train_window_mix(seed ^ ((uint64_t) (epoch + 1) * 0xd1b54a32d192ed03ULL) ^
+                                                    ((uint64_t) (example_index + 1) * 0x94d049bb133111ebULL));
     const int window_patches = minimum_patches + (int) (random % (uint64_t) (maximum_patches - minimum_patches + 1));
     random                   = ace_train_window_mix(random);
     const int first_patch    = (int) (random % (uint64_t) (available_patches - window_patches + 1));
@@ -110,15 +110,14 @@ static bool ace_train_crop_example(const ACETrainDiffusionExample & source,
     const size_t target_first = (size_t) window.first_latent * output_channels;
     const size_t target_count = (size_t) window.latent_length * output_channels;
     destination.target_latents.assign(source.target_latents.begin() + (std::ptrdiff_t) target_first,
-                                      source.target_latents.begin() +
-                                          (std::ptrdiff_t) (target_first + target_count));
+                                      source.target_latents.begin() + (std::ptrdiff_t)(target_first + target_count));
     const size_t context_first = (size_t) window.first_latent * context_channels;
     const size_t context_count = (size_t) window.latent_length * context_channels;
-    destination.context_latents.assign(source.context_latents.begin() + (std::ptrdiff_t) context_first,
-                                       source.context_latents.begin() +
-                                           (std::ptrdiff_t) (context_first + context_count));
-    destination.encoder_hidden                 = source.encoder_hidden;
-    destination.real_temporal_length           = window.latent_length;
-    destination.real_encoder_sequence_length   = source.real_encoder_sequence_length;
+    destination.context_latents.assign(
+        source.context_latents.begin() + (std::ptrdiff_t) context_first,
+        source.context_latents.begin() + (std::ptrdiff_t)(context_first + context_count));
+    destination.encoder_hidden               = source.encoder_hidden;
+    destination.real_temporal_length         = window.latent_length;
+    destination.real_encoder_sequence_length = source.real_encoder_sequence_length;
     return true;
 }

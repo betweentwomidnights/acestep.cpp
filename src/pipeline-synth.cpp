@@ -22,22 +22,28 @@
 #include <vector>
 
 void ace_synth_default_params(AceSynthParams * p) {
-    p->text_encoder_path = NULL;
-    p->dit_path          = NULL;
-    p->vae_path          = NULL;
-    p->adapter_path      = NULL;
-    p->adapter_scale     = 1.0f;
-    p->use_fa            = true;
-    p->clamp_fp16        = false;
-    p->use_batch_cfg     = true;
-    p->vae_chunk         = 1024;
-    p->vae_overlap       = 64;
-    p->dump_dir          = NULL;
+    p->text_encoder_path           = NULL;
+    p->dit_path                    = NULL;
+    p->vae_path                    = NULL;
+    p->adapter_path                = NULL;
+    p->adapter_scale               = 1.0f;
+    p->functional_adapter          = false;
+    p->normalized_adapter_strength = false;
+    p->use_fa                      = true;
+    p->clamp_fp16                  = false;
+    p->use_batch_cfg               = true;
+    p->vae_chunk                   = 1024;
+    p->vae_overlap                 = 64;
+    p->dump_dir                    = NULL;
 }
 
 AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     if (!store || !params) {
         fprintf(stderr, "[Synth-Load] ERROR: store and params are required\n");
+        return NULL;
+    }
+    if (params->normalized_adapter_strength && !params->functional_adapter) {
+        fprintf(stderr, "[Synth-Load] ERROR: normalized adapter strength requires functional mode\n");
         return NULL;
     }
     if (!params->dit_path) {
@@ -83,10 +89,12 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     ctx->fsq_detok_key.kind = MODEL_FSQ_DETOK;
     ctx->fsq_detok_key.path = params->dit_path;
 
-    ctx->dit_key.kind          = MODEL_DIT;
-    ctx->dit_key.path          = params->dit_path;
-    ctx->dit_key.adapter_path  = params->adapter_path ? params->adapter_path : "";
-    ctx->dit_key.adapter_scale = params->adapter_scale;
+    ctx->dit_key.kind                        = MODEL_DIT;
+    ctx->dit_key.path                        = params->dit_path;
+    ctx->dit_key.adapter_path                = params->adapter_path ? params->adapter_path : "";
+    ctx->dit_key.adapter_scale               = params->adapter_scale;
+    ctx->dit_key.functional_adapter          = params->functional_adapter;
+    ctx->dit_key.normalized_adapter_strength = params->normalized_adapter_strength;
 
     ctx->vae_enc_key.kind = MODEL_VAE_ENC;
     ctx->vae_enc_key.path = params->vae_path;
@@ -100,7 +108,9 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
         fprintf(stderr, "[Synth-Load] FP16 clamp enabled\n");
     }
     if (params->adapter_path) {
-        fprintf(stderr, "[Synth-Load] Adapter: %s (scale=%.2f)\n", params->adapter_path, params->adapter_scale);
+        fprintf(stderr, "[Synth-Load] Adapter: %s (scale=%.2f, mode=%s, strength-mode=%s)\n", params->adapter_path,
+                params->adapter_scale, params->functional_adapter ? "functional" : "merge",
+                params->normalized_adapter_strength ? "normalized" : "delta");
     }
 
     return ctx;

@@ -25,6 +25,7 @@ struct ACETrainDiTGraph {
     struct ggml_tensor *      target_velocity;
     struct ggml_tensor *      loss_weights;
     struct ggml_tensor *      velocity;
+    struct ggml_tensor *      velocity_snapshot;
     struct ggml_tensor *      loss;
     ACETrainAdapterGraphState adapters;
 };
@@ -45,7 +46,8 @@ static bool ace_build_train_dit_graph(DiTGGML &                    model,
                                       int                          encoder_sequence_length,
                                       int                          batch_size,
                                       ACETrainDiTGraph &           training,
-                                      std::string &                error) {
+                                      std::string &                error,
+                                      bool                         retain_velocity = false) {
     training = {};
     error.clear();
     if (!model.backend) {
@@ -93,6 +95,15 @@ static bool ace_build_train_dit_graph(DiTGGML &                    model,
         error = "failed to build DiT forward graph";
         ace_free_train_dit_graph(training);
         return false;
+    }
+    if (retain_velocity) {
+        // Backward execution may reuse the prediction buffer. Preserve a
+        // dedicated copy only for reference diagnostics so production graphs
+        // do not pay the full-song allocation cost.
+        training.velocity_snapshot = ggml_dup(training.ctx, training.velocity);
+        ggml_set_name(training.velocity_snapshot, "velocity_snapshot");
+        ggml_set_output(training.velocity_snapshot);
+        ggml_build_forward_expand(training.graph, training.velocity_snapshot);
     }
 
     training.encoder_hidden           = ggml_graph_get_tensor(training.graph, "enc_hidden");

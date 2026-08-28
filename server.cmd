@@ -11,6 +11,7 @@ ace-server.exe ^
     --port 8085 ^
     --models .\models ^
     --adapters .\adapters ^
+    --adapter-mode functional ^
     --max-batch 1
 
 pause

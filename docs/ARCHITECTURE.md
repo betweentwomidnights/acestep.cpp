@@ -141,7 +141,7 @@ resident module.
 
 The store keys each module by the fields that actually change what gets
 loaded. For an LM that means `(path, max_seq, n_kv_sets)`. For a DiT that
-means `(path, adapter_path, adapter_scale)`. For every other module it is
+means `(path, adapter_path, adapter_scale, functional_adapter, normalized_adapter_strength)`. For every other module it is
 just `(path)`. Two requires with the same key return the same pointer, so
 pipelines that share a module naturally share the resident weights.
 
@@ -670,8 +670,8 @@ Empty string keeps the currently loaded LM, or loads the first available one.
 **`adapter`** (string, default `""`)
 Adapter name from the `--adapters` directory (e.g. `"singer-v2.safetensors"`
 or `"my-peft-adapter"`). Empty string means no adapter. Changing the adapter
-reloads the DiT (deltas are merged into weights at load time). Supported
-algorithm today: LoRA.
+reloads the DiT. The server-wide `--adapter-mode` option controls whether the
+adapter is evaluated functionally or merged into the base weights.
 
 **`adapter_scale`** (float, default `1.0`)
 Adapter scaling factor. Only used when `adapter` is set.
@@ -790,12 +790,15 @@ the DiT, `adapter` picks an adapter from `--adapters`, `output_format`
 picks the output encoder (mp3, wav16, wav24, wav32). Models are loaded
 once and reused across all requests.
 
-When `adapter` is set, deltas are merged into the DiT projection weights
+By default, when `adapter` is set, deltas are merged into the DiT projection weights
 at load time (before QKV fusion and GPU upload). For LoRA, the safetensors
 file is parsed directly, each lora_A/lora_B pair is multiplied
 (`alpha/rank * scale * B @ A`), and the result is added to the base weight
 in F32 before requantizing back to the original GGUF type. This is a
 static merge: inference runs at full speed with no adapter overhead.
+With `--adapter-mode functional`, LoRA/DoRA instead keeps the base weights unchanged
+and applies floating-point low-rank corrections during inference. This is recommended
+for quantized bases; see [the adapter guide](../adapters/README.md) for scale semantics.
 The registry accepts either a safetensors file or a directory containing
 `adapter_model.safetensors` and `adapter_config.json` (PEFT format).
 
@@ -865,6 +868,7 @@ Required:
 
 Adapter:
   --adapters <dir>        Directory of adapters
+  --adapter-mode <mode>   functional or merge (default: merge)
 
 Memory control:
   --keep-loaded           Keep models in VRAM between requests
@@ -890,12 +894,19 @@ Examples:
 # all models in one directory
 ./ace-server --models /path/to/models
 
-# with adapters
-./ace-server --models /path/to/models --adapters /path/to/adapters
+# with functional LoRA/DoRA adapters (recommended for quantized bases)
+./ace-server --models /path/to/models --adapters /path/to/adapters --adapter-mode functional
 
 # custom port and batch limit
 ./ace-server --models /path/to/models --host 0.0.0.0 --port 8085 --max-batch 2
 ```
+
+`--adapter-mode functional` keeps the GGUF base weights unchanged and applies
+LoRA or DoRA during each adapted linear operation. This avoids the lossy
+dequantize/merge/requantize cycle on quantized models and makes adapter changes
+much faster. `--adapter-mode merge` preserves the original static merge path
+and remains the default for compatibility. The selected mode is reported as
+`cli.adapter_mode` by `GET /props`.
 
 ### Endpoints
 

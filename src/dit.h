@@ -10,6 +10,7 @@
 // ggml ops used: rms_norm, mul_mat, rope_ext, flash_attn_ext, swiglu_split,
 //                conv_transpose_1d, add, mul, scale, view, reshape, permute.
 
+#include "adapter-functional.h"
 #include "adapter-merge.h"
 #include "backend.h"
 #include "ggml-backend.h"
@@ -130,7 +131,9 @@ struct DiTGGML {
     // Pre-allocated constant for AdaLN (1+scale) fusion
     struct ggml_tensor * scalar_one;  // [1] = 1.0f, broadcast in ggml_add
 
-    // Optional functional transform for trainable adapters. Frozen inference leaves this unset.
+    AdapterFunctional functional_adapter;
+
+    // Optional functional transform for training or unmerged inference adapters.
     DiTGGMLLinearTransform linear_transform;
     void *                 linear_transform_data;
 };
@@ -268,9 +271,18 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
 // Load full DiT model from GGUF
 static bool dit_ggml_load(DiTGGML *    m,
                           const char * gguf_path,
-                          const char * adapter_path     = nullptr,
-                          float        adapter_scale    = 1.0f,
-                          bool         fuse_projections = true) {
+                          const char * adapter_path,
+                          float        adapter_scale,
+                          bool         fuse_projections,
+                          bool         functional_adapter,
+                          bool         normalized_adapter_strength = false) {
+    if (normalized_adapter_strength && !functional_adapter) {
+        fprintf(stderr, "[Adapter] Normalized strength requires functional mode\n");
+        return false;
+    }
+    if (adapter_path && functional_adapter) {
+        fuse_projections = false;
+    }
     // Backend init. flash_attn_ext accumulates in F16 on CPU, causing audible
     // drift over 24 layers x 8 steps: use F32 manual attention on CPU instead.
     BackendPair bp    = backend_init("DiT");
@@ -443,16 +455,21 @@ static bool dit_ggml_load(DiTGGML *    m,
     m->scalar_one              = ggml_new_tensor_1d(m->wctx.ctx, GGML_TYPE_F32, 1);
     m->wctx.pending.push_back({ m->scalar_one, &one_val, sizeof(float), 0 });
 
-    // Merge adapter deltas into projection weights (before GPU upload and QKV fusion)
+    // Load adapter factors or merge deltas before base GPU upload.
     if (adapter_path) {
-        Timer adapter_timer;
-        if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
-            fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
+        Timer      adapter_timer;
+        const bool loaded = functional_adapter ?
+                                adapter_functional_load(m->functional_adapter, &m->wctx, gf, adapter_path,
+                                                        adapter_scale, m->backend, normalized_adapter_strength) :
+                                adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend);
+        if (!loaded) {
+            fprintf(stderr, "[Adapter] FATAL: adapter loading failed (see diagnostics above)\n");
             gf_close(&gf);
             dit_ggml_free(m);
             return false;
         }
-        fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
+        fprintf(stderr, "[Adapter] %s time: %.1f ms\n", functional_adapter ? "Functional load" : "Merge",
+                adapter_timer.ms());
     }
 
     // Allocate backend buffer and copy weights
@@ -463,17 +480,40 @@ static bool dit_ggml_load(DiTGGML *    m,
     }
     gf_close(&gf);
 
+    if (adapter_path && functional_adapter) {
+        Timer timer;
+        if (!adapter_functional_prepare(m->functional_adapter, m->backend)) {
+            fprintf(stderr, "[Adapter] Functional preparation failed\n");
+            dit_ggml_free(m);
+            return false;
+        }
+        m->linear_transform      = adapter_functional_linear;
+        m->linear_transform_data = &m->functional_adapter;
+        fprintf(stderr, "[Adapter] Functional prepare time: %.1f ms\n", timer.ms());
+    }
+
     fprintf(stderr, "[Load] DiT: %d layers, H=%d, Nh=%d/%d, D=%d\n", cfg.n_layers, cfg.hidden_size, cfg.n_heads,
             cfg.n_kv_heads, cfg.head_dim);
     return true;
+}
+
+// Preserve the existing training/inference loader signature for callers that
+// do not opt into functional inference.
+static bool dit_ggml_load(DiTGGML *    m,
+                          const char * path,
+                          const char * adapter = nullptr,
+                          float        scale   = 1.0f,
+                          bool         fuse    = true) {
+    return dit_ggml_load(m, path, adapter, scale, fuse, false);
 }
 
 static void dit_ggml_free(DiTGGML * m) {
     if (m->sched) {
         ggml_backend_sched_free(m->sched);
     }
-    backend_release(m->backend, m->cpu_backend);
+    adapter_functional_free(m->functional_adapter);
     wctx_free(&m->wctx);
+    backend_release(m->backend, m->cpu_backend);
     *m = {};
 }
 

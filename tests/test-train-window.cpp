@@ -39,8 +39,7 @@ int main() {
     }
     if (!first_window.cropped || first_window.first_latent != repeat_window.first_latent ||
         first_window.latent_length != repeat_window.latent_length || first_window.first_latent % 2 != 0 ||
-        first_window.latent_length % 2 != 0 || first_window.latent_length < 1126 ||
-        first_window.latent_length > 1500) {
+        first_window.latent_length % 2 != 0 || first_window.latent_length < 1126 || first_window.latent_length > 1500) {
         return fail("window selection must be deterministic, bounded, and patch-aligned");
     }
     if (first.encoder_hidden != source.encoder_hidden ||
@@ -62,7 +61,7 @@ int main() {
     }
 
     ACETrainDiffusionExample short_source = source;
-    short_source.real_temporal_length      = 1000;
+    short_source.real_temporal_length     = 1000;
     short_source.target_latents.resize(1000 * 2);
     short_source.context_latents.resize(1000 * 3);
     ACETrainDiffusionExample short_result;

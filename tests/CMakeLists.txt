@@ -34,6 +34,10 @@ add_executable(test-adapter-merge test-adapter-merge.cpp)
 target_link_libraries(test-adapter-merge PRIVATE acestep-core)
 link_ggml_backends(test-adapter-merge)
 
+add_executable(test-adapter-functional test-adapter-functional.cpp)
+target_link_libraries(test-adapter-functional PRIVATE acestep-core)
+link_ggml_backends(test-adapter-functional)
+
 # test-vae-latent-sampling: verify training-only posterior sampling from VAE encoder output.
 add_executable(test-vae-latent-sampling test-vae-latent-sampling.cpp)
 target_link_libraries(test-vae-latent-sampling PRIVATE acestep-core)
@@ -54,6 +58,12 @@ add_executable(test-train-adapter-state test-train-adapter-state.cpp)
 target_link_libraries(test-train-adapter-state PRIVATE acestep-core)
 link_ggml_backends(test-train-adapter-state)
 
+# test-train-step-parity: emit a deterministic real-model step for the
+# companion PyTorch comparison script. Invoked manually with explicit model paths.
+add_executable(test-train-step-parity test-train-step-parity.cpp)
+target_link_libraries(test-train-step-parity PRIVATE acestep-core)
+link_ggml_backends(test-train-step-parity)
+
 # Register every self-contained test with CTest. Model-backed tests are
 # enabled when ACE_TEST_MODELS_DIR points at a complete registry.
 function(ace_register_test target)
@@ -67,6 +77,7 @@ ace_register_test(test-philox)
 ace_register_test(test-dit-linear-transform)
 ace_register_test(test-dora-backend)
 ace_register_test(test-adapter-merge)
+ace_register_test(test-adapter-functional)
 ace_register_test(test-vae-latent-sampling)
 ace_register_test(test-train-dataset)
 ace_register_test(test-train-window)
@@ -93,6 +104,10 @@ endif()
 option(ACE_TEST_CUDA "Register CUDA DoRA backend execution tests (requires a CUDA GPU at test time)" OFF)
 set(ACE_TEST_CUDA_BACKEND "CUDA0" CACHE STRING "GGML CUDA backend name used by ACE CUDA CTests")
 if(ACE_TEST_CUDA AND GGML_CUDA)
+    add_test(NAME test-adapter-functional-cuda
+             COMMAND $<TARGET_FILE:test-adapter-functional> "${ACE_TEST_CUDA_BACKEND}")
+    set_tests_properties(test-adapter-functional-cuda PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" LABELS "ace;cuda;inference;integration")
     foreach(weight_type F32 Q8_0 Q4_K Q5_K Q6_K)
         string(TOLOWER "${weight_type}" weight_type_lower)
         set(test_name "test-dora-backend-cuda-${weight_type_lower}")

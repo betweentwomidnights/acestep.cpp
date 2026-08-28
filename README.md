@@ -175,6 +175,7 @@ Required:
 
 Adapter:
   --adapters <dir>        Directory of adapters
+  --adapter-mode <mode>   functional or merge (default: merge)
 
 Memory control:
   --keep-loaded           Keep models in VRAM between requests

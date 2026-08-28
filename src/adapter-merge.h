@@ -388,9 +388,9 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     }
     WeightCtx::PendingCopy * pc = &wctx->pending[pc_it->second];
 
-    int64_t nel       = ne0 * ne1;
-    size_t  base_nb   = ggml_row_size(ttype, ne0) * (size_t) ne1;
-    bool    encode_ok = adapter_backend_can_encode(backend, ttype);
+    int64_t nel         = ne0 * ne1;
+    size_t  base_nb     = ggml_row_size(ttype, ne0) * (size_t) ne1;
+    bool    encode_ok   = adapter_backend_can_encode(backend, ttype);
     bool    host_decode = ggml_get_type_traits(ttype)->is_quantized;
 
     // slack for the largest graph (DoRA + optional BF16 round + cast in/out + caller subgraph)
@@ -405,8 +405,7 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     // host; retain the backend cast path for BF16/F16/F32 bases.
     struct ggml_tensor * tbase_native = host_decode ? NULL : ggml_new_tensor_2d(ctx, ttype, ne0, ne1);
     struct ggml_tensor * tbase_f32 =
-        host_decode ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1) :
-                      ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
+        host_decode ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1) : ggml_cast(ctx, tbase_native, GGML_TYPE_F32);
     std::vector<float> base_f32;
     if (host_decode) {
         base_f32.resize((size_t) nel);
@@ -427,7 +426,9 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     struct ggml_tensor * tdelta_f =
         lokr_semantics ? ggml_cast(ctx, ggml_cast(ctx, db.tdelta, GGML_TYPE_BF16), GGML_TYPE_F32) : db.tdelta;
 
-    // merge: plain scaled add, PEFT DoRA interpolation, or LyCORIS weight decomposition
+    // merge: plain scaled add, legacy full-delta interpolation for PEFT-formatted
+    // DoRA, or LyCORIS weight decomposition. The DoRA interpolation here is NOT
+    // PEFT's runtime set_scale behavior (which scales BA before normalization).
     struct ggml_tensor * tmerged;
     if (!tds) {
         struct ggml_tensor * td_u = (user_scale != 1.0f) ? ggml_scale(ctx, tdelta_f, user_scale) : tdelta_f;
@@ -523,13 +524,27 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 //   delta = (alpha / rank) * scale * B @ A
 // Applied to base weights in place. Alpha is read per tensor if present
 // (ComfyUI baked), else from adapter_config.json, else defaults to rank.
-static bool adapter_merge_lora(WeightCtx *         wctx,
-                               const GGUFModel &   gf,
-                               const STFile &      st,
-                               const std::string & cfg_dir,
-                               bool                peft_directory,
-                               float               scale,
-                               ggml_backend_t      backend) {
+// An optional consumer reuses the exact same parsing/validation for functional
+// inference without changing any pending base-weight copies.
+using adapter_lora_consumer = std::function<bool(const std::string &,
+                                                 const void *,
+                                                 enum ggml_type,
+                                                 int64_t,
+                                                 int64_t,
+                                                 int64_t,
+                                                 float,
+                                                 const std::vector<float> &,
+                                                 const std::vector<float> &,
+                                                 const std::vector<float> &)>;
+
+static bool adapter_merge_lora(WeightCtx *                   wctx,
+                               const GGUFModel &             gf,
+                               const STFile &                st,
+                               const std::string &           cfg_dir,
+                               bool                          peft_directory,
+                               float                         scale,
+                               ggml_backend_t                backend,
+                               const adapter_lora_consumer & consume = {}) {
     adapter_config config;
     const bool     config_loaded = adapter_read_config(cfg_dir.c_str(), config);
     if (peft_directory && !config_loaded) {
@@ -765,6 +780,15 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
             continue;
         }
 
+        if (consume) {
+            if (!consume(gguf_name, base_ptr, ttype, ne0, ne1, rank, scaling, a_f32, b_f32, magnitude)) {
+                return false;
+            }
+            dora_count += !magnitude.empty();
+            merged++;
+            continue;
+        }
+
         // delta = scaling * B @ A, built inside the unified merge graph.
         // A row major (rank, in_feat) stored as ggml ne=(in_feat, rank), transposed
         // so rank sits on ne[0] for mul_mat contraction. Result ne=(in_feat, out_feat).
@@ -796,9 +820,9 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         merged++;
     }
 
-    fprintf(stderr, "[Adapter] LoRA merged %d pairs (%d DoRA, skipped %d), scale=%.2f\n", merged, dora_count, skipped,
-            scale);
-    return merged > 0;
+    fprintf(stderr, "[Adapter] LoRA %s %d pairs (%d DoRA, skipped %d), scale=%.2f\n",
+            consume ? "loaded functionally" : "merged", merged, dora_count, skipped, scale);
+    return merged > 0 && (!consume || skipped == 0);
 }
 
 // LoKr merge path. Matches the LyCORIS runtime forward for LoKr at
@@ -1124,11 +1148,12 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
 //   LyCORIS file    : a flat .safetensors file (LoRA ComfyUI or LoKr)
 // Directories exist only for PEFT. LyCORIS ships as a single file for both LoRA
 // and LoKr payloads.
-static bool adapter_merge(WeightCtx *       wctx,
-                          const GGUFModel & gf,
-                          const char *      adapter_path,
-                          float             scale,
-                          ggml_backend_t    backend) {
+static bool adapter_merge(WeightCtx *                   wctx,
+                          const GGUFModel &             gf,
+                          const char *                  adapter_path,
+                          float                         scale,
+                          ggml_backend_t                backend,
+                          const adapter_lora_consumer & consume = {}) {
     std::string           sf_path;
     std::string           cfg_dir;
     bool                  peft_directory = false;
@@ -1169,9 +1194,12 @@ static bool adapter_merge(WeightCtx *       wctx,
 
     bool ok;
     if (adapter_detect_lokr(st)) {
-        ok = !peft_directory && adapter_merge_lokr(wctx, gf, st, scale, backend);
+        if (consume) {
+            fprintf(stderr, "[Adapter] Functional inference supports LoRA/PEFT DoRA only; use merge mode for LoKr\n");
+        }
+        ok = !consume && !peft_directory && adapter_merge_lokr(wctx, gf, st, scale, backend);
     } else {
-        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, peft_directory, scale, backend);
+        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, peft_directory, scale, backend, consume);
     }
 
     st_close(&st);

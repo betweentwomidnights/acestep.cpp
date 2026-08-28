@@ -38,19 +38,21 @@ struct ACETrainCommand {
     int                      accumulation        = 1;
     int                      warmup_steps        = 10;
     int                      restart_count       = 1;
-    int                      checkpoint_every     = 1;
+    int                      checkpoint_every    = 1;
     uint64_t                 seed                = 42;
     float                    learning_rate       = 1e-4f;
     float                    weight_decay        = 0.01f;
     float                    max_grad_norm       = 1.0f;
     float                    cfg_dropout         = 0.15f;
+    float                    timestep_mean       = -0.4f;
+    float                    timestep_std        = 1.0f;
     bool                     min_snr             = false;
     float                    min_snr_gamma       = 5.0f;
     bool                     checkpoint_backward = true;
     bool                     validate_dataset    = false;
     int                      examples_per_epoch  = 0;
     ACETrainWindowConfig     window;
-    ACETrainSchedule         schedule            = ACE_TRAIN_SCHEDULE_COSINE;
+    ACETrainSchedule         schedule = ACE_TRAIN_SCHEDULE_COSINE;
     ACETrainPreprocessConfig preprocess;
 };
 
@@ -81,6 +83,8 @@ static void usage(const char * program) {
                  "  --schedule <name>           constant, linear, cosine, cosine-restarts\n"
                  "  --restart-count <N>         Cosine restart cycles (default: 1)\n"
                  "  --cfg-dropout <F>           Conditioning dropout (default: 0.15)\n"
+                 "  --timestep-mu <F>           Logit-normal timestep mean (default: -0.4)\n"
+                 "  --timestep-sigma <F>        Logit-normal timestep stddev (default: 1.0)\n"
                  "  --min-snr [gamma]           Enable flow Min-SNR weighting (default gamma: 5)\n"
                  "  --checkpoint-backward <B>  Recompute layers during backward (default: true)\n"
                  "  --checkpoint-every <N>     Save intermediate state every N epochs; 0 disables (default: 1)\n"
@@ -235,6 +239,14 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
             if (!read_float(next(), command.cfg_dropout)) {
                 return false;
             }
+        } else if (!std::strcmp(option, "--timestep-mu")) {
+            if (!read_float(next(), command.timestep_mean)) {
+                return false;
+            }
+        } else if (!std::strcmp(option, "--timestep-sigma")) {
+            if (!read_float(next(), command.timestep_std)) {
+                return false;
+            }
         } else if (!std::strcmp(option, "--min-snr")) {
             command.min_snr = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -308,7 +320,7 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
     return required_paths && command.rank > 0 && command.alpha > 0 && command.epochs > 0 && command.batch_size > 0 &&
            command.accumulation > 0 && command.restart_count > 0 && command.learning_rate > 0.0f &&
            command.weight_decay >= 0.0f && command.max_grad_norm >= 0.0f && command.cfg_dropout >= 0.0f &&
-           command.cfg_dropout <= 1.0f && command.min_snr_gamma > 0.0f &&
+           command.cfg_dropout <= 1.0f && command.timestep_std >= 0.0f && command.min_snr_gamma > 0.0f &&
            ace_train_window_config_valid(command.window) &&
            (command.adapter_type == "lora" || command.adapter_type == "dora-rows") &&
            (command.module_profile == "attention" || command.module_profile == "balanced");
@@ -326,7 +338,7 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
                                const ModelEntry &                      text_entry,
                                const ModelEntry &                      vae_entry,
                                std::vector<ACETrainDiffusionExample> & prepared,
-                               std::vector<std::string> &             example_names,
+                               std::vector<std::string> &              example_names,
                                std::vector<float> &                    silence_latents,
                                std::vector<float> &                    null_condition,
                                std::string &                           error) {
@@ -422,9 +434,9 @@ static bool train_adapter(const ACETrainCommand &                       command,
     const int examples_per_epoch = command.examples_per_epoch > 0 ?
                                        std::min(command.examples_per_epoch, (int) prepared.size()) :
                                        (int) prepared.size();
-    const int batches_per_epoch = (examples_per_epoch + command.batch_size - 1) / command.batch_size;
-    const int updates_per_epoch = (batches_per_epoch + command.accumulation - 1) / command.accumulation;
-    const int total_steps       = updates_per_epoch * command.epochs;
+    const int batches_per_epoch  = (examples_per_epoch + command.batch_size - 1) / command.batch_size;
+    const int updates_per_epoch  = (batches_per_epoch + command.accumulation - 1) / command.accumulation;
+    const int total_steps        = updates_per_epoch * command.epochs;
     if (completed_epochs > command.epochs) {
         error = "resume checkpoint has completed more epochs than requested";
         dit_ggml_free(&model);
@@ -436,14 +448,17 @@ static bool train_adapter(const ACETrainCommand &                       command,
     optimizer_config.max_gradient_norm = command.max_grad_norm;
     ACETrainDiffusionConfig diffusion_config;
     diffusion_config.cfg_dropout   = command.cfg_dropout;
+    diffusion_config.timestep_mean = command.timestep_mean;
+    diffusion_config.timestep_std  = command.timestep_std;
     diffusion_config.min_snr       = command.min_snr;
     diffusion_config.min_snr_gamma = command.min_snr_gamma;
 
     std::vector<size_t> order(prepared.size());
     if (command.window.max_seconds > 0.0f) {
-        std::fprintf(stderr,
-                     "[Ace-Train] Rotating windows %.2f-%.2fs, full-song caption/lyrics/duration conditioning retained\n",
-                     command.window.min_seconds, command.window.max_seconds);
+        std::fprintf(
+            stderr,
+            "[Ace-Train] Rotating windows %.2f-%.2fs, full-song caption/lyrics/duration conditioning retained\n",
+            command.window.min_seconds, command.window.max_seconds);
     }
     if (examples_per_epoch != (int) prepared.size()) {
         std::fprintf(stderr, "[Ace-Train] Using %d/%zu examples per epoch (deterministic shuffled subset)\n",
@@ -461,11 +476,11 @@ static bool train_adapter(const ACETrainCommand &                       command,
             std::vector<ACETrainDiffusionExample> sources;
             sources.reserve((size_t) (last - first));
             for (int i = first; i < last; ++i) {
-                const size_t                  source_index = order[(size_t) i];
-                ACETrainDiffusionExample      windowed;
-                ACETrainWindow                window;
-                const int output_channels  = model.cfg.out_channels;
-                const int context_channels = model.cfg.in_channels - output_channels;
+                const size_t             source_index = order[(size_t) i];
+                ACETrainDiffusionExample windowed;
+                ACETrainWindow           window;
+                const int                output_channels  = model.cfg.out_channels;
+                const int                context_channels = model.cfg.in_channels - output_channels;
                 if (!ace_train_crop_example(prepared[source_index], output_channels, context_channels,
                                             model.cfg.patch_size, command.window, command.seed, epoch, source_index,
                                             windowed, window, error)) {
@@ -478,7 +493,8 @@ static bool train_adapter(const ACETrainCommand &                       command,
                 const float window_seconds = (float) windowed.real_temporal_length / ACE_TRAIN_LATENTS_PER_SECOND;
                 if (command.window.max_seconds > 0.0f) {
                     std::fprintf(stderr,
-                                 "[Ace-Train] window epoch=%d example=\"%s\" offset=%.2fs duration=%.2fs full=%.2fs conditioning=full-song\n",
+                                 "[Ace-Train] window epoch=%d example=\"%s\" offset=%.2fs duration=%.2fs full=%.2fs "
+                                 "conditioning=full-song\n",
                                  epoch + 1, example_names[source_index].c_str(), offset_seconds, window_seconds,
                                  full_seconds);
                 }
@@ -500,8 +516,8 @@ static bool train_adapter(const ACETrainCommand &                       command,
                 dit_ggml_free(&model);
                 return false;
             }
-            ACETrainDiTGraph            graph      = {};
-            ACETrainDiTCheckpoint       checkpoint = {};
+            ACETrainDiTGraph            graph          = {};
+            ACETrainDiTCheckpoint       checkpoint     = {};
             ACETrainAdapterGraphState * graph_adapters = nullptr;
             if (command.checkpoint_backward) {
                 if (!ace_build_train_dit_checkpoint(model, state, temporal_length, encoder_sequence_length,

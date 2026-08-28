@@ -72,8 +72,7 @@ static bool ace_sync_checkpoint_path(const std::filesystem::path & path, bool di
     const DWORD flags = directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL;
     HANDLE      handle =
         CreateFileW(path.wstring().c_str(), GENERIC_READ | GENERIC_WRITE,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr, OPEN_EXISTING, flags, nullptr);
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, flags, nullptr);
     if (handle == INVALID_HANDLE_VALUE || !FlushFileBuffers(handle)) {
         if (handle != INVALID_HANDLE_VALUE) {
             CloseHandle(handle);

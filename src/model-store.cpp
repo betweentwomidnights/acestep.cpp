@@ -29,7 +29,7 @@ namespace {
 // pipeline authors cannot accidentally drift a key by leaving a field that
 // their kind does not care about at a different default than their peer.
 // LM: kind + path + max_seq + n_kv_sets. DiT: kind + path + adapter_path
-// + adapter_scale. Everything else: kind + path.
+// + adapter_scale + application/strength modes. Everything else: kind + path.
 struct ModelKeyHash {
     size_t operator()(const ModelKey & k) const noexcept {
         size_t h = std::hash<int>{}(static_cast<int>(k.kind));
@@ -43,6 +43,8 @@ struct ModelKeyHash {
             uint32_t bits;
             memcpy(&bits, &k.adapter_scale, sizeof(bits));
             h ^= std::hash<uint32_t>{}(bits) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            h ^= std::hash<bool>{}(k.functional_adapter) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            h ^= std::hash<bool>{}(k.normalized_adapter_strength) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         }
         return h;
     }
@@ -57,7 +59,9 @@ struct ModelKeyEq {
             return a.max_seq == b.max_seq && a.n_kv_sets == b.n_kv_sets;
         }
         if (a.kind == MODEL_DIT) {
-            return a.adapter_path == b.adapter_path && a.adapter_scale == b.adapter_scale;
+            return a.adapter_path == b.adapter_path && a.adapter_scale == b.adapter_scale &&
+                   a.functional_adapter == b.functional_adapter &&
+                   a.normalized_adapter_strength == b.normalized_adapter_strength;
         }
         return true;
     }
@@ -254,7 +258,11 @@ static size_t bytes_of_cond_enc(const CondGGML * m) {
 }
 
 static size_t bytes_of_dit(const DiTGGML * m) {
-    return m && m->wctx.buffer ? ggml_backend_buffer_get_size(m->wctx.buffer) : 0;
+    if (!m) {
+        return 0;
+    }
+    return (m->wctx.buffer ? ggml_backend_buffer_get_size(m->wctx.buffer) : 0) +
+           (m->functional_adapter.buffer ? ggml_backend_buffer_get_size(m->functional_adapter.buffer) : 0);
 }
 
 static size_t bytes_of_vae_enc(const VAEEncoder * m) {
@@ -341,7 +349,8 @@ DiTGGML * store_require_dit(ModelStore * s, const ModelKey & k) {
     Timer        t;
     DiTGGML *    m       = new DiTGGML();
     const char * adapter = k.adapter_path.empty() ? nullptr : k.adapter_path.c_str();
-    if (!dit_ggml_load(m, k.path.c_str(), adapter, k.adapter_scale)) {
+    if (!dit_ggml_load(m, k.path.c_str(), adapter, k.adapter_scale, true, k.functional_adapter,
+                       k.normalized_adapter_strength)) {
         delete m;
         return nullptr;
     }

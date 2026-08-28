@@ -17,17 +17,19 @@ struct AceSynthJob;
 struct ModelStore;
 
 struct AceSynthParams {
-    const char * text_encoder_path;  // Qwen3 text encoder GGUF (required)
-    const char * dit_path;           // DiT GGUF (required)
-    const char * vae_path;           // VAE GGUF (required)
-    const char * adapter_path;       // adapter safetensors or directory (NULL to disable)
-    float        adapter_scale;      // user scale multiplier
-    bool         use_fa;             // flash attention
-    bool         clamp_fp16;         // clamp hidden states to FP16 range
-    bool         use_batch_cfg;      // batch cond+uncond in one DiT forward
-    int          vae_chunk;          // latent frames per tile
-    int          vae_overlap;        // overlap frames per side
-    const char * dump_dir;           // intermediate tensor dump dir (NULL = disabled)
+    const char * text_encoder_path;                    // Qwen3 text encoder GGUF (required)
+    const char * dit_path;                             // DiT GGUF (required)
+    const char * vae_path;                             // VAE GGUF (required)
+    const char * adapter_path;                         // adapter safetensors or directory (NULL to disable)
+    float        adapter_scale;                        // user scale multiplier
+    bool         use_fa;                               // flash attention
+    bool         clamp_fp16;                           // clamp hidden states to FP16 range
+    bool         use_batch_cfg;                        // batch cond+uncond in one DiT forward
+    int          vae_chunk;                            // latent frames per tile
+    int          vae_overlap;                          // overlap frames per side
+    const char * dump_dir;                             // intermediate tensor dump dir (NULL = disabled)
+    bool         functional_adapter          = false;  // leave base weights untouched (LoRA/DoRA)
+    bool         normalized_adapter_strength = false;  // DoRA strength before normalization; requires functional mode
 };
 
 // Output audio buffer. Caller must free with ace_audio_free().
