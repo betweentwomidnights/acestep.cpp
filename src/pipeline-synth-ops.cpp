@@ -24,16 +24,19 @@ static const int FRAMES_PER_SECOND = 25;
 
 // Locale immune scalar reader. std::from_chars handles ints on every stdlib
 // and floats on every stdlib except libc++ before v20 (AppleClang ships an
-// old libc++). There we hand roll a tiny C locale parser supporting decimal
-// and optional exponent. Returns ptr past consumed bytes, or first on parse
-// failure.
+// old libc++). libc++ v20+ also marks the floating point overloads unavailable
+// when the deployment target predates their OS release, which is the usual case
+// on macOS with a newer SDK, so gate on availability as well as version. There
+// we hand roll a tiny C locale parser supporting decimal and optional exponent.
+// Returns ptr past consumed bytes, or first on parse failure.
 static const char * scan_num(const char * first, const char * last, int & v) {
     auto r = std::from_chars(first, last, v);
     return r.ec == std::errc{} ? r.ptr : first;
 }
 
 static const char * scan_num(const char * first, const char * last, float & v) {
-#if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 200000
+#if defined(_LIBCPP_VERSION) && (_LIBCPP_VERSION < 200000 || \
+                                 !_LIBCPP_AVAILABILITY_HAS_FROM_CHARS_FLOATING_POINT)
     const char * p   = first;
     bool         neg = false;
     if (p < last && (*p == '+' || *p == '-')) {
