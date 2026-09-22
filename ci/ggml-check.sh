@@ -38,9 +38,14 @@ printf 'ggml         %s\n' "$(git -C ggml rev-parse HEAD 2>/dev/null || echo unk
 # ACE_TEST_MODELS_DIR and ACE_TEST_CUDA are both left unset, which is what
 # keeps this to the nine self-contained tests. tests/CMakeLists.txt already
 # draws those lines, so this only has to not cross them.
+# GGML_METAL has to be turned off rather than merely left alone. ggml defaults
+# it ON for Apple, and ACE_METAL=OFF only declines to force it ON, so a macOS
+# runner would build and run Metal while this script claims to be CPU only.
+# That aborted three of audiocraft.cpp's tests on a virtualised runner.
 cmake -S . -B "$build" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_TESTING=ON
+    -DBUILD_TESTING=ON \
+    -DGGML_METAL=OFF
 cmake --build "$build" --config Release -j "$jobs"
 
 # --output-on-failure so a red test explains itself in the job log rather than
