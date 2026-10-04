@@ -73,6 +73,23 @@ function(ace_register_test target)
         LABELS "ace;unit")
 endfunction()
 
+# Server handlers/process behavior, with metadata-only fixtures and no model loads.
+add_executable(test-server-regressions test-server-regressions.cpp)
+add_dependencies(test-server-regressions ace-server)
+target_link_libraries(test-server-regressions PRIVATE acestep-core httplib)
+link_ggml_backends(test-server-regressions)
+ace_register_test(test-server-regressions)
+set_tests_properties(test-server-regressions PROPERTIES TIMEOUT 30)
+add_test(NAME test-server-fatal-log
+    COMMAND "${CMAKE_COMMAND}" "-DTEST_SERVER=$<TARGET_FILE:test-server-regressions>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/test-server-fatal-log.cmake")
+set_tests_properties(test-server-fatal-log PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" LABELS "ace;server;unit" TIMEOUT 30)
+
+add_executable(test-quantize-policy test-quantize-policy.cpp)
+link_ggml_backends(test-quantize-policy)
+ace_register_test(test-quantize-policy)
+
 ace_register_test(test-philox)
 ace_register_test(test-dit-linear-transform)
 ace_register_test(test-dora-backend)

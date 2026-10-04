@@ -1,28 +1,48 @@
-# Sawhee
+# acestep.cpp
 
-Sawhee is a native ACE-Step inference and adapter-training runtime. It adds
-LoRA and DoRA-row training to
-[acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp) by porting the
-training-capable GGML work from
-[sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp) onto ACE-Step's GGML
-base.
+Native ACE-Step 1.5 music generation and adapter training in C++ on
+[ggml](https://github.com/betweentwomidnights/ggml). Text and lyrics in,
+stereo 48 kHz audio out, with a command-line runtime, local HTTP server, and WebUI.
 
-Sawhee targets CPU, CUDA, Vulkan, and Metal with PEFT-compatible artifacts and
-a command-line contract suitable for a future drop-in backend for
-[gary-localhost-installer](https://github.com/betweentwomidnights/gary-localhost-installer).
-Gary itself remains outside this repository's scope.
+This fork is designed for downstream use in
+[gary4local](https://github.com/betweentwomidnights/gary-localhost-installer),
+with possible future use in embedded applications such as Ableton extensions,
+REAPER extensions, and iPlug2 projects, following the work in
+[sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp).
+
+Like [stems.cpp](https://github.com/betweentwomidnights/stems.cpp), this project
+grew from a friend's fork: [twilwa's Sawhee](https://github.com/twilwa/sawhee),
+based on [upstream acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp).
+It is maintained alongside sa3.cpp,
+[audiocraft.cpp](https://github.com/betweentwomidnights/audiocraft.cpp),
+[yuey.cpp](https://github.com/betweentwomidnights/yuey.cpp), and stems.cpp.
+These sibling repos share the same ggml fork and coordinate submodule updates.
 
 ## Status
 
-The full ACE-Step fork and native trainer are present at the repository root.
-Backend-resident DoRA-row graphs with F32, Q8_0, Q4_K, Q5_K, and Q6_K frozen
-weights pass on CPU, Metal, and Vulkan. A supplied real-audio slice completed
-DoRA-row training, full-state resume, PEFT reload, and fixed-seed inference on
-Metal. The CUDA path compiles in CI, but still requires execution on matching
-hardware.
+The main divergence from upstream acestep.cpp is **native LoRA training on both
+unquantized and quantized frozen base models**, as in sa3.cpp. The trainer also
+supports DoRA-row adapters, PEFT-compatible exports, full optimizer-state resume,
+and memory-bounded training windows. Functional adapter inference applies the
+adapter while leaving the base weights unchanged, avoiding a lossy merge and
+requantization on quantized models.
+
+The runtime targets CPU, CUDA, Vulkan, and Metal. Training is currently exposed
+through `ace-train`; the WebUI supports adapter selection for inference but does
+not yet expose training. Earlier Metal graph and DoRA-row smoke tests are recorded
+in the research report; validation of LoRA training on the current shared ggml
+revision remains a TODO. Downstream integration and parity with gary4local's
+PyTorch implementation also remain TODOs.
 
 See [the research report](docs/research.md) and
 [the OpenSpec proposal](openspec/changes/acestep-dora-training/proposal.md).
+
+## TODO
+
+- [ ] Add LoRA training to the WebUI and reach parity with gary4local's PyTorch implementation.
+- [ ] Validate LoRA training on the Metal backend with unquantized and quantized bases, including checkpoint resume and trained-adapter inference.
+- [ ] Integrate this native backend into gary4local.
+- [ ] Replicate the release CI used by sa3.cpp and yuey.cpp for consistent releases across the sibling repos.
 
 ## Runtime
 
@@ -53,8 +73,8 @@ Alternative: `./models.sh` downloads the default set automatically (needs `pip i
 ## Build
 
 ```
-git clone --recurse-submodules https://github.com/twilwa/sawhee.git
-cd sawhee
+git clone --recurse-submodules https://github.com/betweentwomidnights/acestep.cpp.git
+cd acestep.cpp
 ```
 
 ### Windows
@@ -90,8 +110,8 @@ macOS auto-enables Metal and Accelerate BLAS with any of the above.
 server.cmd        # Windows
 ```
 
-Open http://localhost:8085 in your browser. The WebUI handles everything:
-write a caption, set lyrics and metadata, generate, play, and download tracks.
+Open http://localhost:8085 in your browser. Use the WebUI to write a caption,
+set lyrics and metadata, generate, play, and download tracks.
 
 Models are loaded on first request (zero GPU at startup) and swapped
 automatically when you pick a different one in the UI.
@@ -130,11 +150,11 @@ Validate the dataset before loading any models:
 Run LoRA or DoRA-row training on a selected GGML backend:
 
 ```bash
-GGML_BACKEND=MTL0 ./build/ace-train \
+GGML_BACKEND=CUDA0 ./build/ace-train \
     --models ./models \
     --dataset ./training-data \
     --output ./adapters/my-adapter \
-    --adapter-type dora-rows \
+    --adapter-type lora \
     --profile balanced
 ```
 
@@ -164,6 +184,9 @@ directory contains PEFT-compatible adapter files and complete native optimizer
 state. Pass an epoch checkpoint or PEFT adapter directory to `--resume`. Run
 `./build/ace-train --help` for optimizer, scheduling, batching, and model
 selection options.
+
+Use `--adapter-type dora-rows` to train a DoRA-row adapter instead. Metal LoRA
+training validation is tracked in the TODO list above.
 
 ## Server options
 
@@ -208,7 +231,9 @@ The server exposes four POST endpoints and two GET endpoints:
 **POST /synth** - Render audio codes into MP3 or WAV (selected by the
 `output_format` field in the request JSON). Accepts JSON or multipart
 (with source audio or pre-encoded latents for cover/repaint modes; latents
-win over audio when both are sent on the same side).
+win over audio when both are sent on the same side). Both JSON and multipart
+requests accept a single request object or an array of requests. A multipart
+batch shares its uploaded source and reference audio or latents.
 
 **POST /understand** - Reverse pipeline: audio in, metadata + lyrics + codes out.
 Multipart only (source audio or pre-encoded latents required, optional request JSON for params).
@@ -291,6 +316,11 @@ https://github.com/user-attachments/assets/292a31f1-f97e-4060-9207-ed8364d9a794
 https://github.com/user-attachments/assets/34b1b781-a5bc-46c4-90a6-615a10bc2c6a
 
 ## Acknowledgements
+
+This fork builds on [ServeurpersoCom's acestep.cpp](https://github.com/ServeurpersoCom/acestep.cpp)
+and [twilwa's Sawhee](https://github.com/twilwa/sawhee), which brought native
+adapter training to ACE-Step using the training-capable ggml work from sa3.cpp.
+The shared ggml fork is maintained across the sibling repositories above.
 
 Independent C++ implementation based on
 [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) by ACE Studio and StepFun.
