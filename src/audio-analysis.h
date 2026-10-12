@@ -5,6 +5,8 @@
 #include "vendor/sa3-analysis/audio_analysis.h"
 #include "yyjson.h"
 
+#include <limits>
+
 namespace ace_analysis {
 using Result = sa3::analysis::Result;
 
@@ -100,10 +102,11 @@ inline Result analyze_wav_buffer(const std::string &  bytes,
                 }
             }
         }
-        mono[i] = float(sum / channels);
-        if (!std::isfinite(mono[i])) {
+        const double mean = sum / channels;
+        if (!std::isfinite(mean) || std::fabs(mean) > std::numeric_limits<float>::max()) {
             throw std::invalid_argument("audio contains samples outside finite float range");
         }
+        mono[i] = float(mean);
     }
     return sa3::analysis::analyze(mono, int(sample_rate));
 }
