@@ -23,6 +23,8 @@ static ggml_backend_dev_t ace_runtime_device(const char * requested) {
     if (name == "auto") {
         return ace_runtime_device(nullptr);
     }
+    ggml_backend_dev_t alias          = nullptr;
+    int                alias_priority = 4;
     for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
         auto        dev = ggml_backend_dev_get(i);
         std::string exact(ggml_backend_dev_name(dev));
@@ -33,9 +35,22 @@ static ggml_backend_dev_t ace_runtime_device(const char * requested) {
         for (char & c : backend) {
             c = (char) std::tolower((unsigned char) c);
         }
-        if (name == exact || name == backend || (name == "metal" && backend == "mtl")) {
+        if (name == exact) {
             return dev;
         }
+        if (name == backend || (name == "metal" && backend == "mtl")) {
+            // Registry order may put an integrated GPU before a discrete one.
+            // A backend alias follows auto's preference; exact names stay exact.
+            auto type     = ggml_backend_dev_type(dev);
+            int  priority = type == GGML_BACKEND_DEVICE_TYPE_GPU  ? 0 :
+                            type == GGML_BACKEND_DEVICE_TYPE_IGPU ? 1 :
+                            type == GGML_BACKEND_DEVICE_TYPE_CPU  ? 2 :
+                                                                    3;
+            if (priority < alias_priority) {
+                alias          = dev;
+                alias_priority = priority;
+            }
+        }
     }
-    return nullptr;
+    return alias;
 }

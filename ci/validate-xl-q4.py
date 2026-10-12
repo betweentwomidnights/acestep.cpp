@@ -92,6 +92,7 @@ def main():
     assert props["hardware"]["selected_device"] == a.backend
     assert props["hardware"]["accelerator_available"], "CPU is not GPU validation"
     results["props"] = props
+    assert results["application_commit"].startswith(props["build_revision"].split()[0]), "binary is from a different application revision"
     common = ["--models", models, "--dataset", dataset, "--dit", a.dit, "--text-encoder", a.text_encoder,
               "--vae", a.vae, "--adapter-type", "lora", "--profile", a.profile, "--rank", a.rank,
               "--alpha", a.rank * 2, "--epochs", "2", "--batch-size", "1", "--accumulation", "1",

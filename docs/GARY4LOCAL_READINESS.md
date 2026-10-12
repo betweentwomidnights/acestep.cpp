@@ -8,15 +8,17 @@ were inspected without changing them.
 
 | Repository | Application HEAD inspected | Actual pinned ggml |
 | --- | --- | --- |
-| acestep.cpp | `76981988` plus this readiness change | `60f49e09ce67df544831a357b654318ec2722fb0` |
+| acestep.cpp | `e93ee47f` (merged bump PR #9) plus this readiness change | `4ad3b30bfe452efc5f4f9c0e111e017d9970292a` |
 | gary-localhost-installer | `eae118fafecaa7c3364564eff53ac2b8ced02f97` plus local edits | Separate native service packages |
 | sa3.cpp | `b844016d49628ec730c273b78c4e9e18ecca5fef` | `60f49e09ce67df544831a357b654318ec2722fb0` |
 | yuey.cpp (`yue2.cpp` checkout) | `82ed90333f7fb299459b965ff1e75a5383d784a3` | `4ad3b30bfe452efc5f4f9c0e111e017d9970292a` |
 | stems.cpp | `d423a4863a1851b826d5be28c988e46c925cefcc` | `4ad3b30bfe452efc5f4f9c0e111e017d9970292a` |
 
-The starting ACE checkout was `ed00def1`/`fff93d27`. It was fast-forwarded to
-the already-merged default branch `76981988`/`60f49e09` before final validation.
-No new ggml change or consumer bump is introduced by the release branch.
+The starting ACE checkout was `ed00def1`/`fff93d27`. After initial checks at
+`76981988`/`60f49e09`, PR #9 was merged at the user's request and the release
+branch incorporated `e93ee47f`/`4ad3b30b` before final validation. Earlier
+`60f49e09` smoke results are baseline evidence only. No new ggml patch is
+introduced by the release branch.
 
 These pins are intentionally reported from each checkout rather than inferred
 from historical shared-fork notes. This change neither modifies ggml nor bumps
@@ -35,6 +37,9 @@ service still needs its own ggml binaries and matching compile definitions.
 - Added exact device names and `cuda`, `vulkan`, `cpu`, `metal` aliases. An
   explicit unavailable device fails. Props canonicalizes `MTL` to `Metal`,
   because the current installer checks backend names by substring.
+  Backend aliases prefer a discrete GPU over an integrated GPU; exact names
+  preserve the selected device. Vulkan indices must be discovered from props,
+  because their ordering can change with the runtime environment.
 - The server defaults to functional adapters, preserving a quantized frozen
   base rather than merging and requantizing its adapter. Historical merge
   mode remains available explicitly; the synthesis CLI retains its own default.

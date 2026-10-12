@@ -59,7 +59,10 @@ model weights. `devices` reports backend names, device names/types and
 free/total bytes. Metal is reported as `Metal` for the installer, with raw `registry_backend=MTL`
 and devices such as `MTL0`;
 `--device metal` and `ACE_DEVICE=metal` resolve that alias. Explicit unavailable
-devices fail. Device aliases also work in `GGML_BACKEND` for the CLI tools.
+devices fail. Backend aliases prefer discrete GPUs over integrated GPUs;
+exact device names preserve the caller's choice. Discover indices from props
+rather than assuming `Vulkan0` always names the same GPU. Device aliases also
+work in `GGML_BACKEND` for the CLI tools.
 
 | Environment | CLI override |
 | --- | --- |
