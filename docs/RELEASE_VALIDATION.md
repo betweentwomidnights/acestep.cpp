@@ -15,6 +15,13 @@ Those results describe that source revision. The caption/analysis implementation
 at `be413acf9c99a05bb11c309639f6fdce55c338e1` changes runtime source and needs
 fresh portable packaging CI; earlier archive hashes do not describe its binaries.
 
+For that final runtime revision, Linux/macOS source builds and ggml checks pass.
+The [universal macOS package job](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38225739764/job/114732678789)
+also passes build/tests, signing and notarization. Portable Windows packaging
+and the remaining source checks are still running in
+[release CI](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38225739764)
+and [CI Build](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38225739686).
+
 ## Caption, analysis and prerequisite follow-up
 
 On the same PC and unchanged ggml `4ad3b30b`, the caption implementation passes
