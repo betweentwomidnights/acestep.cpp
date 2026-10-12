@@ -6,12 +6,94 @@ incorporates it and pins ggml `4ad3b30bfe452efc5f4f9c0e111e017d9970292a`.
 No new ggml patch is part of this work. Earlier `60f49e09` results remain
 baseline evidence, not validation of the final pin.
 
-Local final-code tests below use application
+The original release-package tests below use application
 `27aeabf880a18f6078fb2ca020fe99510403988f`, with a clean tracked tree.
 Both CI packages use GitHub's corresponding PR merge ref
 `bdd2aed82ed0adac2f1d2dd5d4edaca4c4638b85`. Its tree matches the runtime
 commit exactly (`9d7ca54a698b150efd2729391aaeba7ce2eafde2`), with the same ggml pin.
-Documentation-only follow-ups do not change the tested runtime implementation.
+Those results describe that source revision. The caption/analysis implementation
+at `be413acf9c99a05bb11c309639f6fdce55c338e1` changes runtime source and needs
+fresh portable packaging CI; earlier archive hashes do not describe its binaries.
+
+## Caption, analysis and prerequisite follow-up
+
+On the same PC and unchanged ggml `4ad3b30b`, the caption implementation passes
+all 15 CTests in both CPU-only and dynamic CUDA/Vulkan builds. A local CPU package
+also passes staged startup and includes `ace-audio-analyze.exe` and both imported
+MIT licenses. The analysis CLI and HTTP responses agree on the same PCM fixture;
+tests cover Unicode paths, silence, invalid/truncated/empty WAVs, non-finite
+samples, duration bounds and model/sampling selection errors without model loads.
+The tokenizer-backed understand prompt test passes with the installed LM GGUF.
+Small-cache model-backed tests verify that both a prompt that cannot fit and a
+decode that exhausts its KV budget fail cleanly, leaving the server healthy.
+Float64 sample overflow is rejected before it reaches either estimator/encoder.
+The final range guard checks the double downmix before narrowing to float;
+all 15 CPU CTests pass after that portability adjustment.
+
+The opt-in `tests/test-caption-real.py` passes on actual CUDA0 for base Q4 with
+FSM enabled and disabled, XL-base Q4 with FSM enabled, and on NVIDIA Vulkan0 for
+base Q4 with FSM enabled. Each run checks two identical same-seed captions in
+the same server process, queued cancellation and normalized JSON. CUDA uses only
+Gary's shared CUDA 12.8.0 directory plus Windows System32 on PATH; capture is
+enabled and confirmed in logs. Typical complete requests take about 3–6 seconds
+on this fixture. These are execution/structural checks, not a production caption
+accuracy evaluation or backend numerical parity claim.
+
+The 30-second PCM16 stereo, 44.1 kHz fixture is a local excerpt (offset 30s) from
+Gary's existing `keygen_music_for_installer.wav`, SHA256
+`2a652992877dce20ba0fdc056720de3302e1b94c7924b3f7de3a6a1ef7405d32`.
+It is not committed. Model SHA256 values:
+
+| Model | SHA256 |
+| --- | --- |
+| LM 0.6B Q8_0 | `bdaf9e292d4470f31c19cafeaca1b74936a114667e3a85e5d33b65247e9908ec` |
+| Base Q4_K_M tokenizer | `942ec6a7bc11a40809af5f337063f2af2acc63e4fcd4a92b0cb42dc2bc7c41e8` |
+| XL-base Q4_K_M tokenizer | `13b08ac84e0cdca8ac770d6bc12842046113c9479ddcedd2672ac87ac458ff78` |
+| BF16 VAE | `0599862ac5d15cd308e1d2e368373aea6c02e25ebd1737ad4a4562a0901b0ef8` |
+
+The old understand single-token path produced missing/repetitive text when CUDA
+capture engaged. With capture disabled it produced coherent text. Reusing the
+existing generation pipeline's persistent batched decode graph (batch size one)
+restores coherent capture-enabled results, matching the capture-disabled result
+for the same tokenizer/FSM setting. No shared ggml change was made. The prompt
+also now closes the user turn immediately after codes and conditions constrained
+metadata decoding on `<think>\n`, matching the Python template/FSM opener.
+Incomplete token-budget responses and malformed caption text fail rather than
+being offered as successful dataset suggestions.
+
+Caption semantics vary by tokenizer and backend: the same excerpt produced
+Eurodance, rock and J-core descriptions, with differing predicted keys. The API
+retains low-confidence local key suggestions separately; it does not claim that
+any of these labels are authoritative. Pin and evaluate the application caption
+bundle before enabling bulk sidecar writes. Actual WAV duration overrides the
+LM's estimated duration.
+
+Local native-architecture GPU packaging also passes all 15 tests and staged-core
+probes. Capture-enabled captions pass from the staged split core + CUDA package
+with Gary's shared CUDA runtime, and from the standalone package with only
+Windows System32 on PATH. Those local packages are not portable release assets.
+
+CUDA Q4 DoRA-row forward/backward and the functional LoRA/DoRA inference suites
+were rerun successfully after the change. The owner additionally reports an
+earlier successful PC DoRA adapter trained on Q4 XL-base. That is separate from
+the automated LoRA checkpoint evidence below and was not rerun as a full dataset
+training job in this follow-up. Metal LoRA and BF16 frozen-DiT backward remain
+open; see `METAL_TRAINING_HANDOFF.md`.
+
+[Gary PR #8](https://github.com/betweentwomidnights/gary-localhost-installer/pull/8)
+at `11138dd` adds the shared VC prerequisite preflight/repair. Five focused tests
+and 18 native-runtime tests pass (one real-download test remains ignored).
+The official pinned Microsoft installer passes SHA256, actual Authenticode and
+version verification; a wrong expected version is rejected without executing it.
+The current-system test confirms no download/cache/elevation when already ready.
+No VC installation/uninstallation was performed here. Clean Windows installation,
+UAC cancellation/retry and reboot acceptance remain required.
+
+Follow-up logs/results are under `build-release-validation/caption-*-final/`
+and `caption-376-*/`, `caption-bounds-ctest.log`,
+`caption-cpu-package-final.log`, `caption-prompt-test.log`,
+`caption-dora-q4.log`, `caption-adapter-functional.log`, `vc-cargo-tests-final.log`
+and `vc-native-runtime-tests.log`.
 
 ## Windows environment
 
