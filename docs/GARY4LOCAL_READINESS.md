@@ -1,4 +1,4 @@
-# gary4local readiness audit — 2026-10-11
+# gary4local readiness audit — 2026-10-12
 
 This audit compares the working source in `C:/dev/gary-localhost-installer`,
 `C:/dev/sa3.cpp`, `C:/dev/yue2.cpp`, and `C:/dev/stems.cpp`. It prepares the
@@ -65,7 +65,8 @@ Torch; native XL Q4 is a new memory-saving path, not a claim of bitwise parity.
 | Balanced ranks | Native attention/balanced profiles cover all 24 base / 32 XL layers. Carey has matching projection-family rank/alpha multipliers. Native and Torch RNG initialization/rounding must still be compared on chosen ranks. |
 | Optimizer/loss | AdamW, accumulation, clipping, CFG dropout, two-draw logit-normal timesteps and Min-SNR exist natively. Map every option explicitly; native Min-SNR defaults off, whereas the Carey job defaults to `min_snr`. |
 | Defaults | Both use rank 64/alpha 128 in the job-facing defaults, but epochs, LR, warmup, checkpoint interval and adapter kind must come from the saved application plan, not implicit CLI defaults. |
-| Windows | Native `--window-min-seconds`/`--window-max-seconds` bound DiT backward activation memory while retaining full-song conditioning. The application max-duration/preprocessing policy is a different operation; do not equate them. |
+| Training windows | Native `--window-min-seconds`/`--window-max-seconds` bound DiT backward activation memory while retaining full-song conditioning. The application max-duration/preprocessing policy is a different operation; do not equate them. |
+| Training device | Export `GGML_BACKEND` with the selected exact device or backend alias for the `ace-train` child. `ACE_DEVICE`/`--device` configure the server; do not assume that service environment variable also forces the trainer. |
 | Dataset | Native accepts flat paired WAV/required canonical metadata. Carey discovers nested WAV/MP3/FLAC/OGG/Opus/M4A, captions and normalizes metadata. Application staging must decode/flatten safely, avoid basename collisions and produce every required field, with `lyrics:` last. |
 | Preprocessing | Native loads components in phases and samples the VAE posterior, but retains prepared examples in host memory and repeats preprocessing on restart. Carey uses reusable `.pt` tensors. A bounded disk cache and cache identity are still needed for large native datasets. |
 | Full resume | Native saves moments, step, epoch, base-file fingerprint and PEFT artifacts atomically. Resolve `checkpoint.current` before reading its immutable generation. It does not persist the full dataset/config/scheduler plan; keep the same args, data, seed and total epoch budget when comparing interrupted/uninterrupted runs. PEFT-only import is weight-only restart, not optimizer resume. |
@@ -74,7 +75,7 @@ Torch; native XL Q4 is a new memory-saving path, not a claim of bitwise parity.
 | Auto captioning | Carey has understand-music, local BPM/key analysis, caption pools and trigger/genre policy. Keep these in the application orchestration layer; native `ace-understand` is a component, not an equivalent end-to-end job API. |
 | Adapter registration | Map model family, allowed inference variants, adapter type/profile, checkpoint path and caption pool into Carey's catalog. Validate incompatible XL/base shapes before allowing selection. Restart/rescan is currently needed to refresh the native server's adapter registry. |
 | Torch parity | Existing deterministic `test-train-step-parity` and its Python comparator provide a starting point. Compare preprocessing, profile shapes/scales, target/loss/gradients and optimizer updates against the actual Carey settings. CPU unit tests or audible output do not close this gate. |
-| Backend coverage | Validate LoRA and DoRA separately, by base tensor type and device, including full resume and functional inference. Current-revision Metal LoRA remains open. BF16 inference is not BF16 frozen-DiT backward validation; consult the pinned backend's actual OUT_PROD support. |
+| Backend coverage | Validate LoRA and DoRA separately, by base tensor type and device, including full resume and functional inference. Current-revision Metal LoRA remains open. At `4ad3b30b`, CPU/Metal OUT_PROD guards still omit BF16; do not offer BF16 frozen-DiT backward there. BF16 VAE inference does not validate that path. Unquantized F16/F32 and quantized bases are separate coverage. |
 
 These are visible migration gaps, not reasons to claim the existing Carey
 installation can switch runtimes immediately. This release prepares downloadable
@@ -103,6 +104,12 @@ Fail with a useful memory/configuration error if the requested plan cannot fit.
 Rank 64 balanced/full-song workloads need their own measured acceptance run;
 a tiny smoke run establishes execution, not useful convergence or capacity.
 
+The downloaded portable CI packages passed XL-base Q4 LoRA training, full-state
+resume and functional inference on this GPU through CUDA and Vulkan. CUDA used
+gary4local's existing shared 12.8.0 runtime; standalone HTTP synthesis passed
+with bundled CUDA. See `RELEASE_VALIDATION.md` for the exact revisions and the
+two-step fixture's limits. This does not activate the native application path.
+
 ## Complete remains application continuation
 
 `carey_wrapper.py::_build_release_task_data` translates application `complete`
@@ -117,6 +124,14 @@ adapter selection/scales, extension beyond the original waveform and sample
 rate. Exercise the actual DAW-facing request and status/result payloads.
 
 ## Application handoff gates
+
+PE imports confirm that the Windows server and CPU backend depend on the shared
+MSVC/OpenMP runtimes (`MSVCP140`, `VCRUNTIME140`, `VCRUNTIME140_1`, `VCOMP140`).
+The sibling-style archives do not bundle them, and the inspected gary4local
+source has no explicit VC Redistributable prerequisite check. Add installer
+preflight/remediation and test on a Windows machine without developer tools;
+startup on this Visual Studio machine does not establish that coverage. See
+Microsoft's [runtime requirements](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 1. Add a Carey native **candidate** with `acestep` asset names; keep Python
    active while preparing models/runtime. No hashes should be invented before

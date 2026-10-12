@@ -27,6 +27,13 @@ gary4local installs core plus its selected backend and shares `cudart-12.8`
 with yuey and sa3. It must keep ACE's ggml DLLs in ACE's own directory:
 ACE uses `GGML_MAX_NAME=128`; sharing CUDA does not mean sharing ggml DLLs.
 
+Windows also needs the x64 Microsoft Visual C++ v14 Redistributable, at least
+as recent as the compiler used for the package. See Microsoft's
+[supported runtime downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+The archives use the shared MSVC/OpenMP runtimes (`MSVCP140`, `VCRUNTIME140`,
+`VCRUNTIME140_1`, `VCOMP140`); they do not bundle those DLLs. The installer must
+cover this prerequisite and test startup on a Windows machine without build tools.
+
 `-CpuOnly -BuildDir build-release-cpu -OutDir dist-cpu` is a local contract
 check, not a release GPU validation. `-CudaArch native` requires a separate
 build directory and produces a local machine build, not a distributable one.
