@@ -104,6 +104,10 @@ with tempfile.TemporaryDirectory(prefix="ace-caption-api-") as temp:
             nan = b"RIFF" + struct.pack("<I", 36 + len(payload)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, 1, rate, rate*4, 4, 32) + b"data" + struct.pack("<I", len(payload)) + payload
             assert "non-finite" in post("/analyze", nan, status=400)["error"]
             assert "non-finite" in post("/caption", nan, selection, status=400)["error"]
+            payload = struct.pack("<d", 1e300) * 9000
+            overflow = b"RIFF" + struct.pack("<I", 36 + len(payload)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 3, 1, rate, rate*8, 8, 64) + b"data" + struct.pack("<I", len(payload)) + payload
+            assert "finite float range" in post("/analyze", overflow, status=400)["error"]
+            assert "finite float range" in post("/caption", overflow, selection, status=400)["error"]
             stream = io.BytesIO()
             with wave.open(stream, "wb") as file:
                 file.setparams((1, 1, 1000, 0, "NONE", "not compressed"))

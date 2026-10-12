@@ -17,6 +17,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 for option in ("server", "models", "audio", "lm", "dit", "vae", "device", "output"):
     parser.add_argument("--" + option, required=True)
 parser.add_argument("--no-fsm", action="store_true")
+parser.add_argument("--max-seq", type=int, default=8192)
+parser.add_argument("--expect-budget-failure", action="store_true")
 args = parser.parse_args()
 output = Path(args.output).resolve()
 output.mkdir(parents=True, exist_ok=False)
@@ -60,7 +62,7 @@ def wait(job):
 
 
 command = [str(Path(args.server).resolve()), "--models", str(Path(args.models).resolve()),
-           "--device", args.device, "--port", str(port)]
+           "--device", args.device, "--port", str(port), "--max-seq", str(args.max_seq)]
 if args.no_fsm:
     command.append("--no-fsm")
 with (output / "server.log").open("w", encoding="utf-8") as log:
@@ -75,6 +77,25 @@ with (output / "server.log").open("w", encoding="utf-8") as log:
                 time.sleep(.1)
         else:
             raise AssertionError("server startup timed out")
+        if args.expect_budget_failure:
+            assert args.max_seq < 8192
+            job = submit()
+            for _ in range(300):
+                status = get("/job?id=" + job)["status"]
+                if status == "failed":
+                    break
+                assert status != "done", "KV budget exhaustion returned partial success"
+                time.sleep(.1)
+            else:
+                raise AssertionError("KV budget failure timed out")
+            # Failed jobs must leave the process healthy, without a GPU fault.
+            assert get("/health")["status"] == "ok"
+            log.flush()
+            failure_log = (output / "server.log").read_text()
+            assert ("[Understand] Prompt leaves no decode space" in failure_log or
+                    "[Understand] Incomplete response: token limit reached" in failure_log)
+            print("PASS: insufficient KV budget fails cleanly")
+            raise SystemExit(0)
         first = submit()
         cancelled = submit()
         request = urllib.request.Request(url + "/job?id=" + cancelled + "&cancel=1", data=b"")

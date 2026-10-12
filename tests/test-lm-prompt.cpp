@@ -190,7 +190,7 @@ int main(int argc, char ** argv) {
                                  "\n\n<|im_end|>\n<|im_start|>user\n";
     const auto newline  = bpe_encode(bpe, "\n", false);
     auto       user_end = std::find(understand.begin(), understand.end(), AUDIO_CODE_BASE + 65534);
-    if (user_end == understand.end() ||
+    if (understand.end() - user_end < 2 || user_end - understand.begin() < 2 ||
         decode_ids(*bpe, std::vector<int>(understand.begin(), user_end - 2)) != expected ||
         *(user_end + 1) != TOKEN_IM_END || constrained.size() != understand.size() + 2 ||
         !std::equal(understand.begin(), understand.end(), constrained.begin()) ||

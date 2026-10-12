@@ -101,6 +101,9 @@ inline Result analyze_wav_buffer(const std::string &  bytes,
             }
         }
         mono[i] = float(sum / channels);
+        if (!std::isfinite(mono[i])) {
+            throw std::invalid_argument("audio contains samples outside finite float range");
+        }
     }
     return sa3::analysis::analyze(mono, int(sample_rate));
 }

@@ -291,6 +291,10 @@ int ace_understand_generate(AceUnderstand *      ctx,
     // The LM sees the codes and generates metadata + lyrics
     std::vector<int> prompt = build_understand_prompt(*bpe, codes.data(), (int) codes.size(), use_fsm);
     fprintf(stderr, "[Understand-Prompt] %zu tokens (%zu codes + framing)\n", prompt.size(), codes.size());
+    if (prompt.size() >= (size_t) model->cfg.max_seq_len) {
+        fprintf(stderr, "[Understand] Prompt leaves no decode space in the KV cache\n");
+        return -1;
+    }
 
     // Step 4: prefill
     Timer              t_gen;
@@ -306,7 +310,7 @@ int ace_understand_generate(AceUnderstand *      ctx,
     std::mt19937     rng((uint32_t) seed);
     std::vector<int> gen_tokens;
     bool             past_think = false;
-    int              max_tokens = 4096;
+    int              max_tokens = std::min(4096, model->cfg.max_seq_len - (int) prompt.size());
 
     for (int step = 0; step < max_tokens; step++) {
         if (cancel && cancel(cancel_data)) {

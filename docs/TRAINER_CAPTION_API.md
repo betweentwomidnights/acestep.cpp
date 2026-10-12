@@ -17,6 +17,8 @@ It returns JSON with `schema_version: 1`, `ok`, nullable integer `bpm`, string
 JSON, without a server, model, ggml backend or Python installation. It supports
 Unicode filenames on Windows. `--control-info` reports the model-free contract;
 `--version` reports the package version. The CLI omits duration.
+The server still uses its normal model-registry startup requirement; use the
+standalone CLI on machines with no model installation at all.
 
 The estimators are ported unchanged from sa3.cpp commit
 `3b7bfbf2939983ff3411dea92e5357f04a0ec6ad`: original-rate mono downmix, Kaiser
@@ -76,6 +78,7 @@ returned. `genre` is currently empty and `is_instrumental` is null: do not infer
 either from those placeholders. Lyrics and prose are model suggestions and need
 the application's existing quality checks and instrumental/trigger policy.
 Empty/malformed caption text or an exhausted decode budget fails the job.
+Decoding is bounded by the configured KV cache as well as its 4096-token limit.
 The existing `/understand` multipart response remains available unchanged.
 
 ## Validation
