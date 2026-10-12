@@ -3,6 +3,13 @@
 name: release
 
 on:
+  # Prove package changes before merging. A PR has no TAG and only retains
+  # artifacts; release upload and attestations stay restricted to tagged runs.
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'ci/**'
+      - 'CMakeLists.txt'
   release:
     types: [published]
   # With a tag, rebuild and re-attach an existing release. Without one,

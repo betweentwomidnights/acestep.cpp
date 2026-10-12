@@ -84,7 +84,8 @@ rank, windows, microbatch size, resident services and current free memory.
 
 ## First release gate
 
-1. Commit the reviewed changes; dispatch `release` with an empty tag to build
+1. Package-script/CMake/workflow pull requests automatically build dry-run
+   artifacts. Alternatively, dispatch `release` with an empty tag to build
    the selected branch as workflow artifacts. No release is published by a dry run.
 2. Inspect both platforms' packages, provenance and checksum files. Exercise
    core + CUDA with the shared runtime, core + Vulkan, and standalone extraction
