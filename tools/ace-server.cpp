@@ -35,6 +35,7 @@
 #include "pipeline-synth.h"
 #include "pipeline-understand.h"
 #include "request.h"
+#include "runtime-device.h"
 #include "synth-batch-runner.h"
 #include "task-types.h"
 #include "vae.h"
@@ -1532,7 +1533,61 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     yyjson_mut_val * root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
-    yyjson_mut_obj_add_str(doc, root, "version", ACE_VERSION);
+    yyjson_mut_obj_add_str(doc, root, "version", ACE_RELEASE_VERSION);
+    yyjson_mut_obj_add_str(doc, root, "build_revision", ACE_VERSION);
+    yyjson_mut_obj_add_str(doc, root, "service", "acestep");
+    yyjson_mut_obj_add_int(doc, root, "api_version", 1);
+    // Enumeration loads backend libraries, but never model weights or a listener.
+    static std::once_flag backends_loaded;
+    std::call_once(backends_loaded, [] { ggml_backend_load_all(); });
+    auto             selected = ace_runtime_device(std::getenv("GGML_BACKEND"));
+    yyjson_mut_val * hardware = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "hardware", hardware);
+    if (selected) {
+        size_t free_bytes = 0, total_bytes = 0;
+        ggml_backend_dev_memory(selected, &free_bytes, &total_bytes);
+        yyjson_mut_obj_add_str(doc, hardware, "selected_device", ggml_backend_dev_name(selected));
+        auto type = ggml_backend_dev_type(selected);
+        yyjson_mut_obj_add_bool(doc, hardware, "accelerator_available",
+                                type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU);
+        yyjson_mut_obj_add_uint(doc, hardware, "memory_total_bytes", total_bytes);
+        yyjson_mut_obj_add_uint(doc, hardware, "memory_free_bytes", free_bytes);
+    }
+    yyjson_mut_val * devices = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "devices", devices);
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        auto   device     = ggml_backend_dev_get(i);
+        size_t free_bytes = 0, total_bytes = 0;
+        ggml_backend_dev_memory(device, &free_bytes, &total_bytes);
+        yyjson_mut_val * entry = yyjson_mut_obj(doc);
+        yyjson_mut_arr_add_val(devices, entry);
+        yyjson_mut_obj_add_str(doc, entry, "name", ggml_backend_dev_name(device));
+        yyjson_mut_obj_add_str(doc, entry, "description", ggml_backend_dev_description(device));
+        const char * registry = ggml_backend_reg_name(ggml_backend_dev_backend_reg(device));
+        yyjson_mut_obj_add_str(doc, entry, "backend", !strcmp(registry, "MTL") ? "Metal" : registry);
+        yyjson_mut_obj_add_str(doc, entry, "registry_backend", registry);
+        auto type = ggml_backend_dev_type(device);
+        yyjson_mut_obj_add_str(doc, entry, "type",
+                               type == GGML_BACKEND_DEVICE_TYPE_GPU  ? "gpu" :
+                               type == GGML_BACKEND_DEVICE_TYPE_IGPU ? "igpu" :
+                                                                       "cpu");
+        yyjson_mut_obj_add_uint(doc, entry, "memory_total_bytes", total_bytes);
+        yyjson_mut_obj_add_uint(doc, entry, "memory_free_bytes", free_bytes);
+    }
+    yyjson_mut_val * capabilities = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "capabilities", capabilities);
+    yyjson_mut_obj_add_bool(doc, capabilities, "native_training_cli", true);
+    yyjson_mut_obj_add_bool(doc, capabilities, "training_http", false);
+    yyjson_mut_obj_add_bool(doc, capabilities, "functional_adapters", true);
+    yyjson_mut_obj_add_bool(doc, capabilities, "quantized_frozen_base_training", true);
+    // A single inference encoding heuristic would misrepresent XL training
+    // memory (rank, duration and checkpointing matter). The application must
+    // choose an explicit family/encoding and validate its workload budget.
+    yyjson_mut_val * training = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "training", training);
+    yyjson_mut_obj_add_str(doc, training, "executable", "ace-train");
+    yyjson_mut_obj_add_str(doc, training, "xl_base_low_memory_encoding", "Q4_K_M");
+    yyjson_mut_obj_add_bool(doc, training, "automatic_memory_fit", false);
 
     // helper: build a JSON array of model entry names
     auto add_names = [&](yyjson_mut_val * parent, const char * key, const std::vector<ModelEntry> & bucket) {
@@ -1616,7 +1671,7 @@ static void usage(const char * prog) {
             "\n"
             "Adapter:\n"
             "  --adapters <dir>        Directory of adapters\n"
-            "  --adapter-mode <mode>   functional or merge (default: merge)\n"
+            "  --adapter-mode <mode>   functional or merge (default: functional)\n"
             "\n"
             "Memory control:\n"
             "  --keep-loaded           Keep models in VRAM between requests\n"
@@ -1624,6 +1679,9 @@ static void usage(const char * prog) {
             "  --vae-overlap <N>       Overlap frames per side (default: %d)\n"
             "\n"
             "Server:\n"
+            "  --version              Print the release version and exit\n"
+            "  --props                Print runtime JSON without models or a port\n"
+            "  --device <name>        auto, cpu, cuda, vulkan, metal, or exact GGML device\n"
             "  --host <addr>           Listen address (default: 127.0.0.1)\n"
             "  --port <N>              Listen port (default: 8080)\n"
             "  --max-batch <N>         LM batch limit (default: %d)\n"
@@ -1638,15 +1696,30 @@ static void usage(const char * prog) {
 }
 
 int main(int argc, char ** argv) {
+    if (argc == 2 && !strcmp(argv[1], "--version")) {
+        puts(ACE_RELEASE_VERSION);
+        return 0;
+    }
     ace_lm_default_params(&g_lm_params);
     ace_synth_default_params(&g_synth_params);
+    g_synth_params.functional_adapter = true;
 
-    const char * host         = "127.0.0.1";
+    const char * host         = std::getenv("ACE_HOST");
     int          port         = 8080;
-    const char * models_dir   = nullptr;
-    const char * adapters_dir = nullptr;
+    const char * models_dir   = std::getenv("ACE_MODELS_DIR");
+    const char * adapters_dir = std::getenv("ACE_ADAPTERS_DIR");
+    const char * device       = std::getenv("ACE_DEVICE");
+    const char * adapter_mode = std::getenv("ACE_ADAPTER_MODE");
+    const char * port_string  = std::getenv("ACE_PORT");
+    bool         props_only   = false;
+    if (!host || !*host) {
+        host = "127.0.0.1";
+    }
+    if (!device || !*device) {
+        device = std::getenv("GGML_BACKEND");
+    }
 
-    if (argc < 2) {
+    if (argc < 2 && !models_dir) {
         usage(argv[0]);
         return 1;
     }
@@ -1654,15 +1727,14 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--models") && i + 1 < argc) {
             models_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--props")) {
+            props_only = true;
+        } else if (!strcmp(argv[i], "--device") && i + 1 < argc) {
+            device = argv[++i];
         } else if (!strcmp(argv[i], "--adapters") && i + 1 < argc) {
             adapters_dir = argv[++i];
         } else if (!strcmp(argv[i], "--adapter-mode") && i + 1 < argc) {
-            const char * mode = argv[++i];
-            if (strcmp(mode, "functional") && strcmp(mode, "merge")) {
-                fprintf(stderr, "[Server] ERROR: adapter-mode must be functional or merge\n");
-                return 1;
-            }
-            g_synth_params.functional_adapter = !strcmp(mode, "functional");
+            adapter_mode = argv[++i];
         } else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc) {
             g_lm_params.max_seq = atoi(argv[++i]);
 
@@ -1678,7 +1750,7 @@ int main(int argc, char ** argv) {
         } else if (!strcmp(argv[i], "--host") && i + 1 < argc) {
             host = argv[++i];
         } else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
-            port = atoi(argv[++i]);
+            port_string = argv[++i];
         } else if (!strcmp(argv[i], "--max-batch") && i + 1 < argc) {
             g_max_batch = atoi(argv[++i]);
 
@@ -1705,7 +1777,50 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // --models is required
+    if (adapter_mode) {
+        if (strcmp(adapter_mode, "functional") && strcmp(adapter_mode, "merge")) {
+            fprintf(stderr, "[Server] ERROR: adapter-mode must be functional or merge\n");
+            return 1;
+        }
+        g_synth_params.functional_adapter = !strcmp(adapter_mode, "functional");
+    }
+    if (port_string) {
+        char * end   = nullptr;
+        long   value = strtol(port_string, &end, 10);
+        if (!*port_string || *end || value < 1 || value > 65535) {
+            fprintf(stderr, "[Server] ERROR: port must be an integer from 1 to 65535\n");
+            return 1;
+        }
+        port = (int) value;
+    }
+    ggml_backend_load_all();
+    auto selected = ace_runtime_device(device);
+    if (!selected) {
+        fprintf(stderr, "[Server] ERROR: requested device '%s' is unavailable\n", device ? device : "auto");
+        return 1;
+    }
+    // Initialize the chosen device so an explicitly selected GPU cannot silently
+    // pass the install probe and later fall back to another backend.
+    auto probe = ggml_backend_dev_init(selected, nullptr);
+    if (!probe) {
+        fprintf(stderr, "[Server] ERROR: could not initialize requested device\n");
+        return 1;
+    }
+    ggml_backend_free(probe);
+#ifdef _WIN32
+    _putenv_s("GGML_BACKEND", ggml_backend_dev_name(selected));
+#else
+    setenv("GGML_BACKEND", ggml_backend_dev_name(selected), 1);
+#endif
+    if (props_only) {
+        httplib::Request  req;
+        httplib::Response res;
+        handle_props(req, res);
+        puts(res.body.c_str());
+        return 0;
+    }
+
+    // --models is required for serving, but never for the installation probe.
     if (!models_dir) {
         fprintf(stderr, "[Server] ERROR: --models is required\n");
         usage(argv[0]);

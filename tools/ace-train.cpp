@@ -330,7 +330,8 @@ static const ModelEntry * choose_model(const std::vector<ModelEntry> & entries, 
     if (entries.empty()) {
         return nullptr;
     }
-    return name ? registry_find(entries, name) : &entries[0];
+    // Never choose a different family/encoding just because it sorts first.
+    return name ? registry_find(entries, name) : entries.size() == 1 ? &entries[0] : nullptr;
 }
 
 static bool preprocess_dataset(const ACETrainCommand &                 command,
@@ -597,6 +598,10 @@ static bool train_adapter(const ACETrainCommand &                       command,
 }
 
 int main(int argc, char ** argv) {
+    if (argc == 2 && !std::strcmp(argv[1], "--version")) {
+        std::puts(ACE_RELEASE_VERSION);
+        return 0;
+    }
     ACETrainCommand command;
     if (!parse_command(argc, argv, command)) {
         usage(argv[0]);
@@ -633,7 +638,9 @@ int main(int argc, char ** argv) {
     const ModelEntry * text_encoder = choose_model(registry.text_enc, command.text_name);
     const ModelEntry * vae          = choose_model(registry.vae, command.vae_name);
     if (!dit || !text_encoder || !vae) {
-        std::fprintf(stderr, "[Ace-Train] ERROR: selected DiT, text encoder, or VAE model was not found\n");
+        std::fprintf(stderr,
+                     "[Ace-Train] ERROR: model selection is missing or ambiguous; use --dit, --text-encoder, "
+                     "and --vae with exact filenames when multiple variants are installed\n");
         return 1;
     }
 

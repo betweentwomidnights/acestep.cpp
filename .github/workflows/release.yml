@@ -1,263 +1,229 @@
-name: Build & Release Binaries
+# ABOUTME: Builds the Windows packages and the signed, notarized macOS package for a release.
+# ABOUTME: A no-tag dispatch keeps a dry-run artifact without publishing.
+name: release
 
 on:
   release:
     types: [published]
+  # With a tag, rebuild and re-attach an existing release. Without one,
+  # package the chosen branch as a dry run and retain its workflow artifact.
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: 'Release tag to attach binaries to (e.g. v0.1.0)'
-        required: true
+      tag:
+        description: existing release tag to build and attach to (e.g. v0.1.1); empty for a dry run
+        required: false
         type: string
-      skip_linux:
-        description: 'Skip Linux build'
+      platforms:
+        description: which packages to build (a release event always builds both)
         required: false
-        type: boolean
-        default: false
-      skip_mac:
-        description: 'Skip macOS build'
-        required: false
-        type: boolean
-        default: false
-      skip_windows:
-        description: 'Skip Windows build'
-        required: false
-        type: boolean
-        default: false
+        type: choice
+        options: [all, windows, macos]
+        default: all
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
-  build-linux:
-    name: Build · linux-x64
-    runs-on: ubuntu-22.04
-    if: github.event_name != 'workflow_dispatch' || !inputs.skip_linux
+  windows:
+    name: windows-x64 (cpu + cuda + vulkan)
+    # Pinned rather than windows-latest: the CUDA toolkit's MSBuild integration
+    # targets Visual Studio 2022, and ci/package-windows.ps1 asks for that
+    # generator by name. A runner image moving to a newer Visual Studio should
+    # be a change made here on purpose, not one that turns up as a red release.
+    runs-on: windows-2022
+    if: github.event_name == 'release' || inputs.platforms != 'macos'
+    # Every CUDA architecture ggml's portable default covers is compiled, which
+    # is most of this job's time.
+    timeout-minutes: 240
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      VULKAN_VERSION: 1.4.350.0
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TAG || github.ref }}
           submodules: recursive
 
-      - name: Install build tools
+      - name: Choose the version
+        shell: pwsh
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cmake build-essential pkg-config libopenblas-dev
+          if ($env:TAG) {
+            $version = $env:TAG
+          } else {
+            $match = Select-String -Path CMakeLists.txt -Pattern 'project\(acestep-ggml VERSION (\d+\.\d+\.\d+)'
+            if (-not $match) { throw "no project(VERSION) in CMakeLists.txt" }
+            $version = "v" + $match.Matches[0].Groups[1].Value
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "packaging $version$(if (-not $env:TAG) { ' (dry run)' })"
 
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          create-symlink: true
-          key: build-linux-ubuntu-22.04
-
+      # Install the full toolkit on every runner. Caching only the CUDA folder
+      # omits the Visual Studio integration installed outside that folder;
+      # CMake then fails with "No CUDA toolset found" on a cache hit.
       - name: Install CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
-          log-file-suffix: 'ubuntu-22.04.txt'
+          cuda: '12.8.1'
+
+      - name: Point at the CUDA toolkit
+        shell: pwsh
+        run: |
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8"
+          "CUDA_PATH=$cuda" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$cuda\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan
+        uses: actions/cache@v4
+        with:
+          path: C:\VulkanSDK\${{ env.VULKAN_VERSION }}
+          key: vulkan-sdk-${{ env.VULKAN_VERSION }}-windows-2022
 
       - name: Install Vulkan SDK
-        uses: humbletim/install-vulkan-sdk@v1.2
+        if: steps.cache-vulkan.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "vulkansdk.exe"
+          curl.exe -fsSL -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          if ($LASTEXITCODE -ne 0) { throw "could not download the Vulkan SDK $env:VULKAN_VERSION" }
+          $run = Start-Process -FilePath $installer -WindowStyle Hidden -Wait -PassThru `
+            -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install"
+          if ($run.ExitCode -ne 0) { throw "the Vulkan SDK installer exited with $($run.ExitCode)" }
+
+      - name: Point at the Vulkan SDK
+        shell: pwsh
+        run: |
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          $spirv = Join-Path $sdk "Lib\cmake\SPIRV-Headers\SPIRV-HeadersConfig.cmake"
+          if (-not (Test-Path $spirv)) { throw "the Vulkan SDK at $sdk has no SPIRV-Headers CMake config" }
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Build, test, and package
+        shell: pwsh
+        run: ./ci/package-windows.ps1 -Version $env:VERSION
+
+      - name: Keep the packages
+        uses: actions/upload-artifact@v4
         with:
-          version: 1.4.309.0
-          cache: true
+          name: acestep-${{ env.VERSION }}-windows-x64
+          path: dist/
+          retention-days: 14
 
-      - name: Configure & Build
-        run: |
-          ./buildall.sh
+      - name: Attest provenance
+        if: env.TAG != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.zip'
 
-      - name: Smoke test
-        continue-on-error: true
-        shell: bash
-        run: |
-          BIN="build"
-          "$BIN/ace-lm"         2>&1 | head -5
-          "$BIN/ace-synth"      2>&1 | head -5
-          "$BIN/ace-understand" 2>&1 | head -5
-          "$BIN/neural-codec"   2>&1 | head -5
-          "$BIN/quantize"       2>&1 | head -3
-          "$BIN/mp3-codec"      2>&1 | head -3
-
-      - name: Resolve release tag
-        id: tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "value=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "value=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Package binaries
-        run: |
-          mkdir -p dist
-          cp build/ace-* \
-             build/quantize build/neural-codec build/mp3-codec build/*.so dist/
-          tar -C dist -czf "acestep-linux-x64.tar.gz" .
-
-      - name: Upload to release
+      - name: Attach to release
+        if: env.TAG != ''
+        shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ steps.tag.outputs.value }}" \
-            "acestep-linux-x64.tar.gz" \
-            --clobber
+        run: gh release upload $env:TAG (Get-ChildItem dist -File).FullName --clobber
 
-  build-mac:
-    name: Build · macos-arm64-metal
-    runs-on: macos-latest
-    if: github.event_name != 'workflow_dispatch' || !inputs.skip_mac
+  macos:
+    name: macos-universal (metal + cpu)
+    # macOS 15: its Rosetta runs the x86_64 slice's AVX2 code, so CI tests both slices.
+    runs-on: macos-15
+    if: github.event_name == 'release' || inputs.platforms != 'windows'
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # Whether the Developer ID and notary secrets exist, without exposing them to every step.
+      HAVE_SIGNING: ${{ secrets.MACOS_CERT_P12 != '' && secrets.APPLE_NOTARY_KEY_P8 != '' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ env.TAG || github.ref }}
           submodules: recursive
 
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          create-symlink: true
-          key: build-mac-macos-latest
-
-      - name: Configure & Build
+      - name: Choose the version
         run: |
-          mkdir build
-          cd build
-          cmake ..
-          cmake --build . --config Release -j "$(nproc)"
-
-      - name: Smoke test
-        continue-on-error: true
-        shell: bash
-        run: |
-          BIN="build"
-          "$BIN/ace-lm"         2>&1 | head -5
-          "$BIN/ace-synth"      2>&1 | head -5
-          "$BIN/ace-understand" 2>&1 | head -5
-          "$BIN/neural-codec"   2>&1 | head -5
-          "$BIN/quantize"       2>&1 | head -3
-          "$BIN/mp3-codec"      2>&1 | head -3
-
-      - name: Resolve release tag
-        id: tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "value=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          if [ -n "$TAG" ]; then
+            version="$TAG"
           else
-            echo "value=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
+            version="v$(sed -nE 's/^project\(acestep-ggml VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)"
+            [ "$version" != v ] || { echo "no project(VERSION) in CMakeLists.txt"; exit 1; }
           fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "packaging $version$([ -z "$TAG" ] && echo ' (dry run)')"
 
-      - name: Package binaries
+      # A published release must be signed and notarized; a dry run signs when it can.
+      - name: Require signing for a release
+        if: env.TAG != '' && env.HAVE_SIGNING != 'true'
         run: |
-          mkdir -p dist
-          cd build
-          for bin in ace-* quantize neural-codec mp3-codec; do
-            install_name_tool -add_rpath @executable_path "$bin"
-          done
-          cp -P ace-* quantize neural-codec mp3-codec libacestep*.a libggml*.dylib ../dist/
-          cd ..
-          tar -C dist -czf "acestep-macos-arm64-metal.tar.gz" .
+          echo "release builds need the MACOS_CERT_* and APPLE_* secrets"
+          exit 1
 
-      - name: Upload to release
+      # The Developer ID identity goes into a throwaway keychain that only codesign may
+      # use, and the keychain and key files are deleted when the job ends.
+      - name: Import the Developer ID certificate
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          keychain="$RUNNER_TEMP/acestep-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          identity="$(security find-identity -v -p codesigning "$keychain" | grep "Developer ID Application" | grep "($APPLE_TEAM_ID)" | head -1 | awk '{print $2}')"
+          [ -n "$identity" ] || { echo "no Developer ID Application identity for team $APPLE_TEAM_ID in the certificate"; exit 1; }
+          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          {
+            echo "ACE_SIGN_IDENTITY=$identity"
+            echo "ACE_NOTARY_KEY=$RUNNER_TEMP/notary.p8"
+            echo "ACE_NOTARY_KEY_ID=$APPLE_NOTARY_KEY_ID"
+            echo "ACE_NOTARY_ISSUER=$APPLE_NOTARY_ISSUER_ID"
+            echo "SIGNING_KEYCHAIN=$keychain"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, test, sign, notarize, and package
+        run: |
+          args=(--version "$VERSION" --jobs 3)
+          [ -n "$TAG" ] && args+=(--require-signing)
+          ./ci/package-macos.sh "${args[@]}"
+
+      - name: Remove the signing keychain
+        if: always() && env.SIGNING_KEYCHAIN != ''
+        run: |
+          security delete-keychain "$SIGNING_KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+      - name: Keep the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: acestep-${{ env.VERSION }}-macos-universal
+          path: dist/
+          retention-days: 14
+
+      - name: Attest provenance
+        if: env.TAG != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.zip'
+
+      - name: Attach to release
+        if: env.TAG != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ steps.tag.outputs.value }}" \
-            "acestep-macos-arm64-metal.tar.gz" \
-            --clobber
-
-  build-windows:
-    name: Build · windows-x64
-    runs-on: windows-latest
-    if: github.event_name != 'workflow_dispatch' || !inputs.skip_windows
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Cache CUDA toolkit
-        id: cache-cuda
-        uses: actions/cache@v4
-        with:
-          path: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA
-          key: cuda-12-windows-latest
-
-      - name: Install CUDA toolkit
-        if: steps.cache-cuda.outputs.cache-hit != 'true'
-        uses: Jimver/cuda-toolkit@v0.2.30
-        with:
-          log-file-suffix: 'windows-latest.txt'
-
-      - name: Install Vulkan SDK
-        uses: humbletim/install-vulkan-sdk@v1.2
-        with:
-          version: 1.4.309.0
-          cache: true
-
-      - name: Cache build directory
-        uses: actions/cache@v4
-        with:
-          path: build-msvc
-          key: build-msvc-${{ github.sha }}
-          restore-keys: |
-            build-msvc-
-
-      - name: Configure & Build
-        shell: pwsh
-        run: |
-          # Configure — only print errors
-          cmake -S . -B build-msvc `
-            -DGGML_CPU_ALL_VARIANTS=ON `
-            -DGGML_CUDA=ON `
-            -DGGML_VULKAN=ON `
-            -DGGML_BACKEND_DL=ON `
-            --log-level=ERROR 2>&1 | Where-Object { $_ -notmatch '^--' }
-
-          # Build — suppress per-file progress, only show warnings/errors
-          cmake --build build-msvc --config Release -j $env:NUMBER_OF_PROCESSORS `
-            -- /v:minimal /consoleloggerparameters:ErrorsOnly 2>&1 `
-            | Where-Object { $_ -match '(error|warning|FAILED|fatal)' -or $_ -eq '' } `
-            | Select-Object -Last 50
-
-      - name: Smoke test
-        continue-on-error: true
-        shell: bash
-        run: |
-          BIN="build-msvc/Release"
-          "$BIN/ace-lm.exe"         2>&1 | head -5
-          "$BIN/ace-synth.exe"      2>&1 | head -5
-          "$BIN/ace-understand.exe" 2>&1 | head -5
-          "$BIN/neural-codec.exe"   2>&1 | head -5
-          "$BIN/quantize.exe"       2>&1 | head -3
-          "$BIN/mp3-codec.exe"      2>&1 | head -3
-
-      - name: Resolve release tag
-        id: tag
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "value=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "value=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Package binaries
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path dist | Out-Null
-          Copy-Item "build-msvc\Release\*.exe" dist\ -ErrorAction SilentlyContinue
-          Copy-Item "build-msvc\Release\*.dll" dist\ -ErrorAction SilentlyContinue
-          Compress-Archive -Path dist\* -DestinationPath "acestep-windows-x64.zip"
-
-      - name: Upload to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          gh release upload "${{ steps.tag.outputs.value }}" `
-            "acestep-windows-x64.zip" `
-            --clobber
+        run: gh release upload "$TAG" dist/acestep-*-macos-universal.zip dist/SHA256SUMS-macos --clobber

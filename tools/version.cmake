@@ -26,7 +26,7 @@ if(NOT DATE_RESULT EQUAL 0)
     set(GIT_DATE "unknown")
 endif()
 
-set(CONTENT "#pragma once\n#define ACE_VERSION \"${GIT_HASH} (${GIT_DATE})\"\n")
+set(CONTENT "#pragma once\n#define ACE_VERSION \"${GIT_HASH} (${GIT_DATE})\"\n#define ACE_RELEASE_VERSION \"${PROJECT_VERSION}\"\n")
 
 if(EXISTS "${OUTPUT}")
     file(READ "${OUTPUT}" EXISTING)

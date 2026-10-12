@@ -1,4 +1,5 @@
 #pragma once
+#include "runtime-device.h"
 // backend.h: shared GGML backend initialization
 //
 // All modules use the same pattern: load all backends, pick best GPU,
@@ -107,7 +108,8 @@ static BackendPair backend_init(const char * label) {
     // Device names: CUDA0, Vulkan0, CPU, BLAS (see ggml_backend_dev_name).
     const char * force_backend = std::getenv("GGML_BACKEND");
     if (force_backend) {
-        bp.backend = ggml_backend_init_by_name(force_backend, nullptr);
+        auto device = ace_runtime_device(force_backend);
+        bp.backend  = device ? ggml_backend_dev_init(device, nullptr) : nullptr;
         if (!bp.backend) {
             fprintf(stderr, "[Load] FATAL: GGML_BACKEND=%s not found. Available:", force_backend);
             for (size_t i = 0; i < ggml_backend_dev_count(); i++) {

@@ -159,3 +159,9 @@ tools/webui/dist/
 
 # scratch build made by ci/ggml-check.sh
 build-ggml-check/
+
+# Reproducible release packaging and local acceptance outputs
+/build-dist*/
+/build-release-*/
+/dist-cpu/
+/dist-gpu-local/

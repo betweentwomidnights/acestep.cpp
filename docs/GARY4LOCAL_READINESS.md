@@ -1,0 +1,135 @@
+# gary4local readiness audit — 2026-10-11
+
+This audit compares the working source in `C:/dev/gary-localhost-installer`,
+`C:/dev/sa3.cpp`, `C:/dev/yue2.cpp`, and `C:/dev/stems.cpp`. It prepares the
+upstream runtime contract; it does not activate a native Carey service or
+claim that the existing Python APIs have been replaced. Local consumer edits
+were inspected without changing them.
+
+| Repository | Application HEAD inspected | Actual pinned ggml |
+| --- | --- | --- |
+| acestep.cpp | `76981988` plus this readiness change | `60f49e09ce67df544831a357b654318ec2722fb0` |
+| gary-localhost-installer | `eae118fafecaa7c3364564eff53ac2b8ced02f97` plus local edits | Separate native service packages |
+| sa3.cpp | `b844016d49628ec730c273b78c4e9e18ecca5fef` | `60f49e09ce67df544831a357b654318ec2722fb0` |
+| yuey.cpp (`yue2.cpp` checkout) | `82ed90333f7fb299459b965ff1e75a5383d784a3` | `4ad3b30bfe452efc5f4f9c0e111e017d9970292a` |
+| stems.cpp | `d423a4863a1851b826d5be28c988e46c925cefcc` | `4ad3b30bfe452efc5f4f9c0e111e017d9970292a` |
+
+The starting ACE checkout was `ed00def1`/`fff93d27`. It was fast-forwarded to
+the already-merged default branch `76981988`/`60f49e09` before final validation.
+No new ggml change or consumer bump is introduced by the release branch.
+
+These pins are intentionally reported from each checkout rather than inferred
+from historical shared-fork notes. This change neither modifies ggml nor bumps
+any consumer. Shared CUDA compatibility is independent of the ggml pin; every
+service still needs its own ggml binaries and matching compile definitions.
+
+## Release blockers addressed here
+
+- Replaced the old monolithic/unchecked release workflow with the sa3.cpp
+  Windows split/core/backend/standalone pattern and universal signed/notarized
+  macOS packaging. Added reproducible entry points, checksum files, license
+  notices, build metadata, tag/version checks and an artifact-only dry run.
+- Added bare semantic `--version` to the server and trainer and model-free
+  `--props` with devices/capabilities. Environment settings cover model/adapter
+  paths, port, host, device and adapter mode; CLI overrides them.
+- Added exact device names and `cuda`, `vulkan`, `cpu`, `metal` aliases. An
+  explicit unavailable device fails. Props canonicalizes `MTL` to `Metal`,
+  because the current installer checks backend names by substring.
+- The server defaults to functional adapters, preserving a quantized frozen
+  base rather than merging and requantizing its adapter. Historical merge
+  mode remains available explicitly; the synthesis CLI retains its own default.
+- Training refuses ambiguous model buckets rather than using alphabetical
+  order. A directory containing base, turbo and XL variants therefore requires
+  exact `--dit` selection; multiple encoders/VAEs also require explicit names.
+- Converted tests that called CPU functions directly to the backend registry
+  and proc-address interface. They now link and run with dynamically loaded
+  CPU variants, which is the actual downloadable Windows configuration.
+
+## Training comparison and remaining work
+
+The key application source is `services/carey/train_lora_job.py`. It owns
+captioning, canonical sidecars, two-pass preprocessing, child-process tracking,
+atomic status files, cancellation, result selection and LoRA registry updates.
+The UI/Tauri lifecycle currently launches this Python job, not `ace-train`.
+Carey's production path explicitly disables model quantization and uses BF16
+Torch; native XL Q4 is a new memory-saving path, not a claim of bitwise parity.
+
+| Area | Native implementation / action for migration |
+| --- | --- |
+| LoRA / DoRA | `--adapter-type lora` / `dora-rows`; Carey exposes `dora` and translates it to PEFT `use_dora`. Map the name explicitly; do not send `dora` to the native CLI. |
+| Balanced ranks | Native attention/balanced profiles cover all 24 base / 32 XL layers. Carey has matching projection-family rank/alpha multipliers. Native and Torch RNG initialization/rounding must still be compared on chosen ranks. |
+| Optimizer/loss | AdamW, accumulation, clipping, CFG dropout, two-draw logit-normal timesteps and Min-SNR exist natively. Map every option explicitly; native Min-SNR defaults off, whereas the Carey job defaults to `min_snr`. |
+| Defaults | Both use rank 64/alpha 128 in the job-facing defaults, but epochs, LR, warmup, checkpoint interval and adapter kind must come from the saved application plan, not implicit CLI defaults. |
+| Windows | Native `--window-min-seconds`/`--window-max-seconds` bound DiT backward activation memory while retaining full-song conditioning. The application max-duration/preprocessing policy is a different operation; do not equate them. |
+| Dataset | Native accepts flat paired WAV/required canonical metadata. Carey discovers nested WAV/MP3/FLAC/OGG/Opus/M4A, captions and normalizes metadata. Application staging must decode/flatten safely, avoid basename collisions and produce every required field, with `lyrics:` last. |
+| Preprocessing | Native loads components in phases and samples the VAE posterior, but retains prepared examples in host memory and repeats preprocessing on restart. Carey uses reusable `.pt` tensors. A bounded disk cache and cache identity are still needed for large native datasets. |
+| Full resume | Native saves moments, step, epoch, base-file fingerprint and PEFT artifacts atomically. Resolve `checkpoint.current` before reading its immutable generation. It does not persist the full dataset/config/scheduler plan; keep the same args, data, seed and total epoch budget when comparing interrupted/uninterrupted runs. PEFT-only import is weight-only restart, not optimizer resume. |
+| Best vs final | Carey tracks MA5 loss, saves `best/` and `final/`, and registers best when present. Native currently saves periodic/final checkpoints only. Add explicit best selection with resumed history before promising the same UI semantics. |
+| Status/cancel | Native logs steps to stderr and checkpoints at epoch boundaries. It has no stable JSON job-status/cancel-file contract or graceful mid-epoch checkpoint. The supervisor must track the process, parse logs through a versioned adapter and distinguish termination from success; robust checkpoint-on-cancel remains follow-up work. |
+| Auto captioning | Carey has understand-music, local BPM/key analysis, caption pools and trigger/genre policy. Keep these in the application orchestration layer; native `ace-understand` is a component, not an equivalent end-to-end job API. |
+| Adapter registration | Map model family, allowed inference variants, adapter type/profile, checkpoint path and caption pool into Carey's catalog. Validate incompatible XL/base shapes before allowing selection. Restart/rescan is currently needed to refresh the native server's adapter registry. |
+| Torch parity | Existing deterministic `test-train-step-parity` and its Python comparator provide a starting point. Compare preprocessing, profile shapes/scales, target/loss/gradients and optimizer updates against the actual Carey settings. CPU unit tests or audible output do not close this gate. |
+| Backend coverage | Validate LoRA and DoRA separately, by base tensor type and device, including full resume and functional inference. Current-revision Metal LoRA remains open. BF16 inference is not BF16 frozen-DiT backward validation; consult the pinned backend's actual OUT_PROD support. |
+
+These are visible migration gaps, not reasons to claim the existing Carey
+installation can switch runtimes immediately. This release prepares downloadable
+CLI/server components that can be tested through a native candidate first.
+
+## GPU detection and quantization
+
+`control-center/src-tauri/src/native_runtime.rs` already owns GPU detection,
+backend preference, split-package installation, shared runtime PATH setup and
+post-extraction props probing. Preserve that owner. It tries automatic GPU
+candidates in order and rejects a failed explicit selection; copying a second
+independent hardware detector into Carey would create conflicting decisions.
+
+`lib.rs::choose_yuey_encoding` selects an installed explicit tier, then the
+probe's installed recommended tier, then the smallest installed tier. Yuey's
+`runtime_info.cpp::recommended_quantization` uses thresholds of 16 GiB BF16,
+12 GiB Q8, 10 GiB Q5, otherwise Q4. Those are yuey inference policy, not measured
+ACE XL training budgets. ACE props reports memory and its low-memory XL Q4
+path without inventing an inference/training memory-fit heuristic.
+
+For this RTX 5070 Laptop GPU (8151 MiB), the initial native training plan should
+require `acestep-v15-xl-base-Q4_K_M.gguf`, batch 1, checkpointed backward and
+bounded windows. Family and precision must be independent selections. Never
+silently replace XL-base with smaller base/turbo or dequantize the entire base.
+Fail with a useful memory/configuration error if the requested plan cannot fit.
+Rank 64 balanced/full-song workloads need their own measured acceptance run;
+a tiny smoke run establishes execution, not useful convergence or capacity.
+
+## Complete remains application continuation
+
+`carey_wrapper.py::_build_release_task_data` translates application `complete`
+to backend `repaint`, preserves the prefix, and sets the repaint interval from
+the source duration to the requested output duration. Preserve upstream task
+names and implement this mapping in the native Carey adapter. Native `complete`
+has its own task meaning and must not be globally renamed.
+
+Migration tests must cover source prefix preservation, target duration,
+source-end/target-end bounds, seed repeatability, model-family compatibility,
+adapter selection/scales, extension beyond the original waveform and sample
+rate. Exercise the actual DAW-facing request and status/result payloads.
+
+## Application handoff gates
+
+1. Add a Carey native **candidate** with `acestep` asset names; keep Python
+   active while preparing models/runtime. No hashes should be invented before
+   publication; use local package overrides for initial installation exercises.
+2. Implement Carey job/API adaptation for generation, cover, extract, lego,
+   complete-as-repaint and progress/results/audio transport. ACE's `/synth`
+   JSON/multipart and `/job` contracts differ from Carey's endpoints.
+3. Add a native training job owner, explicit option mapping, dataset staging,
+   status/cancel handling, resume plan validation, best/final registration and
+   model-family checks. Stop generation and competing services before training.
+4. Run CUDA and Vulkan through core + one backend and the shared CUDA runtime,
+   then standalone. Confirm the requested GPU in logs and test unavailable
+   backend/error paths; CPU fallback is not GPU validation.
+5. Run current-revision Metal LoRA unquantized/Q4, resume and trained-adapter
+   inference on Apple Silicon before checking the README Metal TODO.
+6. Test published download/hash/install/update/restart and a representative
+   XL Q4 dataset inside gary4local. Only then activate native Carey and remove
+   its Python payload, following the SA3 staged migration pattern.
+
+See `packaging.md` for archive and CI details. Local validation evidence for
+this change is recorded separately in `RELEASE_VALIDATION.md`.

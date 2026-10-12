@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(acestep-ggml LANGUAGES C CXX)
+project(acestep-ggml VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # runs on every build, only rewrites if the hash changed.
 set(VERSION_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/version.h")
 add_custom_target(version ALL
-    COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUTPUT=${VERSION_OUTPUT}"
+    COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUTPUT=${VERSION_OUTPUT}" "-DPROJECT_VERSION=${PROJECT_VERSION}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/version.cmake"
     BYPRODUCTS "${VERSION_OUTPUT}"
     COMMENT "Checking git version"
@@ -41,9 +41,10 @@ if(NOT MSVC AND NOT GGML_SYCL)
     add_compile_definitions(_FORTIFY_SOURCE=2)
 endif()
 
-# CUDA architectures: cover Turing to Blackwell for distributed binaries.
+# Local builds retain ACE's CUDA defaults. Portable releases set GGML_NATIVE=OFF
+# and inherit the shared ggml fork's architecture coverage, like sa3/yuey.
 # Users can override with -DCMAKE_CUDA_ARCHITECTURES=native for local builds.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND (NOT DEFINED GGML_NATIVE OR GGML_NATIVE))
     find_package(CUDAToolkit QUIET)
     set(_ace_cuda_architectures 75-virtual 80-virtual 86-real 89-real)
     if(CUDAToolkit_FOUND AND CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")

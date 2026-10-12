@@ -100,6 +100,14 @@ ace_register_test(test-train-dataset)
 ace_register_test(test-train-window)
 ace_register_test(test-train-adapter-state)
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test-runtime-contract COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test-runtime-contract.py"
+        $<TARGET_FILE:ace-server> $<TARGET_FILE:ace-train> "${PROJECT_VERSION}")
+    set_tests_properties(test-runtime-contract PROPERTIES LABELS "ace;runtime;integration" TIMEOUT 60)
+endif()
+
 set_tests_properties(
     test-dora-backend
     test-adapter-merge

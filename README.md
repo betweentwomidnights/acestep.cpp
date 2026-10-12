@@ -42,7 +42,13 @@ See [the research report](docs/research.md) and
 - [ ] Add LoRA training to the WebUI and reach parity with gary4local's PyTorch implementation.
 - [ ] Validate LoRA training on the Metal backend with unquantized and quantized bases, including checkpoint resume and trained-adapter inference.
 - [ ] Integrate this native backend into gary4local.
-- [ ] Replicate the release CI used by sa3.cpp and yuey.cpp for consistent releases across the sibling repos.
+- [x] Replicate the release CI used by sa3.cpp and yuey.cpp for consistent Windows/macOS packages (first signed CI dry run and release acceptance pending).
+
+Release scripts and the supervisor contract are described in
+[packaging](docs/packaging.md). The [gary4local readiness audit](docs/GARY4LOCAL_READINESS.md)
+records training/API gaps, XL-base Q4 requirements, and complete-as-repaint
+continuation mapping. Native Carey integration and current-revision Metal LoRA
+validation remain open; building a package alone does not complete those gates.
 
 ## Runtime
 
