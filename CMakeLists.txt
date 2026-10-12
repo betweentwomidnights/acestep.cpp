@@ -178,6 +178,14 @@ add_executable(ace-understand tools/ace-understand.cpp)
 target_link_libraries(ace-understand PRIVATE acestep-core)
 link_ggml_backends(ace-understand)
 
+# CPU metadata suggestions share sa3.cpp's estimators and require no models/ggml.
+add_executable(ace-audio-analyze tools/ace-audio-analyze.cpp)
+target_include_directories(ace-audio-analyze PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/vendor ${CMAKE_BINARY_DIR})
+target_link_libraries(ace-audio-analyze PRIVATE yyjson)
+add_dependencies(ace-audio-analyze version)
+target_include_directories(ace-server SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/vendor)
+
 # quantize: GGUF requantizer (BF16 -> K-quants)
 add_executable(quantize tools/quantize.cpp)
 link_ggml_backends(quantize)

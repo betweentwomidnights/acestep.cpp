@@ -164,7 +164,7 @@ function Stage([string]$name, [string[]]$patterns, [string]$from) {
 
 $coreDir = Stage "core" @(
     "ace-server.exe", "ace-train.exe", "ace-synth.exe", "ace-lm.exe",
-    "ace-understand.exe", "quantize.exe", "neural-codec.exe", "mp3-codec.exe",
+    "ace-understand.exe", "ace-audio-analyze.exe", "quantize.exe", "neural-codec.exe", "mp3-codec.exe",
     "ggml.dll", "ggml-base.dll", "ggml-cpu-*.dll"
 ) $bin
 Copy-Item (Join-Path $root "LICENSE") $coreDir
@@ -174,6 +174,8 @@ Copy-Item (Join-Path $root "docs\THIRD_PARTY_NOTICES.md") $coreDir
 Copy-Item (Join-Path $root "ggml\LICENSE") (Join-Path $coreDir "LICENSE-ggml.txt")
 Copy-Item (Join-Path $root "vendor\cpp-httplib\LICENSE") (Join-Path $coreDir "LICENSE-cpp-httplib.txt")
 Copy-Item (Join-Path $root "ci\LICENSE-yyjson.txt") (Join-Path $coreDir "LICENSE-yyjson.txt")
+Copy-Item (Join-Path $root "vendor\sa3-analysis\LICENSE.txt") (Join-Path $coreDir "LICENSE-sa3-analysis.txt")
+Copy-Item (Join-Path $root "vendor\signalsmith-linear\LICENSE.txt") (Join-Path $coreDir "LICENSE-signalsmith-linear.txt")
 
 # Run the staged core from another working directory: no model files or GPU
 # backend DLLs are needed to pass the supervisor's installation contract.

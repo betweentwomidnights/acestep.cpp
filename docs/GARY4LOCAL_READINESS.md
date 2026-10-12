@@ -72,7 +72,7 @@ Torch; native XL Q4 is a new memory-saving path, not a claim of bitwise parity.
 | Full resume | Native saves moments, step, epoch, base-file fingerprint and PEFT artifacts atomically. Resolve `checkpoint.current` before reading its immutable generation. It does not persist the full dataset/config/scheduler plan; keep the same args, data, seed and total epoch budget when comparing interrupted/uninterrupted runs. PEFT-only import is weight-only restart, not optimizer resume. |
 | Best vs final | Carey tracks MA5 loss, saves `best/` and `final/`, and registers best when present. Native currently saves periodic/final checkpoints only. Add explicit best selection with resumed history before promising the same UI semantics. |
 | Status/cancel | Native logs steps to stderr and checkpoints at epoch boundaries. It has no stable JSON job-status/cancel-file contract or graceful mid-epoch checkpoint. The supervisor must track the process, parse logs through a versioned adapter and distinguish termination from success; robust checkpoint-on-cancel remains follow-up work. |
-| Auto captioning | Carey has understand-music, local BPM/key analysis, caption pools and trigger/genre policy. Keep these in the application orchestration layer; native `ace-understand` is a component, not an equivalent end-to-end job API. |
+| Auto captioning | Native `/caption` now exposes normalized queued JSON suggestions and `/analyze` / `ace-audio-analyze` port SA3's model-free BPM/key helpers. Both trainers can consume the shared caption provider once Gary adapts the native job API. Caption pools, confidence/filename precedence, triggers, genre/instrumental policy and sidecar writes remain application responsibilities. See `TRAINER_CAPTION_API.md`. |
 | Adapter registration | Map model family, allowed inference variants, adapter type/profile, checkpoint path and caption pool into Carey's catalog. Validate incompatible XL/base shapes before allowing selection. Restart/rescan is currently needed to refresh the native server's adapter registry. |
 | Torch parity | Existing deterministic `test-train-step-parity` and its Python comparator provide a starting point. Compare preprocessing, profile shapes/scales, target/loss/gradients and optimizer updates against the actual Carey settings. CPU unit tests or audible output do not close this gate. |
 | Backend coverage | Validate LoRA and DoRA separately, by base tensor type and device, including full resume and functional inference. Current-revision Metal LoRA remains open. At `4ad3b30b`, CPU/Metal OUT_PROD guards still omit BF16; do not offer BF16 frozen-DiT backward there. BF16 VAE inference does not validate that path. Unquantized F16/F32 and quantized bases are separate coverage. |
@@ -128,9 +128,12 @@ rate. Exercise the actual DAW-facing request and status/result payloads.
 PE imports confirm that the Windows server and CPU backend depend on the shared
 MSVC/OpenMP runtimes (`MSVCP140`, `VCRUNTIME140`, `VCRUNTIME140_1`, `VCOMP140`).
 The sibling-style archives do not bundle them, and the inspected gary4local
-source has no explicit VC Redistributable prerequisite check. Add installer
-preflight/remediation and test on a Windows machine without developer tools;
-startup on this Visual Studio machine does not establish that coverage. See
+source initially had no explicit VC Redistributable prerequisite check. Follow-up
+[Gary PR #8](https://github.com/betweentwomidnights/gary-localhost-installer/pull/8)
+adds shared preflight and verified Microsoft installer remediation on top of
+`feature/sa3-cpp-migration` at `7d860a3`, in an isolated checkout. The existing
+working tree's local edits were preserved. Clean Windows UI/UAC acceptance is
+still needed; startup on this Visual Studio machine does not establish it. See
 Microsoft's [runtime requirements](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 1. Add a Carey native **candidate** with `acestep` asset names; keep Python
@@ -146,7 +149,9 @@ Microsoft's [runtime requirements](https://learn.microsoft.com/en-us/cpp/windows
    then standalone. Confirm the requested GPU in logs and test unavailable
    backend/error paths; CPU fallback is not GPU validation.
 5. Run current-revision Metal LoRA unquantized/Q4, resume and trained-adapter
-   inference on Apple Silicon before checking the README Metal TODO.
+   inference on Apple Silicon before checking the README Metal TODO. The planned
+   BF16 backward implementation and shared-fork gates are listed in
+   `METAL_TRAINING_HANDOFF.md`.
 6. Test published download/hash/install/update/restart and a representative
    XL Q4 dataset inside gary4local. Only then activate native Carey and remove
    its Python payload, following the SA3 staged migration pattern.

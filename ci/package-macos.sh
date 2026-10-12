@@ -102,7 +102,7 @@ fi
 STAGE="$BUILD_PATH/package/macos"
 rm -rf "$BUILD_PATH/package"
 mkdir -p "$STAGE"
-TOOLS=(ace-server ace-train ace-synth ace-lm ace-understand quantize neural-codec mp3-codec)
+TOOLS=(ace-server ace-train ace-synth ace-lm ace-understand ace-audio-analyze quantize neural-codec mp3-codec)
 BINARIES=()
 for tool in "${TOOLS[@]}"; do
   lipo -create "$ARM/$tool" "$X86/$tool" -output "$STAGE/$tool"
@@ -150,6 +150,8 @@ cp docs/THIRD_PARTY_NOTICES.md "$STAGE/"
 cp ggml/LICENSE "$STAGE/LICENSE-ggml.txt"
 cp vendor/cpp-httplib/LICENSE "$STAGE/LICENSE-cpp-httplib.txt"
 cp ci/LICENSE-yyjson.txt "$STAGE/LICENSE-yyjson.txt"
+cp vendor/sa3-analysis/LICENSE.txt "$STAGE/LICENSE-sa3-analysis.txt"
+cp vendor/signalsmith-linear/LICENSE.txt "$STAGE/LICENSE-signalsmith-linear.txt"
 cp ci/standalone-README.txt "$STAGE/README.txt"
 DIRTY=false
 [ -z "$(git status --porcelain --untracked-files=no)" ] || DIRTY=true

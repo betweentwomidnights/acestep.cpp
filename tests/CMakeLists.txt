@@ -77,6 +77,7 @@ endfunction()
 add_executable(test-server-regressions test-server-regressions.cpp)
 add_dependencies(test-server-regressions ace-server)
 target_link_libraries(test-server-regressions PRIVATE acestep-core httplib)
+target_include_directories(test-server-regressions SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/vendor")
 link_ggml_backends(test-server-regressions)
 ace_register_test(test-server-regressions)
 set_tests_properties(test-server-regressions PROPERTIES TIMEOUT 30)
@@ -102,6 +103,12 @@ ace_register_test(test-train-adapter-state)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME test-audio-analysis-cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test-audio-analysis-cli.py" $<TARGET_FILE:ace-audio-analyze>)
+    add_test(NAME test-caption-api COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test-caption-api.py" $<TARGET_FILE:ace-server> $<TARGET_FILE:ace-audio-analyze>)
+    set_tests_properties(test-audio-analysis-cli test-caption-api PROPERTIES
+        LABELS "ace;caption;integration" TIMEOUT 60)
     add_test(NAME test-runtime-contract COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/test-runtime-contract.py"
         $<TARGET_FILE:ace-server> $<TARGET_FILE:ace-train> "${PROJECT_VERSION}")

@@ -28,6 +28,7 @@
 //   /synth      DiT + Text-Enc + VAE
 //   /understand LM + DiT + VAE
 
+#include "audio-analysis.h"
 #include "audio-io.h"
 #include "model-registry.h"
 #include "model-store.h"
@@ -1080,7 +1081,9 @@ static void understand_worker(std::shared_ptr<Job> job,
                               float *              src_interleaved,
                               int                  src_len,
                               std::vector<float>   src_latents,
-                              int                  src_T_latent) {
+                              int                  src_T_latent,
+                              bool                 caption_only   = false,
+                              ace_analysis::Result local_analysis = {}) {
     if (job->cancel.load()) {
         free(src_interleaved);
         job->status.store(JobStatus::CANCELLED);
@@ -1119,8 +1122,10 @@ static void understand_worker(std::shared_ptr<Job> job,
     std::vector<float> captured_latent;
     int                captured_T_latent = 0;
     const float *      src_lat_ptr       = src_latents.empty() ? nullptr : src_latents.data();
-    int rc = ace_understand_generate(ctx, src_interleaved, src_len, src_lat_ptr, src_T_latent, &ace_req, &out,
-                                     &captured_latent, &captured_T_latent, server_cancel_job, (void *) &job->cancel);
+    int                rc =
+        ace_understand_generate(ctx, src_interleaved, src_len, src_lat_ptr, src_T_latent, &ace_req, &out,
+                                caption_only ? nullptr : &captured_latent, caption_only ? nullptr : &captured_T_latent,
+                                server_cancel_job, (void *) &job->cancel);
     ace_understand_free(ctx);
     free(src_interleaved);
 
@@ -1141,9 +1146,57 @@ static void understand_worker(std::shared_ptr<Job> job,
         g_loaded_vae.clear();
     }
 
-    std::string json_part = "[" + request_to_json(&out) + "]";
-    job->result_body      = multipart_build_json_latent(json_part, captured_latent, captured_T_latent);
-    job->result_mime      = MULTIPART_MIME;
+    if (job->cancel.load()) {
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
+    if (caption_only) {
+        // This API provides suggestions, never writes sidecars or chooses a
+        // trainer's genre/trigger/lyric policy. Keep both estimators visible.
+        if (out.caption.find_first_not_of(" \t\r\n") == std::string::npos ||
+            out.caption.find("<think>") != std::string::npos || out.caption.find("</think>") != std::string::npos ||
+            out.caption.find("<|audio_code_") != std::string::npos ||
+            out.caption.find("\xef\xbf\xbd") != std::string::npos) {
+            fprintf(stderr, "[Server] Caption model returned empty or malformed text\n");
+            job->status.store(JobStatus::FAILED);
+            return;
+        }
+        auto * doc  = yyjson_mut_doc_new(nullptr);
+        auto * root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_add_int(doc, root, "schema_version", 1);
+        yyjson_mut_obj_add_strcpy(doc, root, "caption", out.caption.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "prompt", out.caption.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "lyrics", out.lyrics.c_str());
+        yyjson_mut_obj_add_str(doc, root, "genre", "");
+        yyjson_mut_obj_add_null(doc, root, "is_instrumental");
+        yyjson_mut_obj_add_int(doc, root, "bpm", out.bpm);
+        yyjson_mut_obj_add_strcpy(doc, root, "keyscale", out.keyscale.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "time_signature", out.timesignature.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "language", out.vocal_language.c_str());
+        yyjson_mut_obj_add_real(doc, root, "duration", double(src_len) / 48000);
+        yyjson_mut_obj_add_int(doc, root, "lm_seed", ace_req.lm_seed);
+        yyjson_mut_obj_add_strcpy(doc, root, "lm_model", lm_name.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "synth_model", dit_name.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "vae", vae_name.c_str());
+        yyjson_mut_obj_add_val(doc, root, "local_analysis", ace_analysis::result_json(doc, local_analysis));
+        yyjson_write_err error;
+        char *           json = yyjson_mut_write_opts(doc, 0, nullptr, nullptr, &error);
+        if (!json) {
+            fprintf(stderr, "[Server] Cannot serialize caption: %s\n", error.msg);
+            yyjson_mut_doc_free(doc);
+            job->status.store(JobStatus::FAILED);
+            return;
+        }
+        job->result_body = json;
+        free(json);
+        yyjson_mut_doc_free(doc);
+        job->result_mime = "application/json";
+    } else {
+        std::string json_part = "[" + request_to_json(&out) + "]";
+        job->result_body      = multipart_build_json_latent(json_part, captured_latent, captured_T_latent);
+        job->result_mime      = MULTIPART_MIME;
+    }
     job->status.store(JobStatus::DONE);
     fprintf(stderr, "[Server] Job %s done (understand)\n", job->id.c_str());
 }
@@ -1155,7 +1208,7 @@ static void understand_worker(std::shared_ptr<Job> job,
 //   part "src_latents": pre-encoded latent bytes (raw f32, [T*64])
 // returns: JSON {"id":"N"} immediately. Result is multipart/mixed of one
 // JSON part and one optional latent part.
-static void handle_understand(const httplib::Request & req, httplib::Response & res) {
+static void handle_understand_request(const httplib::Request & req, httplib::Response & res, bool caption_only) {
     if (g_registry.lm.empty() || g_registry.dit.empty() || g_registry.vae.empty()) {
         json_error(res, 501, "Understand requires LM, DiT and VAE models");
         return;
@@ -1183,6 +1236,42 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         const std::string & json = req.form.get_field("request");
         if (!request_parse_json(&ace_req, json.c_str())) {
             json_error(res, 400, "Multipart: invalid JSON in 'request' part");
+            return;
+        }
+    }
+
+    ace_analysis::Result local_analysis;
+    std::vector<float>   caption_audio;
+    int                  caption_rate = 0;
+    if (caption_only) {
+        if (!req.form.has_file("audio") || req.form.has_file("src_latents")) {
+            json_error(res, 400, "Caption requires an 'audio' WAV upload; latent-only captioning is not supported");
+            return;
+        }
+        const auto valid_model = [](const std::vector<ModelEntry> & bucket, const std::string & name) {
+            return name.empty() ? bucket.size() == 1 : registry_find(bucket, name.c_str()) != nullptr;
+        };
+        if (!valid_model(g_registry.lm, ace_req.lm_model) || !valid_model(g_registry.dit, ace_req.synth_model) ||
+            !valid_model(g_registry.vae, ace_req.vae)) {
+            json_error(res, 400,
+                       "Select exact lm_model, synth_model and vae names when a bucket is ambiguous; unknown names are "
+                       "rejected");
+            return;
+        }
+        if (!std::isfinite(ace_req.lm_temperature) || ace_req.lm_temperature < 0 || ace_req.lm_temperature > 2 ||
+            !std::isfinite(ace_req.lm_top_p) || ace_req.lm_top_p <= 0 || ace_req.lm_top_p > 1 || ace_req.lm_top_k < 0) {
+            json_error(res, 400, "Invalid caption sampling parameters");
+            return;
+        }
+        try {
+            double duration = 0;
+            local_analysis  = ace_analysis::analyze_wav_buffer(req.form.get_file("audio").content, duration,
+                                                               &caption_audio, &caption_rate);
+        } catch (const std::length_error & error) {
+            json_error(res, 413, error.what());
+            return;
+        } catch (const std::exception & error) {
+            json_error(res, 400, error.what());
             return;
         }
     }
@@ -1215,7 +1304,10 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         }
         // decode directly from multipart buffer (WAV/MP3 auto-detected)
         int     T_audio = 0;
-        float * planar  = audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
+        float * planar =
+            caption_only ?
+                audio_resample(caption_audio.data(), int(caption_audio.size() / 2), caption_rate, 48000, 2, &T_audio) :
+                audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
         if (!planar || T_audio <= 0) {
             json_error(res, 400, "Failed to decode audio");
             return;
@@ -1237,12 +1329,49 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
 
     request_resolve_lm_seed(&ace_req);
 
-    work_push([job, ace_req, src_interleaved, src_len, latents = std::move(src_latents), src_T_latent]() mutable {
-        understand_worker(job, ace_req, src_interleaved, src_len, std::move(latents), src_T_latent);
+    work_push([job, ace_req, src_interleaved, src_len, latents = std::move(src_latents), src_T_latent, caption_only,
+               local_analysis]() mutable {
+        understand_worker(job, ace_req, src_interleaved, src_len, std::move(latents), src_T_latent, caption_only,
+                          local_analysis);
     });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
     res.set_content(body, "application/json");
+}
+
+static void handle_understand(const httplib::Request & req, httplib::Response & res) {
+    handle_understand_request(req, res, false);
+}
+
+static void handle_caption(const httplib::Request & req, httplib::Response & res) {
+    handle_understand_request(req, res, true);
+}
+
+static void handle_analyze(const httplib::Request & req, httplib::Response & res) {
+    if (!req.is_multipart_form_data() || !req.form.has_file("audio")) {
+        json_error(res, 400, "Analyze requires an 'audio' WAV upload");
+        return;
+    }
+    try {
+        double     duration = 0;
+        const auto result   = ace_analysis::analyze_wav_buffer(req.form.get_file("audio").content, duration);
+        auto *     doc      = yyjson_mut_doc_new(nullptr);
+        auto *     root     = ace_analysis::result_json(doc, result);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_add_real(doc, root, "duration", duration);
+        char * json = yyjson_mut_write(doc, 0, nullptr);
+        yyjson_mut_doc_free(doc);
+        if (!json) {
+            json_error(res, 500, "Cannot serialize analysis result");
+            return;
+        }
+        res.set_content(json, "application/json");
+        free(json);
+    } catch (const std::length_error & error) {
+        json_error(res, 413, error.what());
+    } catch (const std::exception & error) {
+        json_error(res, 400, error.what());
+    }
 }
 
 // decode worker: VAE decode only. Loads the requested VAE from the store,
@@ -1580,6 +1709,8 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     yyjson_mut_obj_add_bool(doc, capabilities, "training_http", false);
     yyjson_mut_obj_add_bool(doc, capabilities, "functional_adapters", true);
     yyjson_mut_obj_add_bool(doc, capabilities, "quantized_frozen_base_training", true);
+    yyjson_mut_obj_add_bool(doc, capabilities, "caption_http", true);
+    yyjson_mut_obj_add_bool(doc, capabilities, "local_audio_analysis", true);
     // A single inference encoding heuristic would misrepresent XL training
     // memory (rank, duration and checkpointing matter). The application must
     // choose an explicit family/encoding and validate its workload budget.
@@ -1925,6 +2056,8 @@ int main(int argc, char ** argv) {
     svr.Post("/lm", handle_lm);
     svr.Post("/synth", handle_synth);
     svr.Post("/understand", handle_understand);
+    svr.Post("/caption", handle_caption);
+    svr.Post("/analyze", handle_analyze);
     svr.Post("/vae", handle_vae);
     svr.Get("/health", [](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");

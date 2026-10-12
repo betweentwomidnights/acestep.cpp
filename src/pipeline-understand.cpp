@@ -289,7 +289,7 @@ int ace_understand_generate(AceUnderstand *      ctx,
     // System: understand instruction
     // User: raw audio code tokens (not BPE text)
     // The LM sees the codes and generates metadata + lyrics
-    std::vector<int> prompt = build_understand_prompt(*bpe, codes.data(), (int) codes.size());
+    std::vector<int> prompt = build_understand_prompt(*bpe, codes.data(), (int) codes.size(), use_fsm);
     fprintf(stderr, "[Understand-Prompt] %zu tokens (%zu codes + framing)\n", prompt.size(), codes.size());
 
     // Step 4: prefill
@@ -343,8 +343,16 @@ int ace_understand_generate(AceUnderstand *      ctx,
 
         gen_tokens.push_back(tok);
 
-        // Next token forward
-        qw3lm_forward(model, &tok, 1, 0, logits.data());
+        // Reuse the generation pipeline's persistent decode graph, including
+        // for a single sequence. Rebuilding the prefill graph at each token
+        // produced corrupt text once CUDA capture started on the 5070 Laptop.
+        const int kv_set = 0;
+        qw3lm_forward_batch(model, &tok, &kv_set, 1, logits.data());
+    }
+
+    if (gen_tokens.size() == (size_t) max_tokens) {
+        fprintf(stderr, "[Understand] Incomplete response: token limit reached\n");
+        return -1;
     }
 
     fprintf(stderr, "[Understand-Decode] %zu tokens, %.0fms (%.1f tok/s)\n", gen_tokens.size(), t_gen.ms(),

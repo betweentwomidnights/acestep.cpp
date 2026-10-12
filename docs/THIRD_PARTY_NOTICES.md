@@ -15,6 +15,8 @@ included; their licenses and download terms are separate.
 | cpp-httplib, Yuji Hirose and contributors | MIT | `LICENSE-cpp-httplib.txt` |
 | yyjson, YaoYuan and contributors | MIT | `LICENSE-yyjson.txt` |
 | minimp3, lieff and contributors | CC0 1.0 | CC0 dedication retained in `minimp3-source.h` |
+| sa3.cpp audio analysis/WAV helpers, betweentwomidnights | MIT | `LICENSE-sa3-analysis.txt`; imported from sa3.cpp commit `3b7bfbf2939983ff3411dea92e5357f04a0ec6ad` |
+| Signalsmith Linear FFT, Signalsmith Audio | MIT | `LICENSE-signalsmith-linear.txt` |
 | mp3 encoder/decoder and WAV/audio helpers in this tree | Notices retained in source | Project `LICENSE` and original file headers |
 
 The Windows standalone archive additionally redistributes NVIDIA CUDA runtime

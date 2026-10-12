@@ -50,6 +50,11 @@ records training/API gaps, XL-base Q4 requirements, and complete-as-repaint
 continuation mapping. Native Carey integration and current-revision Metal LoRA
 validation remain open; building a package alone does not complete those gates.
 
+The [trainer caption API](docs/TRAINER_CAPTION_API.md) provides model-free local
+BPM/key suggestions and queued native auto-captioning for future SA3/ACE trainer
+integration. The [M4 handoff](docs/METAL_TRAINING_HANDOFF.md) records the remaining
+BF16 backward and current-revision Metal training gates.
+
 ## Runtime
 
 Local AI music generation server with browser UI, powered by GGML.

@@ -19,6 +19,7 @@
 #include "prompt.h"
 #include "task-types.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -180,6 +181,24 @@ int main(int argc, char ** argv) {
     dump_repr("COND", decode_ids(*bpe, id_cond));
     dump_repr("UNCOND_EMPTY", decode_ids(*bpe, id_uncond_e));
     dump_repr("UNCOND_NEG", decode_ids(*bpe, id_uncond_n));
+    // The understand chat template closes the user turn immediately after the
+    // raw codes. The constrained decoder starts after the reasoning opener.
+    const int         codes[]     = { 0, 42, 65534 };
+    auto              understand  = build_understand_prompt(*bpe, codes, 3);
+    auto              constrained = build_understand_prompt(*bpe, codes, 3, true);
+    const std::string expected    = std::string("<|im_start|>system\n# Instruction\n") + LM_UNDERSTAND_INSTRUCTION +
+                                 "\n\n<|im_end|>\n<|im_start|>user\n";
+    const auto newline  = bpe_encode(bpe, "\n", false);
+    auto       user_end = std::find(understand.begin(), understand.end(), AUDIO_CODE_BASE + 65534);
+    if (user_end == understand.end() ||
+        decode_ids(*bpe, std::vector<int>(understand.begin(), user_end - 2)) != expected ||
+        *(user_end + 1) != TOKEN_IM_END || constrained.size() != understand.size() + 2 ||
+        !std::equal(understand.begin(), understand.end(), constrained.begin()) ||
+        constrained[understand.size()] != TOKEN_THINK || constrained.back() != newline[0]) {
+        fprintf(stderr, "[Test] FAIL: understand chat template\n");
+        store_free(s);
+        return 1;
+    }
     store_free(s);
     fprintf(stderr, "[Test] PASS\n");
     return 0;
