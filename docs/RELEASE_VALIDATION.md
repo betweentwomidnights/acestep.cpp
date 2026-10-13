@@ -1,5 +1,9 @@
 # Release readiness validation — 2026-10-12
 
+The later SA3-aligned training controls and persisted mid-epoch continuation
+are validated separately in [TRAINING_CONTROL_VALIDATION.md](TRAINING_CONTROL_VALIDATION.md).
+Earlier archive hashes below describe their named revisions, not that follow-up.
+
 At the user's request, [ACE PR #9](https://github.com/betweentwomidnights/acestep.cpp/pull/9)
 was merged as `e93ee47f8b266d10458cafba8495a4d2d3752d4a`. The release branch
 incorporates it and pins ggml `4ad3b30bfe452efc5f4f9c0e111e017d9970292a`.
@@ -135,7 +139,7 @@ and `vc-native-runtime-tests.log`.
 | Linux/macOS source builds, lint and CUDA 12.6 compatibility | All [CI Build](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38195497977) and [ggml check](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38195497897) jobs passed. CUDA compilation on a hosted runner is not GPU execution evidence. |
 | Current-revision Metal LoRA | Not run: no Apple Silicon training hardware was available in this Windows session. The signed package/CPU tests do not close the README Metal LoRA gate. |
 | Carey/PyTorch parity and application migration | Not complete; see `GARY4LOCAL_READINESS.md`. |
-| Windows prerequisite / clean-machine install | PE imports confirm shared MSVC/OpenMP runtime dependencies. This machine has Visual Studio installed; VC Redistributable preflight and startup on a machine without build tools remain application acceptance gates. |
+| Windows prerequisite / clean-machine install | Superseded prerequisite finding: merged PR #11 packages the four VC/OpenMP DLLs app-local and checks their loaded paths. No central VC install or elevation is required. Startup on a clean machine without build tools remains an acceptance gate. |
 
 The macOS ZIP SHA256 is
 `91a3f3923ca7c31e007da04fc5605b095d957d1f6088403e14e9eff043cf3070`;

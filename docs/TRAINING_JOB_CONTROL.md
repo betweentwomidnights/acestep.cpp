@@ -53,6 +53,8 @@ adapter. Preprocessing checks between VAE examples and before text encoding;
 active model loading, hashing and GPU operations finish before a safe check.
 During training, the trainer finishes the current accumulated optimizer update
 before saving. No half-applied update or partial gradient accumulator is saved.
+SA3's sample boundary therefore becomes an optimizer-update boundary in ACE;
+larger accumulation settings can make a cancellation take longer.
 
 ## Persisted plan and resume
 
@@ -112,7 +114,7 @@ uses rank 64, two-second windows, accumulation two and four optimizer updates:
 
 ```sh
 python tests/test-training-control-real.py --bin-dir build/Release --models models \
-  --backend CUDA0 --adapter-type lora --output new-control-results
+  --backend CUDA0 --expected-device NVIDIA --adapter-type lora --output new-control-results
 ```
 
 Repeat with `dora-rows` and each supported exact backend. It compares every
@@ -121,6 +123,9 @@ mid-epoch stop/resume, cancellation during accumulation and legacy epoch migrati
 It also rejects changed LR, epoch budget and data before preprocessing. These
 synthetic checks establish execution/continuation, not convergence or full-song
 memory acceptance. See `TRAINING_CONTROL_VALIDATION.md` for measured results.
+The script probes and records physical hardware before training;
+`--expected-device` rejects a mismatched description. Rediscover Vulkan indices
+after changing the runtime PATH or package composition.
 
 Disk preprocessing cache, resumed best-loss history/selection, WebUI training,
 Carey/PyTorch parity and downstream integration remain open. Current Metal LoRA

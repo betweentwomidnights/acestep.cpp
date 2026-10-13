@@ -20,6 +20,7 @@ for key in ("bin-dir", "models", "backend", "output"):
 p.add_argument("--adapter-type", choices=("lora", "dora-rows"), default="lora")
 p.add_argument("--dit", default="acestep-v15-xl-base-Q4_K_M.gguf")
 p.add_argument("--rank", type=int, default=64)
+p.add_argument("--expected-device", help="Require this substring in the probed hardware description")
 args = p.parse_args()
 root = Path(args.output).resolve()
 root.mkdir(parents=True, exist_ok=False)
@@ -35,6 +36,16 @@ for index in range(3):
 env = {k: v for k, v in os.environ.items() if not k.startswith("ACE_")}
 env["GGML_BACKEND"] = args.backend
 exe = Path(args.bin_dir).resolve() / ("ace-train.exe" if os.name == "nt" else "ace-train")
+server = exe.with_name("ace-server.exe" if os.name == "nt" else "ace-server")
+probe = subprocess.run([server, "--props", "--device", args.backend], env=env,
+    capture_output=True, text=True, check=True)
+props = json.loads(probe.stdout)
+assert props["hardware"]["selected_device"] == args.backend, "requested backend not selected"
+device = next(item for item in props["devices"] if item["name"] == args.backend)
+if args.expected_device:
+    assert args.expected_device.lower() in device["description"].lower(), device
+(root / "props.json").write_text(json.dumps(props, indent=2))
+print(device["name"] + ": " + device["description"], flush=True)
 common = [str(exe), "--models", str(Path(args.models).resolve()), "--dataset", str(dataset),
     "--dit", args.dit, "--text-encoder", "Qwen3-Embedding-0.6B-Q8_0.gguf", "--vae", "vae-BF16.gguf",
     "--adapter-type", args.adapter_type, "--profile", "balanced", "--rank", str(args.rank), "--alpha", str(args.rank * 2),
@@ -146,6 +157,7 @@ run("legacy-rejected", ["--resume", legacy], fail="predates resume-plan")
 migrated = run("legacy-migrated", ["--resume", legacy, "--allow-legacy-resume"])
 same(full, migrated)
 (root / "summary.json").write_text(json.dumps({"passed": True, "backend": args.backend,
+    "device": device["description"],
     "adapter_type": args.adapter_type, "dit": args.dit, "rank": args.rank, "accumulation": 2,
     "mid_epoch_bitexact": True, "cancel_bitexact": True, "legacy_epoch_migration_bitexact": True}, indent=2))
 print("PASS exact training continuation, safe accumulation cancellation and resume-plan validation", flush=True)
