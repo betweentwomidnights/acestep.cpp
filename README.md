@@ -186,13 +186,19 @@ This baseline crops only the audio latents. The complete caption, lyrics, and
 full-song duration from the sidecar remain attached to every window, and each
 logged window includes its reproducible song name, offset, and duration.
 `--examples-per-epoch N` can bound diagnostic runs while preserving
-deterministic epoch-level resume; zero uses the complete dataset. Large
-optimizer checkpoints can be throttled with `--checkpoint-every N`; zero
-disables intermediate checkpoints, and the final state is always saved once.
+deterministic resume; zero uses the complete dataset. Large optimizer
+checkpoints can be throttled with `--checkpoint-every N` (epochs) or
+`--checkpoint-every-steps N` (optimizer updates); zero disables that cadence.
+Final state is saved after completion or cooperative cancellation during training.
 
 Use `CUDA0`, `Vulkan0`, `MTL0`, or `CPU` for `GGML_BACKEND`. The output
 directory contains PEFT-compatible adapter files and complete native optimizer
-state. Pass an epoch checkpoint or PEFT adapter directory to `--resume`. Run
+state, the compatible training plan and a mid-epoch cursor. Pass a native
+checkpoint directory to `--resume` with the original training settings; a
+PEFT-only directory starts a weight-only restart. `--progress-file` and
+`--cancel-file` use SA3's host-control contract. See
+[training job control and continuation](docs/TRAINING_JOB_CONTROL.md) for the
+schema, schedule-budget rules and explicit migration of older checkpoints. Run
 `./build/ace-train --help` for optimizer, scheduling, batching, and model
 selection options.
 

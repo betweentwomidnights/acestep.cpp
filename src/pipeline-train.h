@@ -38,7 +38,9 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
                                   uint64_t                                seed,
                                   const ACETrainPreprocessConfig &        config,
                                   std::vector<ACETrainDiffusionExample> & prepared,
-                                  std::string &                           error);
+                                  std::string &                           error,
+                                  bool (*cancel)(void *) = nullptr,
+                                  void * cancel_data     = nullptr);
 
 bool ace_training_null_condition(const AceSynth * synth, std::vector<float> & condition, std::string & error);
 

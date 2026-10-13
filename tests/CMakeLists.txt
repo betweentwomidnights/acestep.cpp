@@ -58,6 +58,14 @@ add_executable(test-train-adapter-state test-train-adapter-state.cpp)
 target_link_libraries(test-train-adapter-state PRIVATE acestep-core)
 link_ggml_backends(test-train-adapter-state)
 
+add_executable(test-train-cli-control test-train-cli-control.cpp)
+target_include_directories(test-train-cli-control PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(test-train-cli-control PRIVATE yyjson)
+
+add_executable(test-train-resume-plan test-train-resume-plan.cpp)
+target_link_libraries(test-train-resume-plan PRIVATE acestep-core)
+link_ggml_backends(test-train-resume-plan)
+
 # test-train-step-parity: emit a deterministic real-model step for the
 # companion PyTorch comparison script. Invoked manually with explicit model paths.
 add_executable(test-train-step-parity test-train-step-parity.cpp)
@@ -100,9 +108,14 @@ ace_register_test(test-vae-latent-sampling)
 ace_register_test(test-train-dataset)
 ace_register_test(test-train-window)
 ace_register_test(test-train-adapter-state)
+ace_register_test(test-train-cli-control)
+ace_register_test(test-train-resume-plan)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME test-train-cli-control-smoke COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test-train-cli-control.py" $<TARGET_FILE:ace-train>)
+    set_tests_properties(test-train-cli-control-smoke PROPERTIES LABELS "ace;training;integration" TIMEOUT 30)
     add_test(NAME test-audio-analysis-cli COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/test-audio-analysis-cli.py" $<TARGET_FILE:ace-audio-analyze>)
     add_test(NAME test-caption-api COMMAND "${Python3_EXECUTABLE}"

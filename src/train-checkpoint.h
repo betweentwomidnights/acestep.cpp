@@ -359,12 +359,22 @@ static bool ace_save_train_checkpoint(const std::string &              directory
                                       const ACETrainAdapterOptimizer & optimizer,
                                       int                              completed_epochs,
                                       const std::string &              base_model_fingerprint,
-                                      std::string &                    error) {
+                                      std::string &                    error,
+                                      const std::string &              continuation = {}) {
     error.clear();
     if (completed_epochs < 0 || optimizer.step < 0 || optimizer.params.size() != state.params.size() ||
         state.params.empty() || base_model_fingerprint.empty()) {
         error = "adapter and optimizer state cannot form a complete training checkpoint";
         return false;
+    }
+    if (!continuation.empty()) {
+        yyjson_doc * document = yyjson_read(continuation.data(), continuation.size(), 0);
+        const bool   valid    = document && yyjson_is_obj(yyjson_doc_get_root(document));
+        yyjson_doc_free(document);
+        if (!valid) {
+            error = "training continuation must be a valid JSON object";
+            return false;
+        }
     }
 
     std::vector<ACETrainCheckpointTensor> tensors;
@@ -430,7 +440,11 @@ static bool ace_save_train_checkpoint(const std::string &              directory
         return false;
     }
     progress << "{\"completed_epochs\":" << completed_epochs << ",\"optimizer_step\":" << optimizer.step
-             << ",\"base_model_fingerprint\":\"" << base_model_fingerprint << "\"}\n";
+             << ",\"base_model_fingerprint\":\"" << base_model_fingerprint << "\"";
+    if (!continuation.empty()) {
+        progress << ",\"continuation\":" << continuation;
+    }
+    progress << "}\n";
     progress.close();
     if (!progress.good()) {
         error = "cannot write trainer_state.json";

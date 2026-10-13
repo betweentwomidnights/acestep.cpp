@@ -7,11 +7,15 @@
 #include "pipeline-synth.h"
 #include "pipeline-train.h"
 #include "train-checkpoint.h"
+#include "train-cli-control.h"
 #include "train-diffusion.h"
+#include "train-resume.h"
 #include "train-window.h"
 #include "version.h"
 
 #include <algorithm>
+#include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -22,35 +26,38 @@
 #include <vector>
 
 struct ACETrainCommand {
-    const char *             models_dir          = nullptr;
-    const char *             dataset_dir         = nullptr;
-    const char *             output_dir          = nullptr;
-    const char *             resume_dir          = nullptr;
-    const char *             dit_name            = nullptr;
-    const char *             text_name           = nullptr;
-    const char *             vae_name            = nullptr;
-    std::string              adapter_type        = "dora-rows";
-    std::string              module_profile      = "balanced";
-    int                      rank                = 64;
-    int                      alpha               = 128;
-    int                      epochs              = 10;
-    int                      batch_size          = 1;
-    int                      accumulation        = 1;
-    int                      warmup_steps        = 10;
-    int                      restart_count       = 1;
-    int                      checkpoint_every    = 1;
-    uint64_t                 seed                = 42;
-    float                    learning_rate       = 1e-4f;
-    float                    weight_decay        = 0.01f;
-    float                    max_grad_norm       = 1.0f;
-    float                    cfg_dropout         = 0.15f;
-    float                    timestep_mean       = -0.4f;
-    float                    timestep_std        = 1.0f;
-    bool                     min_snr             = false;
-    float                    min_snr_gamma       = 5.0f;
-    bool                     checkpoint_backward = true;
-    bool                     validate_dataset    = false;
-    int                      examples_per_epoch  = 0;
+    const char *             models_dir             = nullptr;
+    const char *             dataset_dir            = nullptr;
+    const char *             output_dir             = nullptr;
+    const char *             resume_dir             = nullptr;
+    const char *             dit_name               = nullptr;
+    const char *             text_name              = nullptr;
+    const char *             vae_name               = nullptr;
+    std::string              adapter_type           = "dora-rows";
+    std::string              module_profile         = "balanced";
+    int                      rank                   = 64;
+    int                      alpha                  = 128;
+    int                      epochs                 = 10;
+    int                      batch_size             = 1;
+    int                      accumulation           = 1;
+    int                      warmup_steps           = 10;
+    int                      restart_count          = 1;
+    int                      checkpoint_every       = 1;
+    int                      checkpoint_every_steps = 0;
+    uint64_t                 seed                   = 42;
+    float                    learning_rate          = 1e-4f;
+    float                    weight_decay           = 0.01f;
+    float                    max_grad_norm          = 1.0f;
+    float                    cfg_dropout            = 0.15f;
+    float                    timestep_mean          = -0.4f;
+    float                    timestep_std           = 1.0f;
+    bool                     min_snr                = false;
+    float                    min_snr_gamma          = 5.0f;
+    bool                     checkpoint_backward    = true;
+    bool                     validate_dataset       = false;
+    bool                     allow_legacy_resume    = false;
+    int                      max_steps              = 0;
+    int                      examples_per_epoch     = 0;
     ACETrainWindowConfig     window;
     ACETrainSchedule         schedule = ACE_TRAIN_SCHEDULE_COSINE;
     ACETrainPreprocessConfig preprocess;
@@ -72,8 +79,10 @@ static void usage(const char * program) {
                  "  --rank <N>                 Base rank (default: 64)\n"
                  "  --alpha <N>                Base alpha (default: 128)\n"
                  "  --resume <dir>             Resume full native state or PEFT weights\n\n"
+                 "  --allow-legacy-resume       Accept old state without a recorded plan (explicit opt-in)\n"
                  "Training:\n"
                  "  --epochs <N>               Epoch count (default: 10)\n"
+                 "  --steps <N>                Total optimizer-step stop target within the epoch schedule budget\n"
                  "  --batch-size <N>            Microbatch size (default: 1)\n"
                  "  --accumulation <N>          Microbatches per optimizer step (default: 1)\n"
                  "  --learning-rate <F>         Peak AdamW learning rate (default: 0.0001)\n"
@@ -88,6 +97,7 @@ static void usage(const char * program) {
                  "  --min-snr [gamma]           Enable flow Min-SNR weighting (default gamma: 5)\n"
                  "  --checkpoint-backward <B>  Recompute layers during backward (default: true)\n"
                  "  --checkpoint-every <N>     Save intermediate state every N epochs; 0 disables (default: 1)\n"
+                 "  --checkpoint-every-steps N Save state every N optimizer updates; 0 disables (default: 0)\n"
                  "  --window-min-seconds <F>   Minimum rotating audio crop; 0 disables (default: 0)\n"
                  "  --window-max-seconds <F>   Maximum rotating audio crop; set with minimum\n"
                  "  --examples-per-epoch <N>   Deterministic epoch subset; 0 uses all (default: 0)\n"
@@ -101,6 +111,7 @@ static void usage(const char * program) {
                  "  --vae <name>                VAE filename in the model registry\n\n"
                  "Set GGML_BACKEND=CUDA0, Vulkan0, MTL0, or CPU to select a device.\n",
                  ACE_VERSION, program);
+    std::fputs(ace_training::TrainCliControl::usage(), stderr);
 }
 
 static bool read_integer(const char * value, int & result) {
@@ -173,6 +184,12 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
             command.validate_dataset = true;
         } else if (!std::strcmp(option, "--resume")) {
             command.resume_dir = next();
+        } else if (!std::strcmp(option, "--allow-legacy-resume")) {
+            command.allow_legacy_resume = true;
+        } else if (!std::strcmp(option, "--steps")) {
+            if (!read_integer(next(), command.max_steps) || command.max_steps == 0) {
+                return false;
+            }
         } else if (!std::strcmp(option, "--dit")) {
             command.dit_name = next();
         } else if (!std::strcmp(option, "--text-encoder")) {
@@ -262,6 +279,10 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
             if (!read_integer(next(), command.checkpoint_every)) {
                 return false;
             }
+        } else if (!std::strcmp(option, "--checkpoint-every-steps")) {
+            if (!read_integer(next(), command.checkpoint_every_steps)) {
+                return false;
+            }
         } else if (!std::strcmp(option, "--window-min-seconds")) {
             if (!read_float(next(), command.window.min_seconds)) {
                 return false;
@@ -334,6 +355,129 @@ static const ModelEntry * choose_model(const std::vector<ModelEntry> & entries, 
     return name ? registry_find(entries, name) : entries.size() == 1 ? &entries[0] : nullptr;
 }
 
+// SA3 fingerprints every input/setting that changes the update trajectory.
+// Content identities allow moving an unchanged dataset/model installation.
+static bool make_resume_plan(const ACETrainCommand &                 command,
+                             const ModelEntry &                      dit,
+                             const ModelEntry &                      text,
+                             const ModelEntry &                      vae,
+                             const std::vector<ACETrainingExample> & sources,
+                             ACETrainResumePlan &                    plan,
+                             std::string &                           error) {
+    if (sources.empty() || sources.size() > INT_MAX) {
+        error = "invalid training dataset size";
+        return false;
+    }
+    plan.dataset_size = int(sources.size());
+    plan.epochs       = command.epochs;
+    plan.accumulation = command.accumulation;
+    const int count =
+        command.examples_per_epoch > 0 ? std::min(command.examples_per_epoch, plan.dataset_size) : plan.dataset_size;
+    plan.batches_per_epoch = int((int64_t(count) + command.batch_size - 1) / command.batch_size);
+    plan.updates_per_epoch = int((int64_t(plan.batches_per_epoch) + command.accumulation - 1) / command.accumulation);
+    const int64_t total    = int64_t(plan.updates_per_epoch) * command.epochs;
+    if (total > INT_MAX || (command.max_steps > 0 && command.max_steps > total)) {
+        error = "training step budget exceeds the epoch plan or supported integer range";
+        return false;
+    }
+    plan.total_steps     = int(total);
+    yyjson_mut_doc * doc = yyjson_mut_doc_new(nullptr);
+    if (!doc) {
+        throw std::bad_alloc();
+    }
+    auto * root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_int(doc, root, "schema_version", 1);
+    yyjson_mut_obj_add_str(doc, root, "algorithm", "ace-native-epoch-seeds-v1");
+    auto * settings = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "settings", settings);
+    auto integer = [&](const char * name, int value) {
+        yyjson_mut_obj_add_int(doc, settings, name, value);
+    };
+    auto real = [&](const char * name, float value) {
+        yyjson_mut_obj_add_real(doc, settings, name, value);
+    };
+    yyjson_mut_obj_add_strcpy(doc, settings, "adapter_type", command.adapter_type.c_str());
+    yyjson_mut_obj_add_strcpy(doc, settings, "profile", command.module_profile.c_str());
+    integer("rank", command.rank);
+    integer("alpha", command.alpha);
+    integer("epochs", command.epochs);
+    integer("batch_size", command.batch_size);
+    integer("accumulation", command.accumulation);
+    integer("warmup_steps", command.warmup_steps);
+    integer("schedule", int(command.schedule));
+    integer("restart_count", command.restart_count);
+    integer("examples_per_epoch", command.examples_per_epoch);
+    integer("batches_per_epoch", plan.batches_per_epoch);
+    integer("total_steps", plan.total_steps);
+    yyjson_mut_obj_add_uint(doc, settings, "seed", command.seed);
+    real("learning_rate", command.learning_rate);
+    real("weight_decay", command.weight_decay);
+    real("max_grad_norm", command.max_grad_norm);
+    real("cfg_dropout", command.cfg_dropout);
+    real("timestep_mean", command.timestep_mean);
+    real("timestep_std", command.timestep_std);
+    real("min_snr_gamma", command.min_snr_gamma);
+    real("window_min_seconds", command.window.min_seconds);
+    real("window_max_seconds", command.window.max_seconds);
+    real("adam_beta1", 0.9f);
+    real("adam_beta2", 0.999f);
+    real("adam_epsilon", 1e-8f);
+    yyjson_mut_obj_add_bool(doc, settings, "min_snr", command.min_snr);
+    yyjson_mut_obj_add_bool(doc, settings, "checkpoint_backward", command.checkpoint_backward);
+    yyjson_mut_obj_add_bool(doc, settings, "use_genre", command.preprocess.use_genre);
+    integer("tag_position", int(command.preprocess.tag_position));
+    auto * models = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "models", models);
+    auto fingerprint = [&](yyjson_mut_val * obj, const char * name, const std::filesystem::path & path) {
+        std::string identity;
+        if (!ace_file_fingerprint(path, identity, error)) {
+            return false;
+        }
+        yyjson_mut_obj_add_strcpy(doc, obj, name, identity.c_str());
+        if (obj == models && std::strcmp(name, "dit") == 0) {
+            plan.base_fingerprint = identity;
+        }
+        return true;
+    };
+    bool ok = fingerprint(models, "dit", std::filesystem::u8path(dit.path)) &&
+              fingerprint(models, "text_encoder", std::filesystem::u8path(text.path)) &&
+              fingerprint(models, "vae", std::filesystem::u8path(vae.path));
+    auto * dataset = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "dataset", dataset);
+    for (const auto & source : sources) {
+        if (!ok) {
+            break;
+        }
+        auto * item = yyjson_mut_obj(doc);
+        yyjson_mut_arr_add_val(dataset, item);
+        yyjson_mut_obj_add_strcpy(doc, item, "id", source.name.c_str());
+        ok = fingerprint(item, "audio", source.audio_path) && fingerprint(item, "metadata", source.metadata_path);
+    }
+    char * json = ok ? yyjson_mut_write(doc, 0, nullptr) : nullptr;
+    yyjson_mut_doc_free(doc);
+    if (ok && !json) {
+        error = "cannot serialize training plan";
+        ok    = false;
+    }
+    if (json) {
+        plan.json = json;
+        free(json);
+    }
+    return ok;
+}
+
+struct ACETrainCancel {
+    ace_training::TrainCliControl * control;
+    bool                            cancelled = false;
+};
+
+static bool train_cancel(void * opaque) {
+    auto & request    = *static_cast<ACETrainCancel *>(opaque);
+    request.cancelled = request.cancelled || request.control->should_cancel();
+    return request.cancelled;
+}
+
 static bool preprocess_dataset(const ACETrainCommand &                 command,
                                const ModelEntry &                      dit_entry,
                                const ModelEntry &                      text_entry,
@@ -342,11 +486,9 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
                                std::vector<std::string> &              example_names,
                                std::vector<float> &                    silence_latents,
                                std::vector<float> &                    null_condition,
+                               const std::vector<ACETrainingExample> & sources,
+                               ACETrainCancel &                        cancellation,
                                std::string &                           error) {
-    std::vector<ACETrainingExample> sources;
-    if (!ace_training_load_dataset(command.dataset_dir, sources, error)) {
-        return false;
-    }
     example_names.clear();
     example_names.reserve(sources.size());
     for (const ACETrainingExample & source : sources) {
@@ -366,7 +508,8 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
     }
 
     std::fprintf(stderr, "[Ace-Train] Preprocessing %zu examples in model phases\n", sources.size());
-    if (!ace_prepare_training_dataset(synth, sources, command.seed, command.preprocess, prepared, error)) {
+    if (!ace_prepare_training_dataset(synth, sources, command.seed, command.preprocess, prepared, error, train_cancel,
+                                      &cancellation)) {
         ace_synth_free(synth);
         store_free(store);
         return false;
@@ -389,13 +532,15 @@ static bool train_adapter(const ACETrainCommand &                       command,
                           const std::vector<std::string> &              example_names,
                           const std::vector<float> &                    silence_latents,
                           const std::vector<float> &                    null_condition,
+                          const ACETrainResumePlan &                    plan,
+                          ACETrainResumeProgress                        progress,
+                          const std::string &                           resume_path,
+                          ACETrainCancel &                              cancellation,
                           std::string &                                 error) {
-    std::string base_model_fingerprint;
+    const std::string & base_model_fingerprint = plan.base_fingerprint;
+    auto &              control                = *cancellation.control;
     if (prepared.empty() || example_names.size() != prepared.size()) {
         error = "prepared training examples and source names do not match";
-        return false;
-    }
-    if (!ace_file_fingerprint(dit_entry.path, base_model_fingerprint, error)) {
         return false;
     }
     DiTGGML model = {};
@@ -412,18 +557,25 @@ static bool train_adapter(const ACETrainCommand &                       command,
     ACETrainAdapterState     state;
     ACETrainAdapterOptimizer optimizer;
     int                      completed_epochs = 0;
-    if (command.resume_dir) {
+    if (!resume_path.empty()) {
         ACETrainCheckpointKind checkpoint_kind;
-        if (!ace_train_checkpoint_kind(command.resume_dir, checkpoint_kind, error)) {
+        if (!ace_train_checkpoint_kind(resume_path, checkpoint_kind, error)) {
             dit_ggml_free(&model);
             return false;
         }
         const bool loaded =
             checkpoint_kind == ACE_TRAIN_CHECKPOINT_FULL ?
-                ace_load_train_checkpoint(command.resume_dir, targets, state, optimizer, completed_epochs,
+                ace_load_train_checkpoint(resume_path, targets, state, optimizer, completed_epochs,
                                           base_model_fingerprint, command.adapter_type, error) :
-                ace_load_train_adapter_checkpoint(command.resume_dir, targets, state, error, command.adapter_type);
+                ace_load_train_adapter_checkpoint(resume_path, targets, state, error, command.adapter_type);
         if (!loaded) {
+            dit_ggml_free(&model);
+            return false;
+        }
+        if (checkpoint_kind == ACE_TRAIN_CHECKPOINT_FULL &&
+            (completed_epochs != progress.epoch || optimizer.step != int64_t(progress.epoch) * plan.updates_per_epoch +
+                                                                         progress.next_batch / command.accumulation)) {
+            error = "resume checkpoint counters do not match the validated continuation";
             dit_ggml_free(&model);
             return false;
         }
@@ -435,9 +587,14 @@ static bool train_adapter(const ACETrainCommand &                       command,
     const int examples_per_epoch = command.examples_per_epoch > 0 ?
                                        std::min(command.examples_per_epoch, (int) prepared.size()) :
                                        (int) prepared.size();
-    const int batches_per_epoch  = (examples_per_epoch + command.batch_size - 1) / command.batch_size;
-    const int updates_per_epoch  = (batches_per_epoch + command.accumulation - 1) / command.accumulation;
-    const int total_steps        = updates_per_epoch * command.epochs;
+    const int batches_per_epoch  = plan.batches_per_epoch;
+    const int total_steps        = plan.total_steps;
+    const int stop_step          = command.max_steps > 0 ? command.max_steps : total_steps;
+    if (optimizer.step > stop_step) {
+        error = "resume step exceeds --steps (the total target optimizer step)";
+        dit_ggml_free(&model);
+        return false;
+    }
     if (completed_epochs > command.epochs) {
         error = "resume checkpoint has completed more epochs than requested";
         dit_ggml_free(&model);
@@ -455,6 +612,35 @@ static bool train_adapter(const ACETrainCommand &                       command,
     diffusion_config.min_snr_gamma = command.min_snr_gamma;
 
     std::vector<size_t> order(prepared.size());
+    auto                save = [&](const std::string & directory, bool final) {
+        control.phase   = "saving";
+        control.message = "Saving native adapter and trainer continuation.";
+        control.publish();
+        if (!ace_save_train_checkpoint(directory, state, optimizer, progress.epoch, base_model_fingerprint, error,
+                                                      ace_train_continuation(plan, progress))) {
+            return false;
+        }
+        std::filesystem::path generation;
+        if (!adapter_checkpoint_directory(directory, generation, error)) {
+            return false;
+        }
+        control.adapter_checkpoint = std::filesystem::absolute(generation).u8string();
+        control.state_checkpoint   = control.adapter_checkpoint;
+        if (final) {
+            control.final_adapter = std::filesystem::absolute(std::filesystem::u8path(directory)).u8string();
+        }
+        control.phase = "training";
+        control.publish();
+        return true;
+    };
+    bool restore_order = progress.next_batch > 0;
+    bool stop          = optimizer.step >= stop_step;
+    control.step       = optimizer.step;
+    control.max_steps  = stop_step;
+    control.status     = "running";
+    control.phase      = "training";
+    control.publish();
+    auto step_started = std::chrono::steady_clock::now();
     if (command.window.max_seconds > 0.0f) {
         std::fprintf(
             stderr,
@@ -465,13 +651,25 @@ static bool train_adapter(const ACETrainCommand &                       command,
         std::fprintf(stderr, "[Ace-Train] Using %d/%zu examples per epoch (deterministic shuffled subset)\n",
                      examples_per_epoch, prepared.size());
     }
-    for (int epoch = completed_epochs; epoch < command.epochs; ++epoch) {
-        std::iota(order.begin(), order.end(), 0);
-        std::mt19937_64 shuffle(command.seed + (uint64_t) epoch);
-        std::shuffle(order.begin(), order.end(), shuffle);
-        double epoch_loss    = 0.0;
-        int    epoch_batches = 0;
-        for (int batch_index = 0; batch_index < batches_per_epoch; ++batch_index) {
+    for (int epoch = progress.epoch; epoch < command.epochs && !stop; ++epoch) {
+        if (restore_order) {
+            order         = progress.order;
+            restore_order = false;
+        } else {
+            std::iota(order.begin(), order.end(), 0);
+            std::mt19937_64 shuffle(command.seed + (uint64_t) epoch);
+            std::shuffle(order.begin(), order.end(), shuffle);
+        }
+        progress.order       = order;
+        double epoch_loss    = progress.epoch_loss;
+        int    epoch_batches = progress.epoch_batches;
+        for (int batch_index = progress.next_batch; batch_index < batches_per_epoch; ++batch_index) {
+            // Finish any accumulated microbatches before observing cancellation:
+            // a checkpoint never contains a half-finished optimizer update.
+            if (accumulator.microbatch_count == 0 && train_cancel(&cancellation)) {
+                stop = true;
+                break;
+            }
             const int                             first = batch_index * command.batch_size;
             const int                             last  = std::min(first + command.batch_size, examples_per_epoch);
             std::vector<ACETrainDiffusionExample> sources;
@@ -550,6 +748,17 @@ static bool train_adapter(const ACETrainCommand &                       command,
             }
             epoch_loss += loss;
             epoch_batches += 1;
+            progress.epoch         = epoch;
+            progress.next_batch    = batch_index + 1;
+            progress.epoch_loss    = epoch_loss;
+            progress.epoch_batches = epoch_batches;
+            if (batch_index + 1 == batches_per_epoch) {
+                progress.epoch         = epoch + 1;
+                progress.next_batch    = 0;
+                progress.epoch_loss    = 0;
+                progress.epoch_batches = 0;
+                progress.order.clear();
+            }
 
             const bool update =
                 accumulator.microbatch_count == command.accumulation || batch_index + 1 == batches_per_epoch;
@@ -567,9 +776,34 @@ static bool train_adapter(const ACETrainCommand &                       command,
                 std::fprintf(stderr, "[Ace-Train] epoch=%d/%d step=%d/%d batch=%d/%d loss=%.6f lr=%.8g\n", epoch + 1,
                              command.epochs, optimizer.step, total_steps, batch_index + 1, batches_per_epoch, loss,
                              optimizer_config.learning_rate);
+                control.step          = optimizer.step;
+                control.epoch         = epoch + 1;
+                control.loss          = loss;
+                control.learning_rate = optimizer_config.learning_rate;
+                control.step_seconds =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - step_started).count();
+                control.message = "Optimizer update completed.";
+                control.publish();
+                step_started = std::chrono::steady_clock::now();
+                stop         = optimizer.step >= stop_step || train_cancel(&cancellation);
             }
             ace_free_train_dit_checkpoint(checkpoint);
             ace_free_train_dit_graph(graph);
+            if (update && !stop && command.checkpoint_every_steps > 0 &&
+                optimizer.step % command.checkpoint_every_steps == 0) {
+                if (!save(std::string(command.output_dir) + "/checkpoint-step-" + std::to_string(optimizer.step),
+                          false)) {
+                    dit_ggml_free(&model);
+                    return false;
+                }
+                step_started = std::chrono::steady_clock::now();
+            }
+            if (stop) {
+                break;
+            }
+        }
+        if (progress.epoch != epoch + 1) {
+            break;
         }
         const bool final_epoch = epoch + 1 == command.epochs;
         const bool checkpoint_due =
@@ -578,7 +812,7 @@ static bool train_adapter(const ACETrainCommand &                       command,
             const std::string checkpoint =
                 std::string(command.output_dir) + "/checkpoint-epoch-" + std::to_string(epoch + 1);
             std::fprintf(stderr, "[Ace-Train] saving epoch checkpoint=%s\n", checkpoint.c_str());
-            if (!ace_save_train_checkpoint(checkpoint, state, optimizer, epoch + 1, base_model_fingerprint, error)) {
+            if (!save(checkpoint, false)) {
                 dit_ggml_free(&model);
                 return false;
             }
@@ -590,11 +824,134 @@ static bool train_adapter(const ACETrainCommand &                       command,
         }
     }
 
+    if (optimizer.step == 0 && cancellation.cancelled) {
+        dit_ggml_free(&model);
+        return true;
+    }
+    if (progress.next_batch == 0) {
+        progress.order.clear();
+    }
     std::fprintf(stderr, "[Ace-Train] saving final checkpoint=%s\n", command.output_dir);
-    const bool saved =
-        ace_save_train_checkpoint(command.output_dir, state, optimizer, command.epochs, base_model_fingerprint, error);
+    const bool saved = save(command.output_dir, true);
     dit_ggml_free(&model);
     return saved;
+}
+
+static bool run_training(const ACETrainCommand & command, ACETrainCancel & cancellation, std::string & error) {
+    auto & control = *cancellation.control;
+    if (command.validate_dataset) {
+        std::vector<ACETrainingExample> examples;
+        if (!ace_training_load_dataset(command.dataset_dir, examples, error)) {
+            return false;
+        }
+        double duration = 0.0;
+        control.status  = "running";
+        control.phase   = "validating";
+        control.publish();
+        for (const ACETrainingExample & example : examples) {
+            if (train_cancel(&cancellation)) {
+                return true;
+            }
+            int samples = 0;
+            if (!ace_validate_training_audio(example.audio_path.string(), samples, error)) {
+                return false;
+            }
+            duration += (double) samples / 48000.0;
+        }
+        std::fprintf(stderr, "[Ace-Train] Dataset valid: %zu paired examples, %.2f minutes decoded at 48 kHz\n",
+                     examples.size(), duration / 60.0);
+        return true;
+    }
+
+    ModelRegistry registry;
+    if (!registry_scan(&registry, command.models_dir)) {
+        error = "could not scan models directory";
+        return false;
+    }
+    const ModelEntry * dit          = choose_model(registry.dit, command.dit_name);
+    const ModelEntry * text_encoder = choose_model(registry.text_enc, command.text_name);
+    const ModelEntry * vae          = choose_model(registry.vae, command.vae_name);
+    if (!dit || !text_encoder || !vae) {
+        error =
+            "model selection is missing or ambiguous; use --dit, --text-encoder, and --vae with exact filenames when "
+            "multiple variants are installed";
+        return false;
+    }
+
+    control.status  = "running";
+    control.phase   = "validating";
+    control.message = "Validating model, dataset and training-plan identities.";
+    control.publish();
+    std::vector<ACETrainingExample> sources;
+    ACETrainResumePlan              plan;
+    if (!ace_training_load_dataset(command.dataset_dir, sources, error) ||
+        !make_resume_plan(command, *dit, *text_encoder, *vae, sources, plan, error)) {
+        return false;
+    }
+    control.max_steps = command.max_steps > 0 ? command.max_steps : plan.total_steps;
+    ACETrainResumeProgress progress;
+    std::string            resume_path;
+    if (command.resume_dir) {
+        std::filesystem::path  resolved;
+        ACETrainCheckpointKind kind = ACE_TRAIN_CHECKPOINT_ADAPTER;
+        if (!adapter_checkpoint_directory(command.resume_dir, resolved, error) ||
+            !ace_train_checkpoint_kind(resolved.u8string(), kind, error)) {
+            return false;
+        }
+        resume_path = resolved.u8string();
+        int step    = 0;
+        if (kind == ACE_TRAIN_CHECKPOINT_FULL) {
+            bool legacy = false;
+            if (!ace_train_read_progress(resume_path, plan, command.allow_legacy_resume, progress, step, error,
+                                         &legacy)) {
+                return false;
+            }
+            control.step  = step;
+            control.epoch = progress.epoch;
+            control.message =
+                legacy ? "WARNING: legacy checkpoint has no recorded plan; original settings cannot be validated." :
+                         "Native full-state resume plan validated.";
+        } else {
+            control.message = "PEFT weight-only restart: optimizer, cursor and schedule start from zero.";
+        }
+        if (step > control.max_steps) {
+            error = "resume step exceeds the total target optimizer step";
+            return false;
+        }
+        std::fprintf(stderr, "[Ace-Train] %s\n", control.message.c_str());
+    }
+    const auto output = std::filesystem::u8path(command.output_dir);
+    if (std::filesystem::exists(output / "checkpoint.current") ||
+        std::filesystem::exists(output / "trainer_state.json")) {
+        std::filesystem::path current;
+        std::error_code       ec;
+        if (resume_path.empty() || !adapter_checkpoint_directory(command.output_dir, current, error) ||
+            !std::filesystem::equivalent(current, std::filesystem::u8path(resume_path), ec) || ec) {
+            error =
+                "output already contains a native checkpoint; resume that current checkpoint or choose a new output "
+                "directory";
+            return false;
+        }
+    }
+    if (train_cancel(&cancellation)) {
+        return true;
+    }
+    control.phase   = "pre-encode";
+    control.message = "Preparing training audio and conditioning.";
+    control.publish();
+    std::vector<ACETrainDiffusionExample> prepared;
+    std::vector<std::string>              example_names;
+    std::vector<float>                    silence_latents;
+    std::vector<float>                    null_condition;
+    if (!preprocess_dataset(command, *dit, *text_encoder, *vae, prepared, example_names, silence_latents,
+                            null_condition, sources, cancellation, error)) {
+        return cancellation.cancelled;
+    }
+    if (train_cancel(&cancellation)) {
+        return true;
+    }
+    return train_adapter(command, *dit, prepared, example_names, silence_latents, null_condition, plan, progress,
+                         resume_path, cancellation, error);
 }
 
 int main(int argc, char ** argv) {
@@ -602,59 +959,50 @@ int main(int argc, char ** argv) {
         std::puts(ACE_RELEASE_VERSION);
         return 0;
     }
-    ACETrainCommand command;
-    if (!parse_command(argc, argv, command)) {
-        usage(argv[0]);
-        return 1;
-    }
-
-    if (command.validate_dataset) {
-        std::vector<ACETrainingExample> examples;
-        std::string                     error;
-        if (!ace_training_load_dataset(command.dataset_dir, examples, error)) {
-            std::fprintf(stderr, "[Ace-Train] ERROR: %s\n", error.c_str());
-            return 1;
+    ace_training::TrainCliControl control;
+    std::vector<char *>           training_args;
+    std::string                   error;
+    ACETrainCommand               command;
+    try {
+        if (!control.parse(argc, argv, training_args, error)) {
+            std::fprintf(stderr, "[Ace-Train] %s\n", error.c_str());
+            return 2;
         }
-        double duration = 0.0;
-        for (const ACETrainingExample & example : examples) {
-            int samples = 0;
-            if (!ace_validate_training_audio(example.audio_path.string(), samples, error)) {
-                std::fprintf(stderr, "[Ace-Train] ERROR: %s\n", error.c_str());
-                return 1;
-            }
-            duration += (double) samples / 48000.0;
+        if (control.info) {
+            std::fputs(control.capabilities(), stdout);
+            return 0;
         }
-        std::fprintf(stderr, "[Ace-Train] Dataset valid: %zu paired examples, %.2f minutes decoded at 48 kHz\n",
-                     examples.size(), duration / 60.0);
-        return 0;
-    }
-
-    ModelRegistry registry;
-    if (!registry_scan(&registry, command.models_dir)) {
-        std::fprintf(stderr, "[Ace-Train] ERROR: could not scan models directory\n");
+        if (!parse_command(int(training_args.size()), training_args.data(), command)) {
+            usage(argv[0]);
+            return 2;
+        }
+        ACETrainCancel cancellation{ &control };
+        control.publish();
+        bool ok = true;
+        if (train_cancel(&cancellation)) {
+            control.message = "Cancelled before loading models.";
+        } else {
+            ok = run_training(command, cancellation, error);
+        }
+        control.status = !ok ? "failed" : cancellation.cancelled ? "cancelled" : "completed";
+        control.phase  = control.status;
+        control.error  = ok ? "" : error;
+        if (ok && cancellation.cancelled && control.message != "Cancelled before loading models.") {
+            control.message = control.state_checkpoint.empty() ?
+                                  "Cancelled before the first optimizer update." :
+                                  "Cancelled at an optimizer boundary; native continuation is saved.";
+        }
+        control.publish();
+        std::fprintf(stderr, "[Ace-Train] %s%s%s\n", control.status.c_str(), ok ? "" : ": ", ok ? "" : error.c_str());
+        return ok ? 0 : 1;
+    } catch (const std::exception & exception) {
+        control.status = control.phase = "failed";
+        control.error                  = exception.what();
+        try {
+            control.publish();
+        } catch (...) {
+        }
+        std::fprintf(stderr, "[Ace-Train] ERROR: %s\n", exception.what());
         return 1;
     }
-    const ModelEntry * dit          = choose_model(registry.dit, command.dit_name);
-    const ModelEntry * text_encoder = choose_model(registry.text_enc, command.text_name);
-    const ModelEntry * vae          = choose_model(registry.vae, command.vae_name);
-    if (!dit || !text_encoder || !vae) {
-        std::fprintf(stderr,
-                     "[Ace-Train] ERROR: model selection is missing or ambiguous; use --dit, --text-encoder, "
-                     "and --vae with exact filenames when multiple variants are installed\n");
-        return 1;
-    }
-
-    std::string                           error;
-    std::vector<ACETrainDiffusionExample> prepared;
-    std::vector<std::string>              example_names;
-    std::vector<float>                    silence_latents;
-    std::vector<float>                    null_condition;
-    if (!preprocess_dataset(command, *dit, *text_encoder, *vae, prepared, example_names, silence_latents,
-                            null_condition, error) ||
-        !train_adapter(command, *dit, prepared, example_names, silence_latents, null_condition, error)) {
-        std::fprintf(stderr, "[Ace-Train] ERROR: %s\n", error.c_str());
-        return 1;
-    }
-    std::fprintf(stderr, "[Ace-Train] Complete: %s\n", command.output_dir);
-    return 0;
 }
