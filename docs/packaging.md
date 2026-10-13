@@ -36,6 +36,10 @@ installer needs to put the Visual C++ Redistributable on the machine, or ask
 for administrator rights to do it. The package script fails if that runtime is
 older than the compiler, since binaries from a newer toolset can crash on an
 older `msvcp140`, and `BUILD-INFO.json` records its version.
+Both come from the build's own CMake configuration, never from whichever
+Visual Studio is newest. The script also runs the staged
+`ace-server.exe --props` under a DLL-load recorder and fails unless all four
+runtime DLLs load from the package's own folder rather than System32.
 
 `-CpuOnly -BuildDir build-release-cpu -OutDir dist-cpu` is a local contract
 check, not a release GPU validation. `-CudaArch native` requires a separate
