@@ -127,14 +127,12 @@ rate. Exercise the actual DAW-facing request and status/result payloads.
 
 PE imports confirm that the Windows server and CPU backend depend on the shared
 MSVC/OpenMP runtimes (`MSVCP140`, `VCRUNTIME140`, `VCRUNTIME140_1`, `VCOMP140`).
-The sibling-style archives do not bundle them, and the inspected gary4local
-source initially had no explicit VC Redistributable prerequisite check. Follow-up
-[Gary PR #8](https://github.com/betweentwomidnights/gary-localhost-installer/pull/8)
-adds shared preflight and verified Microsoft installer remediation on top of
-`feature/sa3-cpp-migration` at `7d860a3`, in an isolated checkout. The existing
-working tree's local edits were preserved. Clean Windows UI/UAC acceptance is
-still needed; startup on this Visual Studio machine does not establish it. See
-Microsoft's [runtime requirements](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
+The core archive carries them beside the executables, as every sibling's does,
+so gary4local needs no VC Redistributable prerequisite and never elevates for
+one. This replaces the preflight and Microsoft-installer repair first drafted in
+[Gary PR #8](https://github.com/betweentwomidnights/gary-localhost-installer/pull/8).
+Startup on a clean Windows machine without build tools is still an acceptance
+gate; startup on this Visual Studio machine does not establish it.
 
 1. Add a Carey native **candidate** with `acestep` asset names; keep Python
    active while preparing models/runtime. No hashes should be invented before

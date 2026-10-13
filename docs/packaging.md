@@ -27,12 +27,19 @@ gary4local installs core plus its selected backend and shares `cudart-12.8`
 with yuey and sa3. It must keep ACE's ggml DLLs in ACE's own directory:
 ACE uses `GGML_MAX_NAME=128`; sharing CUDA does not mean sharing ggml DLLs.
 
-Windows also needs the x64 Microsoft Visual C++ v14 Redistributable, at least
-as recent as the compiler used for the package. See Microsoft's
-[supported runtime downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
-The archives use the shared MSVC/OpenMP runtimes (`MSVCP140`, `VCRUNTIME140`,
-`VCRUNTIME140_1`, `VCOMP140`); they do not bundle those DLLs. The installer must
-cover this prerequisite and test startup on a Windows machine without build tools.
+The binaries link the MSVC/OpenMP runtimes dynamically (`MSVCP140`,
+`VCRUNTIME140`, `VCRUNTIME140_1`, `VCOMP140`), and the core archive carries
+them, from the redistributable folder of the Visual Studio that built it.
+Windows loads DLLs from an executable's own folder before System32, so ACE runs
+on the runtime it was built against whatever the machine has installed, and no
+installer needs to put the Visual C++ Redistributable on the machine, or ask
+for administrator rights to do it. The package script fails if that runtime is
+older than the compiler, since binaries from a newer toolset can crash on an
+older `msvcp140`, and `BUILD-INFO.json` records its version.
+Both come from the build's own CMake configuration, never from whichever
+Visual Studio is newest. The script also runs the staged
+`ace-server.exe --props` under a DLL-load recorder and fails unless all four
+runtime DLLs load from the package's own folder rather than System32.
 
 `-CpuOnly -BuildDir build-release-cpu -OutDir dist-cpu` is a local contract
 check, not a release GPU validation. `-CudaArch native` requires a separate
