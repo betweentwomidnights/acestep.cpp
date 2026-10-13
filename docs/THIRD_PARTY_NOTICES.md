@@ -19,6 +19,12 @@ included; their licenses and download terms are separate.
 | Signalsmith Linear FFT, Signalsmith Audio | MIT | `LICENSE-signalsmith-linear.txt` |
 | mp3 encoder/decoder and WAV/audio helpers in this tree | Notices retained in source | Project `LICENSE` and original file headers |
 
+The Windows core archive also carries the Microsoft Visual C++ runtime
+(`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`, `vcomp140.dll`)
+beside the executables, so they need no system-wide install. These are
+redistributable files from Visual Studio 2022, shipped under its license terms
+for distributable code.
+
 The Windows standalone archive additionally redistributes NVIDIA CUDA runtime
 and cuBLAS libraries under `NVIDIA-CUDA-EULA.txt`. The split CUDA backend archive
 contains only `ggml-cuda.dll`; the application supplies its separately installed
