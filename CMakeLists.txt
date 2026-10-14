@@ -76,6 +76,19 @@ if(NOT DEFINED GGML_CUDA_GRAPHS)
 endif()
 add_subdirectory(ggml)
 
+# Cache tensors must not cross incompatible numerical build configurations.
+get_cmake_property(_ace_cache_variables CACHE_VARIABLES)
+list(SORT _ace_cache_variables)
+set(_ace_cache_configuration "${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION}")
+foreach(_ace_var ${_ace_cache_variables})
+    if(_ace_var MATCHES "^(GGML_|CMAKE_(CXX_FLAGS|C_FLAGS|CUDA_FLAGS|CUDA_ARCHITECTURES|OSX_ARCHITECTURES))")
+        string(APPEND _ace_cache_configuration ";${_ace_var}=${${_ace_var}}")
+    endif()
+endforeach()
+string(SHA256 _ace_cache_configuration_id "${_ace_cache_configuration}")
+file(WRITE "${CMAKE_BINARY_DIR}/cache-build.h" "#pragma once\n#define ACE_CACHE_CONFIG_ID \"${_ace_cache_configuration_id}\"\n")
+add_compile_definitions(ACE_CACHE_BUILD_CONFIGURATION="$<CONFIG>")
+
 # cpp-httplib (HTTP server library, used by ace-server)
 add_subdirectory(vendor/cpp-httplib)
 

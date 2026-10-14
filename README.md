@@ -205,6 +205,12 @@ selection options.
 Use `--adapter-type dora-rows` to train a DoRA-row adapter instead. Metal LoRA
 training validation is tracked in the TODO list above.
 
+Training defaults to a reusable disk cache under `DATASET/.ace-train-cache`.
+`--preprocess-cache-dir` selects its location; `--cache-memory-mb` bounds prepared
+tensor residency and zero streams from disk. See the
+[preprocessing cache contract](docs/TRAINING_PREPROCESS_CACHE.md) for identities,
+memory limits, cancellation and cache cleanup ownership.
+
 ## Server options
 
 ```

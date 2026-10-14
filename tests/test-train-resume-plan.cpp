@@ -74,9 +74,52 @@ int main() {
     changed.checkpoint_every       = 0;
     changed.checkpoint_every_steps = 2;
     changed.max_steps              = 1;
+    changed.preprocess_cache       = false;
+    changed.preprocess_cache_dir   = "relocated-cache";
+    changed.cache_memory_mb        = 0;
+    changed.preprocess_batch_size  = 2;
     ACETrainResumePlan other;
     expect(make_resume_plan(changed, dit, text, vae, sources, other, error) && restore(original, other, 0, 1),
            "output/cadence/stop target do not change the update trajectory");
+    // Exercise the real cache identity builder independently of model loading.
+#ifdef _WIN32
+    _putenv_s("GGML_BACKEND", "CPU");
+#else
+    setenv("GGML_BACKEND", "CPU", 1);
+#endif
+    AceSynthParams params;
+    ace_synth_default_params(&params);
+    const auto dataset_path = root.u8string();
+    command.dataset_dir     = dataset_path.c_str();
+    ACETrainPreparedDataset cache, alternative;
+    expect(prepare_cache_identities(command, plan, params, cache, error), "build cache input identities");
+    expect(prepare_cache_identities(changed, other, params, alternative, error) &&
+               cache.identities == alternative.identities,
+           "cache/output/memory/stop controls do not invalidate tensors");
+    auto cache_command = command;
+    cache_command.learning_rate *= 2;
+    cache_command.rank *= 2;
+    expect(make_resume_plan(cache_command, dit, text, vae, sources, other, error) &&
+               prepare_cache_identities(cache_command, other, params, alternative, error) &&
+               cache.identities == alternative.identities,
+           "optimizer and adapter options do not invalidate preprocessing");
+    cache_command = command;
+    cache_command.seed += 1;
+    expect(make_resume_plan(cache_command, dit, text, vae, sources, other, error) &&
+               prepare_cache_identities(cache_command, other, params, alternative, error) &&
+               cache.identities != alternative.identities,
+           "posterior seed invalidates preprocessing");
+    params.vae_chunk += 1;
+    expect(prepare_cache_identities(command, plan, params, alternative, error) &&
+               cache.identities != alternative.identities,
+           "VAE tiling settings invalidate preprocessing");
+    params.vae_chunk -= 1;
+    write(vae.path, "different VAE");
+    expect(make_resume_plan(command, dit, text, vae, sources, other, error) &&
+               prepare_cache_identities(command, other, params, alternative, error) &&
+               cache.identities != alternative.identities,
+           "model content invalidates preprocessing");
+    write(vae.path, "VAE");
     changed        = command;
     changed.epochs = 4;
     expect(make_resume_plan(changed, dit, text, vae, sources, other, error) && !restore(original, other, 0, 1),
@@ -96,6 +139,9 @@ int main() {
     write(sources[0].metadata_path, "changed metadata");
     expect(make_resume_plan(command, dit, text, vae, sources, other, error) && !restore(original, other, 0, 1),
            "metadata content change rejected");
+    expect(prepare_cache_identities(command, other, params, alternative, error) &&
+               cache.identities[0] != alternative.identities[0] && cache.identities[1] == alternative.identities[1],
+           "metadata edits invalidate only the changed example");
     write(sources[0].metadata_path, "metadata");
     const auto relocated = root / "moved";
     fs::create_directory(relocated);

@@ -1,6 +1,7 @@
 // ABOUTME: Runs native ACE-Step LoRA and DoRA-row training from paired WAV and metadata files.
 // ABOUTME: Reuses GGUF preprocessing, batches variable lengths, accumulates gradients, and saves PEFT adapters.
 
+#include "cache-build.h"
 #include "dit.h"
 #include "model-registry.h"
 #include "model-store.h"
@@ -9,6 +10,7 @@
 #include "train-checkpoint.h"
 #include "train-cli-control.h"
 #include "train-diffusion.h"
+#include "train-preprocess-cache.h"
 #include "train-resume.h"
 #include "train-window.h"
 #include "version.h"
@@ -24,6 +26,9 @@
 #include <random>
 #include <string>
 #include <vector>
+#ifdef __APPLE__
+#    include <crt_externs.h>
+#endif
 
 struct ACETrainCommand {
     const char *             models_dir             = nullptr;
@@ -61,6 +66,10 @@ struct ACETrainCommand {
     ACETrainWindowConfig     window;
     ACETrainSchedule         schedule = ACE_TRAIN_SCHEDULE_COSINE;
     ACETrainPreprocessConfig preprocess;
+    bool                     preprocess_cache      = true;
+    const char *             preprocess_cache_dir  = nullptr;
+    int                      cache_memory_mb       = 256;
+    int                      preprocess_batch_size = 1;
 };
 
 static void usage(const char * program) {
@@ -103,6 +112,10 @@ static void usage(const char * program) {
                  "  --examples-per-epoch <N>   Deterministic epoch subset; 0 uses all (default: 0)\n"
                  "  --seed <N>                  Deterministic seed (default: 42)\n\n"
                  "Conditioning:\n"
+                 "  --preprocess-cache <B>     Reuse disk-backed prepared tensors (default: true)\n"
+                 "  --preprocess-cache-dir DIR Cache root (default: DATASET/.ace-train-cache)\n"
+                 "  --cache-memory-mb N        Prepared-tensor LRU budget; 0 streams (default: 256)\n"
+                 "  --preprocess-batch-size N  Maximum cold-preprocessing examples in RAM (default: 1)\n"
                  "  --use-genre                 Use genre instead of caption when available\n"
                  "  --tag-position <name>       prepend, append, or replace\n\n"
                  "Model selection:\n"
@@ -313,6 +326,23 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
             }
         } else if (!std::strcmp(option, "--use-genre")) {
             command.preprocess.use_genre = true;
+        } else if (!std::strcmp(option, "--preprocess-cache")) {
+            if (!read_bool(next(), command.preprocess_cache)) {
+                return false;
+            }
+        } else if (!std::strcmp(option, "--preprocess-cache-dir")) {
+            command.preprocess_cache_dir = next();
+            if (!command.preprocess_cache_dir || !*command.preprocess_cache_dir) {
+                return false;
+            }
+        } else if (!std::strcmp(option, "--cache-memory-mb")) {
+            if (!read_integer(next(), command.cache_memory_mb)) {
+                return false;
+            }
+        } else if (!std::strcmp(option, "--preprocess-batch-size")) {
+            if (!read_integer(next(), command.preprocess_batch_size) || command.preprocess_batch_size == 0) {
+                return false;
+            }
         } else if (!std::strcmp(option, "--tag-position")) {
             const char * value = next();
             if (!value) {
@@ -478,15 +508,108 @@ static bool train_cancel(void * opaque) {
     return request.cancelled;
 }
 
+static bool prepare_cache_identities(const ACETrainCommand &    command,
+                                     const ACETrainResumePlan & plan,
+                                     const AceSynthParams &     params,
+                                     ACETrainPreparedDataset &  prepared,
+                                     std::string &              error) {
+    ggml_backend_load_all();
+    auto device = ace_runtime_device(std::getenv("GGML_BACKEND"));
+    if (!device) {
+        error = "requested preprocessing device is unavailable";
+        return false;
+    }
+    std::string backend = std::string(ggml_backend_dev_name(device)) + ":" + ggml_backend_dev_description(device);
+    auto        reg     = ggml_backend_dev_backend_reg(device);
+    auto features = (ggml_backend_get_features_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_get_features");
+    if (features) {
+        for (auto feature = features(reg); feature && feature->name; ++feature) {
+            backend += std::string(";") + feature->name + "=" + (feature->value ? feature->value : "");
+        }
+    }
+    std::vector<std::string> environment;
+#ifdef _WIN32
+    char ** variables = _environ;
+#elif defined(__APPLE__)
+    char ** variables = *_NSGetEnviron();
+#else
+    extern char ** environ;
+    char **        variables = environ;
+#endif
+    for (char ** item = variables; item && *item; ++item) {
+        if (std::strncmp(*item, "GGML_", 5) == 0) {
+            environment.emplace_back(*item);
+        }
+    }
+    std::sort(environment.begin(), environment.end());
+    yyjson_doc * input = yyjson_read(plan.json.data(), plan.json.size(), 0);
+    auto *       root  = input ? yyjson_doc_get_root(input) : nullptr;
+    if (!root) {
+        yyjson_doc_free(input);
+        error = "invalid plan for preprocessing cache";
+        return false;
+    }
+    auto * settings = yyjson_obj_get(root, "settings");
+    auto * dataset  = yyjson_obj_get(root, "dataset");
+    prepared.identities.clear();
+    for (size_t i = 0; i < yyjson_arr_size(dataset); ++i) {
+        yyjson_mut_doc * doc = yyjson_mut_doc_new(nullptr);
+        auto *           key = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, key);
+        yyjson_mut_obj_add_int(doc, key, "schema_version", 1);
+        yyjson_mut_obj_add_str(doc, key, "algorithm", "ace-full-song-preprocessing-v1");
+        yyjson_mut_obj_add_str(doc, key, "application", ACE_VERSION);
+        yyjson_mut_obj_add_str(doc, key, "release", ACE_RELEASE_VERSION);
+        yyjson_mut_obj_add_str(doc, key, "ggml", ACE_GGML_REVISION);
+        yyjson_mut_obj_add_str(doc, key, "build", ACE_CACHE_CONFIG_ID ":" ACE_CACHE_BUILD_CONFIGURATION);
+        yyjson_mut_obj_add_strcpy(doc, key, "backend", backend.c_str());
+        yyjson_mut_obj_add_int(doc, key, "threads", backend_cpu_n_threads());
+        uint32_t endian = 1;
+        yyjson_mut_obj_add_bool(doc, key, "little_endian", *(unsigned char *) &endian == 1);
+        auto * env = yyjson_mut_arr(doc);
+        for (const auto & value : environment) {
+            yyjson_mut_arr_add_strcpy(doc, env, value.c_str());
+        }
+        yyjson_mut_obj_add_val(doc, key, "environment", env);
+        yyjson_mut_obj_add_val(doc, key, "models", yyjson_val_mut_copy(doc, yyjson_obj_get(root, "models")));
+        yyjson_mut_obj_add_val(doc, key, "source", yyjson_val_mut_copy(doc, yyjson_arr_get(dataset, i)));
+        // The original VAE posterior uses seed + dataset index, independent of chunking/cache misses.
+        yyjson_mut_obj_add_uint(doc, key, "posterior_seed", command.seed + uint64_t(i));
+        for (const char * name : { "tag_position", "use_genre" }) {
+            yyjson_mut_obj_add_val(doc, key, name, yyjson_val_mut_copy(doc, yyjson_obj_get(settings, name)));
+        }
+        yyjson_mut_obj_add_int(doc, key, "vae_chunk", params.vae_chunk);
+        yyjson_mut_obj_add_int(doc, key, "vae_overlap", params.vae_overlap);
+        yyjson_mut_obj_add_bool(doc, key, "flash_attention", params.use_fa);
+        yyjson_mut_obj_add_bool(doc, key, "clamp_fp16", params.clamp_fp16);
+        char * text = yyjson_mut_write(doc, 0, nullptr);
+        yyjson_mut_doc_free(doc);
+        if (!text) {
+            yyjson_doc_free(input);
+            error = "cannot serialize cache identity";
+            return false;
+        }
+        prepared.identities.emplace_back(text);
+        free(text);
+    }
+    yyjson_doc_free(input);
+    prepared.directory    = command.preprocess_cache_dir ?
+                                std::filesystem::u8path(command.preprocess_cache_dir) :
+                                std::filesystem::u8path(command.dataset_dir) / ".ace-train-cache";
+    prepared.memory_limit = size_t(command.cache_memory_mb) * 1024 * 1024;
+    return true;
+}
+
 static bool preprocess_dataset(const ACETrainCommand &                 command,
                                const ModelEntry &                      dit_entry,
                                const ModelEntry &                      text_entry,
                                const ModelEntry &                      vae_entry,
-                               std::vector<ACETrainDiffusionExample> & prepared,
+                               ACETrainPreparedDataset &               prepared,
                                std::vector<std::string> &              example_names,
                                std::vector<float> &                    silence_latents,
                                std::vector<float> &                    null_condition,
                                const std::vector<ACETrainingExample> & sources,
+                               const ACETrainResumePlan &              plan,
                                ACETrainCancel &                        cancellation,
                                std::string &                           error) {
     example_names.clear();
@@ -507,36 +630,89 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
         return false;
     }
 
-    std::fprintf(stderr, "[Ace-Train] Preprocessing %zu examples in model phases\n", sources.size());
-    if (!ace_prepare_training_dataset(synth, sources, command.seed, command.preprocess, prepared, error, train_cancel,
-                                      &cancellation)) {
-        ace_synth_free(synth);
-        store_free(store);
-        return false;
-    }
     const DiTMeta * metadata = store_dit_meta(store, dit_entry.path.c_str());
     if (!metadata || !ace_training_null_condition(synth, null_condition, error)) {
         ace_synth_free(synth);
         store_free(store);
         return false;
     }
-    silence_latents = metadata->silence_full;
+    silence_latents           = metadata->silence_full;
+    prepared.output_channels  = metadata->cfg.out_channels;
+    prepared.context_channels = metadata->cfg.in_channels - metadata->cfg.out_channels;
+    prepared.patch_size       = metadata->cfg.patch_size;
+    prepared.hidden_size      = int(null_condition.size());
+    prepared.null_condition   = null_condition;
+    prepared.max_latents      = silence_latents.size();
+    std::fprintf(stderr, "[Ace-Train] Preprocessing %zu examples in model phases\n", sources.size());
+    bool ok = true;
+    if (!command.preprocess_cache) {
+        ok = ace_prepare_training_dataset(synth, sources, command.seed, command.preprocess, prepared.memory, error,
+                                          train_cancel, &cancellation);
+    } else if (!prepare_cache_identities(command, plan, params, prepared, error)) {
+        ok = false;
+    } else {
+        const size_t chunk_size = size_t(command.preprocess_batch_size);
+        for (size_t first = 0; first < sources.size() && ok; first += chunk_size) {
+            if (train_cancel(&cancellation)) {
+                break;
+            }
+            const size_t last     = std::min(sources.size(), first + chunk_size);
+            bool         complete = true;
+            for (size_t i = first; i < last; ++i) {
+                ACETrainDiffusionExample example;
+                std::string              miss;
+                if (prepared.read_raw(i, example, miss)) {
+                    prepared.observe(example);
+                } else {
+                    complete = false;
+                    if (std::filesystem::exists(prepared.path(i))) {
+                        ++prepared.rebuilt;
+                    }
+                }
+            }
+            if (complete) {
+                prepared.reused += last - first;
+                continue;
+            }
+            std::vector<ACETrainingExample>       chunk(sources.begin() + (std::ptrdiff_t) first,
+                                                        sources.begin() + (std::ptrdiff_t) last);
+            std::vector<ACETrainDiffusionExample> examples;
+            ok = ace_prepare_training_dataset(synth, chunk, command.seed + uint64_t(first), command.preprocess,
+                                              examples, error, train_cancel, &cancellation);
+            for (size_t i = 0; ok && i < examples.size(); ++i) {
+                if (train_cancel(&cancellation)) {
+                    break;
+                }
+                // Remove chunk-local padding; get() restores original dataset-wide null padding.
+                auto & example = examples[i];
+                example.encoder_hidden.resize(size_t(example.real_encoder_sequence_length) *
+                                              size_t(prepared.hidden_size));
+                prepared.observe(example);
+                ok = prepared.write(first + i, example, error);
+            }
+        }
+        std::fprintf(stderr,
+                     "[Ace-Train] preprocess cache: %zu reused, %zu written, %zu corrupt/incompatible rebuilt; "
+                     "LRU budget=%d MiB; chunk=%d -> %s\n",
+                     prepared.reused, prepared.written, prepared.rebuilt, command.cache_memory_mb,
+                     command.preprocess_batch_size, prepared.directory.u8string().c_str());
+    }
     ace_synth_free(synth);
     store_free(store);
-    return true;
+    return ok;
 }
 
-static bool train_adapter(const ACETrainCommand &                       command,
-                          const ModelEntry &                            dit_entry,
-                          const std::vector<ACETrainDiffusionExample> & prepared,
-                          const std::vector<std::string> &              example_names,
-                          const std::vector<float> &                    silence_latents,
-                          const std::vector<float> &                    null_condition,
-                          const ACETrainResumePlan &                    plan,
-                          ACETrainResumeProgress                        progress,
-                          const std::string &                           resume_path,
-                          ACETrainCancel &                              cancellation,
-                          std::string &                                 error) {
+static bool train_adapter(const ACETrainCommand &          command,
+                          const ModelEntry &               dit_entry,
+                          ACETrainPreparedDataset &        prepared,
+                          const std::vector<std::string> & example_names,
+                          const std::vector<float> &       silence_latents,
+                          const std::vector<float> &       null_condition,
+                          const ACETrainResumePlan &       plan,
+                          ACETrainResumeProgress           progress,
+                          const std::string &              resume_path,
+                          ACETrainCancel &                 cancellation,
+                          std::string &                    error) {
     const std::string & base_model_fingerprint = plan.base_fingerprint;
     auto &              control                = *cancellation.control;
     if (prepared.empty() || example_names.size() != prepared.size()) {
@@ -680,14 +856,19 @@ static bool train_adapter(const ACETrainCommand &                       command,
                 ACETrainWindow           window;
                 const int                output_channels  = model.cfg.out_channels;
                 const int                context_channels = model.cfg.in_channels - output_channels;
-                if (!ace_train_crop_example(prepared[source_index], output_channels, context_channels,
-                                            model.cfg.patch_size, command.window, command.seed, epoch, source_index,
-                                            windowed, window, error)) {
+                const auto               prepared_example = prepared.get(source_index, error);
+                if (!prepared_example) {
+                    dit_ggml_free(&model);
+                    return false;
+                }
+                if (!ace_train_crop_example(*prepared_example, output_channels, context_channels, model.cfg.patch_size,
+                                            command.window, command.seed, epoch, source_index, windowed, window,
+                                            error)) {
                     dit_ggml_free(&model);
                     return false;
                 }
                 const float full_seconds =
-                    (float) prepared[source_index].real_temporal_length / ACE_TRAIN_LATENTS_PER_SECOND;
+                    (float) prepared_example->real_temporal_length / ACE_TRAIN_LATENTS_PER_SECOND;
                 const float offset_seconds = (float) window.first_latent / ACE_TRAIN_LATENTS_PER_SECOND;
                 const float window_seconds = (float) windowed.real_temporal_length / ACE_TRAIN_LATENTS_PER_SECOND;
                 if (command.window.max_seconds > 0.0f) {
@@ -939,12 +1120,12 @@ static bool run_training(const ACETrainCommand & command, ACETrainCancel & cance
     control.phase   = "pre-encode";
     control.message = "Preparing training audio and conditioning.";
     control.publish();
-    std::vector<ACETrainDiffusionExample> prepared;
-    std::vector<std::string>              example_names;
-    std::vector<float>                    silence_latents;
-    std::vector<float>                    null_condition;
+    ACETrainPreparedDataset  prepared;
+    std::vector<std::string> example_names;
+    std::vector<float>       silence_latents;
+    std::vector<float>       null_condition;
     if (!preprocess_dataset(command, *dit, *text_encoder, *vae, prepared, example_names, silence_latents,
-                            null_condition, sources, cancellation, error)) {
+                            null_condition, sources, plan, cancellation, error)) {
         return cancellation.cancelled;
     }
     if (train_cancel(&cancellation)) {

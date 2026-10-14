@@ -127,6 +127,7 @@ The script probes and records physical hardware before training;
 `--expected-device` rejects a mismatched description. Rediscover Vulkan indices
 after changing the runtime PATH or package composition.
 
-Disk preprocessing cache, resumed best-loss history/selection, WebUI training,
+Disk preprocessing cache and bounded tensor loading are described in
+`TRAINING_PREPROCESS_CACHE.md`. Resumed best-loss history/selection, WebUI training,
 Carey/PyTorch parity and downstream integration remain open. Current Metal LoRA
 and BF16 frozen-DiT backward gates remain in `METAL_TRAINING_HANDOFF.md`.
