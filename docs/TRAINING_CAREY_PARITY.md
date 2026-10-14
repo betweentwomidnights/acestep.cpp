@@ -44,7 +44,8 @@ the Python comparison is opt-in because CI does not contain Gary/Torch/models.
 
 The real-model comparator now accepts `--carey-root` and both adapter types.
 It uses Carey's model loader, loss-weight helper, PEFT implementation and AdamW
-factory, replaying exact native input/target/adapter tensors. Native and Torch
+factory, replaying native input/target tensors with explicit BF16 compute casts
+and controlled adapter tensors. Native and Torch
 both actually execute on the RTX 5070 Laptop (8151 MiB, driver 616.56).
 Native build: Windows MSVC Release, CUDA 12.8, dynamic backends, native CUDA
 architecture, `GGML_MAX_NAME=128`, `GGML_NATIVE=OFF`.
@@ -70,13 +71,13 @@ encoder length 8, Min-SNR gamma 5, LR `3e-5`, weight decay `0.01`, clip `1.0`.
 Both pass the directional gate (forward cosine >=0.99, loss relative error
 <=0.10, nonzero gradient cosines >=0.95, B/magnitude delta cosine >=0.90),
 with exact initial adapter values. These are deliberately **directional**
-tolerances: delta relative L2 is approximately 0.28-0.31, so this is not tight
+tolerances: delta relative L2 is approximately 0.28-0.32, so this is not tight
 numerical equivalence. AdamW is sensitive to sign changes in small gradients.
 The original zero-B DoRA fixture also passes with FP32 adapters.
 
-With the real Carey BF16 adapter policy, the zero-B DoRA fixture has close
+With the real Carey BF16 adapter policy, both zero/nonzero-B DoRA fixtures have close
 forward/gradient directions but **all magnitude updates round to zero** at
-this fixture's learning rate; native FP32 magnitude delta norm is `0.0237374`.
+this fixture's learning rate; native FP32 magnitude delta norm is about `0.023738`.
 Initial A/magnitude values are also rounded when loaded into BF16 storage.
 The comparator reports this as a failure rather than hiding it behind the
 large unchanged parameter norm. This is a precision-policy difference, not
@@ -132,6 +133,42 @@ tensors/random draws, rather than assuming seeds provide cross-runtime parity.
 - Current-revision Metal LoRA/DoRA/resume/inference and BF16 frozen-DiT backward
   remain separate gates. No Metal result is claimed here.
 
-See `TRAINING_HISTORY.md` for the persistent metric contract. Source revision
-and final GPU history regression evidence will be recorded after the final
-local runs complete.
+## Validation provenance
+
+Runtime source: `dcbe1785e756a49ce752f2ca83bb28851b799e6e`. Later changes to
+this evidence/history documentation do not change runtime or test sources.
+The full base-model nonzero-B LoRA/DoRA replays and the BF16-storage negative
+check were repeated at that exact revision. Their reports are in:
+
+- `build-release-validation/carey-dcbe-focused/report.json`
+- `build-release-validation/carey-dcbe-base-bf16-lora/parity_report.json`
+- `build-release-validation/carey-dcbe-base-bf16-dora/parity_report.fp32.json`
+- `build-release-validation/carey-dcbe-base-bf16-dora/parity_report.json`
+  (model-precision mode, intentionally fails equivalence).
+
+All 20 CTests pass in both CPU-only and dynamic CUDA/Vulkan Windows Release
+builds at `dcbe1785`. Final local trainer binary SHA256:
+`9441946a2c9debe5eb531377ec54b6c6cb0df251106fc46c59ad0216d7a936c2`.
+
+Balanced rank-8 XL Q4 LoRA/DoRA cold/warm/streaming/resume matrices remain
+byte-identical to the previous uncached `2d140f7d` binary on CUDA0 and NVIDIA
+Vulkan1. They verify finite metrics, actual accumulation sizes `[2,1,2,1]`,
+mean loss against persisted continuation, resumed update numbering and
+append-on-resume session boundaries. CUDA matrices ran during implementation
+before the source commit (`history-cuda-lora`, `history-cuda-dora`); the final
+Vulkan matrices ran at `dcbe1785` (`history-dcbe-vulkan-lora`,
+`history-dcbe-vulkan-dora`). Moving the identical loss graph builder into
+`train-loss.h` introduced no math change. Each directory's `summary.json`
+records commands, hardware and results. CUDA used Gary's shared CUDA 12.8
+runtime on PATH; Vulkan used only System32. Trainer logs confirm the actual
+requested DiT backend.
+
+At this update, CI Linux/macOS builds, lint, ggml checks and macOS universal
+tests/signing/notarization pass. CUDA 12.6 compilation and portable Windows
+packaging are still running; the live results are
+[CI Build](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38620329939),
+[ggml checks](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38620329933),
+and [release dry-run](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38620329996).
+These build checks do not validate Metal training or a clean Windows machine.
+
+See `TRAINING_HISTORY.md` for the persistent metric contract.

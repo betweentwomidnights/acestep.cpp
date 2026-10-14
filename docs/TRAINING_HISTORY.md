@@ -42,7 +42,8 @@ does not copy history. The native continuation continues to persist epoch loss
 and cursor state independently.
 
 On open, an incomplete final line from an interrupted writer is removed before
-appending. Complete newline-terminated records are preserved. Use one writer
+appending. Complete newline-terminated records are preserved. Live readers
+should ignore an unterminated final line and retry. Use one writer
 per output directory. A storage/serialization failure fails the job explicitly;
 nonfinite samples are never emitted as invalid JSON. The file is flushed per
 update, but is not a transactional or power-loss-durable optimizer journal.
