@@ -62,7 +62,7 @@ Torch; native XL Q4 is a new memory-saving path, not a claim of bitwise parity.
 | Area | Native implementation / action for migration |
 | --- | --- |
 | LoRA / DoRA | `--adapter-type lora` / `dora-rows`; Carey exposes `dora` and translates it to PEFT `use_dora`. Map the name explicitly; do not send `dora` to the native CLI. |
-| Balanced ranks | Native attention/balanced profiles cover all 24 base / 32 XL layers. Carey has matching projection-family rank/alpha multipliers. Native and Torch RNG initialization/rounding must still be compared on chosen ranks. |
+| Balanced ranks | Native attention/balanced profiles cover all 24 base / 32 XL layers. Saved native rank/alpha patterns and tensor ranks match Carey's balanced reference-rank-8 configuration across all 352 XL projections. See the low-rank follow-up below. Torch/native RNG initialization and numerical training parity remain open. |
 | Optimizer/loss | AdamW, accumulation, clipping, CFG dropout, two-draw logit-normal timesteps and Min-SNR exist natively. Map every option explicitly; native Min-SNR defaults off, whereas the Carey job defaults to `min_snr`. |
 | Defaults | Both use rank 64/alpha 128 in the job-facing defaults, but epochs, LR, warmup, checkpoint interval and adapter kind must come from the saved application plan, not implicit CLI defaults. |
 | Training windows | Native `--window-min-seconds`/`--window-max-seconds` bound DiT backward activation memory while retaining full-song conditioning. The application max-duration/preprocessing policy is a different operation; do not equate them. |
@@ -80,6 +80,70 @@ Torch; native XL Q4 is a new memory-saving path, not a claim of bitwise parity.
 These are visible migration gaps, not reasons to claim the existing Carey
 installation can switch runtimes immediately. This release prepares downloadable
 CLI/server components that can be tested through a native candidate first.
+
+## Low-rank balanced profiles — follow-up, 2026-10-13
+
+Keep the shared ggml CUDA low-rank issue in this audit until it is fixed and
+validated. It is a known limitation of the affected configurations, not a
+reason to change Carey's projection budgets or reject all rank-4 adapters.
+Do not silently clamp projection ranks or substitute the attention profile.
+
+Carey at `238549ab0052bc514a781e62e7a6fef6020dc710` passes the selected rank and
+balanced profile from `services/carey/train_lora_job.py` into
+`acestep/training_v2/cli/config_builder.py`. Its
+`adapter_profiles.py::build_balanced_projection_profile` computes
+`max(1, round(base_rank * multiplier))`, then supplies the per-family rank and
+alpha patterns to PEFT through `training/lora_utils.py`. DoRA uses the same
+LoRA configuration with `use_dora=True`, so it has the same projection ranks.
+The current `CareyAceTrainingModal.svelte` already accepts integer reference
+ranks starting at 1; the Python job validates positivity without clamping to 8.
+
+| Projection family | Balanced rank 4 | Balanced rank 8 |
+| --- | --- | --- |
+| Self attention Q / K / V / O | 1 / 2 / 5 / 4 | 2 / 3 / 10 / 7 |
+| Cross attention Q / K / V / O | 4 / 2 / 2 / 3 | 8 / 5 / 4 / 6 |
+| MLP gate / up / down | 2 / 3 / 3 | 5 / 6 / 6 |
+
+The native implementation uses the same multipliers and ties-to-even rounding.
+The current Carey environment (Torch 2.7.1+cu128, PEFT 0.18.1) was exercised with
+the actual profile builder and adapter injector on a tiny two-layer CPU model:
+all 22 injected projections had the expected A/B ranks for reference ranks 4
+and 8, for both LoRA and DoRA, and finite forward/backward results. This confirms
+that Carey really allocates rank-1 self-attention Q adapters at balanced rank 4;
+it is not a complete Carey GPU-training or Torch/native parity test.
+
+On the 5070, native ACE balanced rank 4 / XL Q4 aborts in CUDA OUT_PROD with
+an invalid/unsupported cuBLAS parameter; the older portable ACE binary also
+reproduces it. ACE attention rank 4 passes a bounded training run. Downloaded
+SA3 v0.1.4 (`da74bc15`, shared ggml `4ad3b30b`) passes one medium-base Q4 LoRA
+update at uniform rank 4, while uniform rank 1 aborts at the same OUT_PROD call.
+This points to shared rank-1/layout handling; the exact failing operator still
+needs isolation before a kernel patch is claimed.
+
+Balanced rank 8 / alpha 16 was also trained against XL-base Q4 on CUDA0 and
+NVIDIA Vulkan1 with both LoRA and DoRA-row. Each uninterrupted synthetic run
+completed four optimizer updates: three four-second WAVs, two epochs, batch 1,
+accumulation 2 (including an epoch's partial tail), checkpointed backward and
+two-second rotating windows. Inspecting all 352 saved XL projection pairs in
+each run confirms a minimum actual rank of 2 and rank/alpha patterns identical
+to Carey's helper. All four suites also pass byte-exact comparison of adapter,
+config, optimizer and trainer-state payloads after mid-epoch stop/resume,
+accumulation cancellation/resume and explicit legacy epoch migration. Changed
+LR/data/epoch budget, unapproved legacy resume and accidental output reuse are
+rejected before preprocessing. The balanced rank-8 continuation gate therefore
+passes on this NVIDIA GPU; the balanced rank-4 CUDA fix remains a deferred
+follow-up before exposing that native configuration as supported downstream.
+Runtime source is `2d140f7d46ebd037ea162e68a8a1a6673b1d39b4`,
+with shared ggml `4ad3b30bfe452efc5f4f9c0e111e017d9970292a`, using the same
+local Release/dynamic-backend build and 5070 as the rank-64 checks. CUDA uses
+Gary's shared 12.8.0 runtime. These synthetic checks establish execution and
+profile mapping, not convergence, full-song memory capacity or Metal support.
+
+Local investigation logs, exact commands, package checksums and actual PEFT
+tensor-rank results are under `build-release-validation/rank-investigation/`.
+Any future shared ggml fix needs low-rank operator coverage, LoRA/DoRA
+training/resume checks and coordinated exact-candidate consumer gates before
+adoption. No GitHub issue or shared ggml change is required to retain this note.
 
 ## GPU detection and quantization
 
@@ -103,10 +167,10 @@ silently replace XL-base with smaller base/turbo or dequantize the entire base.
 Fail with a useful memory/configuration error if the requested plan cannot fit.
 Rank 64 balanced/full-song workloads need their own measured acceptance run;
 a tiny smoke run establishes execution, not useful convergence or capacity.
-The new control regression additionally exposed a balanced rank-4 XL Q4 CUDA
-OUT_PROD failure, reproduced with the older portable binary at the same ggml pin.
-Do not generalize rank-64 validation to all ranks; see
-`TRAINING_CONTROL_VALIDATION.md` for the bounded workload and results.
+The low-rank follow-up above records passing balanced rank-8 LoRA/DoRA checks
+on NVIDIA CUDA/Vulkan and the deferred balanced rank-4 CUDA OUT_PROD failure.
+Do not generalize these measured ranks to every configuration; the broader
+rank-64 validation is recorded in `TRAINING_CONTROL_VALIDATION.md`.
 
 The downloaded portable CI packages passed XL-base Q4 LoRA training, full-state
 resume and functional inference on this GPU through CUDA and Vulkan. CUDA used
