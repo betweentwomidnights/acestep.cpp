@@ -115,3 +115,5 @@ binary can be supplied with `--baseline-bin-dir` for algorithm regression checks
 These are deterministic execution tests, not convergence, Carey/PyTorch numerical
 parity or full-song capacity acceptance. Current-revision Metal training remains
 the separate `METAL_TRAINING_HANDOFF.md` gate.
+Measured revisions, models, hardware and results are recorded in
+[TRAINING_CACHE_VALIDATION.md](TRAINING_CACHE_VALIDATION.md).

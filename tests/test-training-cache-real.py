@@ -60,6 +60,7 @@ def run(label, extra=(), baseline=False):
         log.write(json.dumps(command) + '\n'); log.flush()
         process = subprocess.run(command, cwd=root, env=env, stdout=log, stderr=log, timeout=900)
     assert process.returncode == 0, (root / (label + '.log')).read_text()[-4000:]
+    assert f'DiT backend: {a.backend}' in (root / (label + '.log')).read_text(), 'requested training device did not execute'
     results[label] = {'seconds': round(time.monotonic()-start, 3), 'command': command}
     return output
 
