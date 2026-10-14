@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 from pathlib import Path
 import struct
 import subprocess
@@ -61,6 +62,17 @@ def run(label, extra=(), baseline=False):
         process = subprocess.run(command, cwd=root, env=env, stdout=log, stderr=log, timeout=900)
     assert process.returncode == 0, (root / (label + '.log')).read_text()[-4000:]
     assert f'DiT backend: {a.backend}' in (root / (label + '.log')).read_text(), 'requested training device did not execute'
+    if not (baseline and a.baseline_bin_dir):
+        history = [json.loads(line) for line in (output / 'metrics.jsonl').read_text().splitlines()]
+        assert history and all(row['split'] == 'train' and row['epoch'] > 0 for row in history)
+        assert all(math.isfinite(row[k]) for row in history for k in ('lr', 'loss', 'grad_norm', 'step_s'))
+        assert all(row['grad_norm'] >= 0 and row['examples'] >= row['microbatches'] > 0 for row in history)
+        assert len({row['session'] for row in history}) == 1
+        assert [row['update'] for row in history] == list(range(history[0]['start_update'] + 1, history[-1]['update'] + 1))
+        if label != 'resumed':
+            assert history[0]['start_update'] == 0
+        else:
+            assert history[0]['start_update'] == 1
     results[label] = {'seconds': round(time.monotonic()-start, 3), 'command': command}
     return output
 
@@ -90,8 +102,27 @@ assert hashes() == before and '3 reused, 0 written' in log('warm')
 for component in ('VAE-Enc', 'TextEncoder', 'CondEncoder'):
     assert f'[Load] {component}' not in log('warm'), 'warm cache loaded preprocessing models'
 partial = run('partial', ['--steps', '1'])
+partial_state = json.loads((generation(partial) / 'trainer_state.json').read_text())['continuation']
+partial_metrics = json.loads((partial / 'metrics.jsonl').read_text().splitlines()[-1])
+assert partial_metrics['microbatches'] == partial_metrics['examples'] == 2
+assert math.isclose(partial_metrics['loss'], partial_state['epoch_loss'] / partial_state['epoch_batches'], rel_tol=1e-10)
 resumed = run('resumed', ['--resume', partial])
 same(baseline, resumed)
+assert [row['microbatches'] for row in map(json.loads, (cold / 'metrics.jsonl').read_text().splitlines())] == [2, 1, 2, 1]
+# Same-directory resume must append rather than erase the first invocation.
+in_place = root / 'in-place'
+shutil.copytree(partial, in_place)
+in_place_command = results['partial']['command'][:-2]
+in_place_command[in_place_command.index('--output') + 1] = str(in_place)
+in_place_command += ['--resume', str(in_place)]
+with (root / 'in-place-resume.log').open('w') as log_file:
+    process = subprocess.run(in_place_command, cwd=root, env=env, stdout=log_file, stderr=log_file, timeout=900)
+assert process.returncode == 0
+same(baseline, in_place)
+history = [json.loads(line) for line in (in_place / 'metrics.jsonl').read_text().splitlines()]
+assert [row['update'] for row in history] == [1, 2, 3, 4]
+assert len({row['session'] for row in history}) == 2
+assert [row['start_update'] for row in history] == [0, 1, 1, 1]
 if not a.quick:
     chunked = run('chunked', ['--preprocess-cache-dir', root / 'chunk-cache', '--preprocess-batch-size', '2'])
     same(baseline, chunked)

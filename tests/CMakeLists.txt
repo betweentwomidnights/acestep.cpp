@@ -115,6 +115,16 @@ target_link_libraries(test-train-preprocess-cache PRIVATE acestep-core)
 link_ggml_backends(test-train-preprocess-cache)
 ace_register_test(test-train-preprocess-cache)
 
+add_executable(test-train-history test-train-history.cpp)
+target_link_libraries(test-train-history PRIVATE acestep-core)
+link_ggml_backends(test-train-history)
+ace_register_test(test-train-history)
+
+# Opt-in comparator invokes this model-free production-math fixture explicitly.
+add_executable(test-train-carey-parity test-train-carey-parity.cpp)
+target_link_libraries(test-train-carey-parity PRIVATE acestep-core)
+link_ggml_backends(test-train-carey-parity)
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_test(NAME test-train-cli-control-smoke COMMAND "${Python3_EXECUTABLE}"

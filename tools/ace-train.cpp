@@ -10,6 +10,7 @@
 #include "train-checkpoint.h"
 #include "train-cli-control.h"
 #include "train-diffusion.h"
+#include "train-history.h"
 #include "train-preprocess-cache.h"
 #include "train-resume.h"
 #include "train-window.h"
@@ -787,6 +788,12 @@ static bool train_adapter(const ACETrainCommand &          command,
     diffusion_config.min_snr       = command.min_snr;
     diffusion_config.min_snr_gamma = command.min_snr_gamma;
 
+    ace_training::TrainHistory history;
+    if (!history.open(std::filesystem::u8path(command.output_dir), optimizer.step, error)) {
+        dit_ggml_free(&model);
+        return false;
+    }
+    double              update_loss_sum = 0;
     std::vector<size_t> order(prepared.size());
     auto                save = [&](const std::string & directory, bool final) {
         control.phase   = "saving";
@@ -928,6 +935,7 @@ static bool train_adapter(const ACETrainCommand &          command,
                 return false;
             }
             epoch_loss += loss;
+            update_loss_sum += double(loss) * collated.size();
             epoch_batches += 1;
             progress.epoch         = epoch;
             progress.next_batch    = batch_index + 1;
@@ -944,25 +952,37 @@ static bool train_adapter(const ACETrainCommand &          command,
             const bool update =
                 accumulator.microbatch_count == command.accumulation || batch_index + 1 == batches_per_epoch;
             if (update) {
+                const int    update_examples     = accumulator.example_count;
+                const int    update_microbatches = accumulator.microbatch_count;
+                const double update_loss         = update_loss_sum / update_examples;
+                double       grad_norm           = 0;
                 optimizer_config.learning_rate =
                     ace_train_learning_rate(command.learning_rate, optimizer.step, total_steps, command.warmup_steps,
                                             command.schedule, command.restart_count);
                 if (!ace_train_adapter_adamw_step_accumulated(*graph_adapters, state, optimizer, optimizer_config,
-                                                              accumulator, error)) {
+                                                              accumulator, error, &grad_norm)) {
                     ace_free_train_dit_checkpoint(checkpoint);
                     ace_free_train_dit_graph(graph);
                     dit_ggml_free(&model);
                     return false;
                 }
                 std::fprintf(stderr, "[Ace-Train] epoch=%d/%d step=%d/%d batch=%d/%d loss=%.6f lr=%.8g\n", epoch + 1,
-                             command.epochs, optimizer.step, total_steps, batch_index + 1, batches_per_epoch, loss,
-                             optimizer_config.learning_rate);
+                             command.epochs, optimizer.step, total_steps, batch_index + 1, batches_per_epoch,
+                             update_loss, optimizer_config.learning_rate);
                 control.step          = optimizer.step;
                 control.epoch         = epoch + 1;
-                control.loss          = loss;
+                control.loss          = update_loss;
                 control.learning_rate = optimizer_config.learning_rate;
                 control.step_seconds =
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - step_started).count();
+                if (!history.append(epoch + 1, optimizer.step, optimizer_config.learning_rate, update_loss, grad_norm,
+                                    control.step_seconds, update_microbatches, update_examples, error)) {
+                    ace_free_train_dit_checkpoint(checkpoint);
+                    ace_free_train_dit_graph(graph);
+                    dit_ggml_free(&model);
+                    return false;
+                }
+                update_loss_sum = 0;
                 control.message = "Optimizer update completed.";
                 control.publish();
                 step_started = std::chrono::steady_clock::now();

@@ -211,6 +211,12 @@ tensor residency and zero streams from disk. See the
 [preprocessing cache contract](docs/TRAINING_PREPROCESS_CACHE.md) for identities,
 memory limits, cancellation and cache cleanup ownership.
 
+Training also appends SA3-style `metrics.jsonl` history with loss, applied learning
+rate, pre-clip gradient norm and timing for each optimizer update. See the
+[history contract](docs/TRAINING_HISTORY.md) for accumulation and resume semantics,
+and the [Carey parity checks](docs/TRAINING_CAREY_PARITY.md) for numerical scope.
+Training loss does not select or rank the saved adapters.
+
 ## Server options
 
 ```

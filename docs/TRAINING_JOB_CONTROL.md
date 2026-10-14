@@ -128,6 +128,8 @@ The script probes and records physical hardware before training;
 after changing the runtime PATH or package composition.
 
 Disk preprocessing cache and bounded tensor loading are described in
-`TRAINING_PREPROCESS_CACHE.md`. Resumed best-loss history/selection, WebUI training,
-Carey/PyTorch parity and downstream integration remain open. Current Metal LoRA
-and BF16 frozen-DiT backward gates remain in `METAL_TRAINING_HANDOFF.md`.
+`TRAINING_PREPROCESS_CACHE.md`. SA3-style diagnostic history is documented in
+`TRAINING_HISTORY.md`; best-loss checkpoint ranking is intentionally excluded.
+WebUI training, full Carey/PyTorch parity and downstream integration remain open.
+Current Metal LoRA and BF16 frozen-DiT backward gates remain in
+`METAL_TRAINING_HANDOFF.md`.
