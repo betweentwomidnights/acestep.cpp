@@ -28,7 +28,8 @@ holds at most the configured chunk of prepared examples, plus one decoded audio
 file and the encoder's working memory. Training holds an LRU within the specified
 byte budget, plus the active example, microbatch/window/collation buffers and
 model/optimizer state. An example larger than the budget is read transiently and
-not retained in the LRU. The budget is not a limit on whole-process RAM or VRAM.
+not retained in the LRU. Accounting includes allocated vector capacity after
+padding. The budget is not a limit on whole-process RAM or VRAM.
 
 Cold chunks preserve model phases and `EVICT_STRICT`: the VAE, text encoder and
 condition encoder load sequentially, with one GPU module resident at a time.

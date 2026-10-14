@@ -85,6 +85,23 @@ int main() {
     invalid.target_latents[0] = NAN;
     expect(!data.write(0, invalid, error), "nonfinite tensors rejected");
     expect(data.write(0, a, error), "publish valid replacement");
+    // Padding a nearly full vector often grows capacity geometrically. Logical
+    // shape bytes must not undercount that allocation against the LRU budget.
+    ACETrainPreparedDataset allocated;
+    configure(allocated);
+    allocated.max_encoder_length           = 4;
+    auto near_full                         = a;
+    near_full.real_encoder_sequence_length = 3;
+    near_full.encoder_hidden.assign(12, 0.75f);
+    expect(allocated.write(0, near_full, error), "prepare vector-growth fixture");
+    auto grown = allocated.get(0, error);
+    expect(bool(grown), "read vector-growth fixture");
+    const size_t actual_bytes =
+        (grown->target_latents.capacity() + grown->context_latents.capacity() + grown->encoder_hidden.capacity()) *
+        sizeof(float);
+    expect(allocated.resident_bytes() == (actual_bytes <= allocated.memory_limit ? actual_bytes : 0),
+           "budget accounts for allocated capacity after padding");
+    expect(data.write(0, a, error), "restore original entry");
 #ifdef _WIN32
     HANDLE lock = CreateFileW(data.path(0).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     expect(lock != INVALID_HANDLE_VALUE, "simulate persistent reader lock");

@@ -290,7 +290,10 @@ class ACETrainPreparedDataset {
     size_t                                                                        resident = 0;
 
     static size_t tensor_bytes(const ACETrainDiffusionExample & e) {
-        return (e.target_latents.size() + e.context_latents.size() + e.encoder_hidden.size()) * sizeof(float);
+        // resize() may reserve more than the logical padded shape. Bound the
+        // actual owned tensor allocation, including that spare capacity.
+        return (e.target_latents.capacity() + e.context_latents.capacity() + e.encoder_hidden.capacity()) *
+               sizeof(float);
     }
 
     static void write_u64(std::ostream & output, uint64_t value) {
