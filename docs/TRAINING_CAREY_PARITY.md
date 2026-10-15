@@ -172,3 +172,72 @@ and [release dry-run](https://github.com/betweentwomidnights/acestep.cpp/actions
 These build checks do not validate Metal training or a clean Windows machine.
 
 See `TRAINING_HISTORY.md` for the persistent metric contract.
+
+## Real-data reference follow-up, 2026-10-15
+
+The user supplied a preferred XL-base Spark/SideStep adapter and its source
+audio/lyrics as the qualitative acceptance reference. Keep that role separate
+from a numerically matched trajectory. An exported adapter does not contain
+its preprocessing inputs, complete training configuration or optimizer state.
+The user is retrieving the original Spark configuration; do not infer its
+learning rate or schedule from the checkpoint's directory name.
+
+The reference is DoRA: 352 modules/1056 BF16 tensors, base rank 16/alpha 32,
+193 per-layer rank/alpha overrides, actual ranks 16 through 128, dropout 0.1.
+BF16 **export storage** does not prove the precision used for training or AdamW.
+The existing local native XL Q4 run is also DoRA, but uses balanced rank
+64/alpha 128, dropout 0, and F32 trainable state. Its immutable checkpoint
+records 150 completed epochs and 1950 optimizer updates. These are different
+projection budgets and training policies, not matched parity runs.
+
+Native inference can consume per-module adapter patterns. Native **training**
+currently constructs attention/balanced profiles and has no adapter-dropout
+implementation. Reproducing or continuing this arbitrary SideStep profile
+would require explicit rank/alpha-pattern support and matching dropout math,
+including deterministic recomputation/resume. Do not silently flatten those
+patterns or confuse adapter dropout with CFG conditioning dropout. This is a
+separate scope from the previously checked Carey balanced profile.
+
+The local reference inventory has 13 paired songs, 44.4 minutes total, all
+48 kHz stereo PCM16, with supplied lyrics for every song. Durations span
+119.4 to 291.8 seconds. The raw staging directory has one extra intro outside
+that paired set. Current sidecars contain short genre/BPM/key descriptions,
+not complete native conditioning metadata; time signatures were not supplied.
+Audio, metadata, lyrics and both reference adapters were SHA256-inventoried and
+reverified unchanged after the checks. No source asset is committed here.
+
+An isolated one-song fixture passes native dataset-format/audio validation and
+retains the supplied lyrics. Its missing time signature is explicitly an
+unreviewed model suggestion, so it is **not approved training input**.
+
+Caption checks on a 30-second excerpt (base and XL tokenizers) and its complete
+156.9-second song pass schema, same-seed replay, cancellation and actual CUDA
+execution with the 0.6B Q8 LM. Semantic acceptance remains open: suggested
+instrumentation/genre and instrumental descriptions conflict with the supplied
+metadata/lyrics. Generated prose/transcription was not promoted into training
+sidecars. Choosing the XL tokenizer did not resolve the excerpt disagreement.
+
+A first real-audio preprocessing probe also remains unresolved:
+
+- On three seconds of identical PCM, deterministic native VAE mean (BF16
+  weights/F32 activations, CUDA) vs Carey's VAE loaded in FP32 on CUDA has cosine
+  `0.9975624` and relative L2 `0.0699387`. This is not a precision-matched
+  comparison and does not test sampled posterior or full-song tiling.
+- Feeding identical native latents to both audio tokenizers yields 3/15 exact
+  FSQ codes for the native Q4 bundle vs the Torch tokenizer in FP32 on CPU.
+  Sixteen tokenizer tensors in that Q4 bundle are themselves quantized.
+- With the native BF16 base bundle, 7/15 codes match Torch. Its 32 stored
+  tokenizer tensors are bit-exact to the original Torch checkpoint when
+  converted to F32, and its input latents are byte-identical to the Q4 probe.
+  Backend/arithmetic precision and intermediate activations still need
+  isolation. The short probe neither proves a tokenizer bug nor closes parity;
+  caption errors must not simply be attributed to LM capacity without this work.
+
+Evidence is local under `build-release-validation/billie-reference-20261015/`:
+`manifest.json`, the three caption result/log directories,
+`preprocess-preflight/report.json`, `preprocess-bf16-control/comparison.json`
+and `tokenizer-weights.json`. The manifest records application/ggml checkouts
+and reference hashes; the preprocessing report records the executed native
+binary hash. This is initial fixture/preflight evidence, not a completed
+full-preprocessing or longer-trajectory gate. Prioritize precision-controlled
+VAE/tokenizer checks, then full conditioning and aligned longer-run experiments.
