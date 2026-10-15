@@ -77,6 +77,19 @@ invalid permutations, inconsistent steps and partial accumulation cursors.
 Seeds are derived from epoch/batch/example identities, so the saved cursor and
 order reproduce the sequence without importing SA3's stateful RNG format.
 
+The training algorithm identity is now `ace-native-epoch-seeds-v2`. This revision
+fixes cross-attention RMSNorm backward on CUDA by normalizing contiguous head
+rows before permutation. A v1 immutable plan cannot silently continue under
+the corrected gradient math. Import the PEFT adapter into a fresh job without
+old native continuation state when deliberately restarting from earlier weights;
+that restarts AdamW. The legacy override does not waive a recorded plan mismatch.
+
+Grouped-query attention training currently requires `--batch-size 1` because
+ggml's broadcasted matrix-multiply backward cannot reduce grouped heads across
+multiple batch items. Use `--accumulation` to increase the effective batch size.
+The CLI rejects this before preprocessing; both graph builders also reject it
+before reaching the ggml assertion.
+
 Keep the original `--epochs` on resume: ACE's linear/cosine schedules depend on
 the total epoch-derived step budget. `--steps N` is an optional **total optimizer
 step stop target** within that original budget, rather than additional steps.

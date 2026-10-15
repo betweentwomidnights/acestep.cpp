@@ -51,6 +51,7 @@ struct ACETrainDiTCheckpoint {
     struct ggml_cgraph *                    tail_graph        = nullptr;
     ggml_gallocr_t                          tail_allocator    = nullptr;
     struct ggml_tensor *                    velocity          = nullptr;
+    struct ggml_tensor *                    velocity_snapshot = nullptr;
     struct ggml_tensor *                    loss              = nullptr;
     std::vector<ggml_gallocr_t>             block_allocators;
     std::vector<ACETrainDiTCheckpointBlock> blocks;
@@ -127,11 +128,16 @@ static bool ace_build_train_dit_checkpoint(DiTGGML &                    model,
                                            int                          encoder_sequence_length,
                                            int                          batch_size,
                                            ACETrainDiTCheckpoint &      training,
-                                           std::string &                error) {
+                                           std::string &                error,
+                                           bool                         retain_velocity = false) {
     training = {};
     error.clear();
     if (!model.backend) {
         error = "DiT backend is not initialized";
+        return false;
+    }
+    if (batch_size > 1 && model.cfg.n_kv_heads != model.cfg.n_heads) {
+        error = "grouped-query attention training requires microbatch size 1; use gradient accumulation";
         return false;
     }
     if (temporal_length <= 0 || encoder_sequence_length <= 0 || batch_size <= 0 || model.cfg.patch_size <= 0 ||
@@ -363,6 +369,13 @@ static bool ace_build_train_dit_checkpoint(DiTGGML &                    model,
         ggml_set_name(training.loss, "flow_matching_loss");
         ggml_set_loss(training.loss);
         ggml_set_output(training.loss);
+        if (retain_velocity) {
+            // Diagnostic-only copy: backward may reuse the prediction buffer.
+            training.velocity_snapshot = ggml_dup(ctx, training.velocity);
+            ggml_set_name(training.velocity_snapshot, "velocity_snapshot");
+            ggml_set_output(training.velocity_snapshot);
+            ggml_build_forward_expand(training.tail_graph, training.velocity_snapshot);
+        }
         ggml_build_forward_expand(training.tail_graph, training.loss);
         ggml_build_backward_expand(ctx, training.tail_graph, nullptr);
         struct ggml_tensor * input_gradient = ggml_graph_get_grad(training.tail_graph, training.boundaries.back());

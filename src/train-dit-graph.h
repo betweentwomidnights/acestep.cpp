@@ -55,6 +55,10 @@ static bool ace_build_train_dit_graph(DiTGGML &                    model,
         error = "DiT backend is not initialized";
         return false;
     }
+    if (batch_size > 1 && model.cfg.n_kv_heads != model.cfg.n_heads) {
+        error = "grouped-query attention training requires microbatch size 1; use gradient accumulation";
+        return false;
+    }
     training.backend = model.backend;
     if (temporal_length <= 0 || encoder_sequence_length <= 0 || batch_size <= 0 || model.cfg.patch_size <= 0 ||
         temporal_length % model.cfg.patch_size != 0) {

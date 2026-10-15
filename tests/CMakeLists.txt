@@ -72,6 +72,15 @@ add_executable(test-train-step-parity test-train-step-parity.cpp)
 target_link_libraries(test-train-step-parity PRIVATE acestep-core)
 link_ggml_backends(test-train-step-parity)
 
+# Opt-in real-audio preprocessing emitter; requires explicit local models/data.
+add_executable(test-train-preprocess-real test-train-preprocess-real.cpp)
+target_link_libraries(test-train-preprocess-real PRIVATE acestep-core)
+link_ggml_backends(test-train-preprocess-real)
+
+add_executable(test-train-trajectory-real test-train-trajectory-real.cpp)
+target_link_libraries(test-train-trajectory-real PRIVATE acestep-core)
+link_ggml_backends(test-train-trajectory-real)
+
 # Register every self-contained test with CTest. Model-backed tests are
 # enabled when ACE_TEST_MODELS_DIR points at a complete registry.
 function(ace_register_test target)
@@ -101,6 +110,10 @@ ace_register_test(test-quantize-policy)
 
 ace_register_test(test-philox)
 ace_register_test(test-dit-linear-transform)
+add_executable(test-train-cross-attention test-train-cross-attention.cpp)
+target_link_libraries(test-train-cross-attention PRIVATE acestep-core)
+link_ggml_backends(test-train-cross-attention)
+ace_register_test(test-train-cross-attention)
 ace_register_test(test-dora-backend)
 ace_register_test(test-adapter-merge)
 ace_register_test(test-adapter-functional)

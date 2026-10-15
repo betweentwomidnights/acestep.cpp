@@ -59,6 +59,19 @@ The UI/Tauri lifecycle currently launches this Python job, not `ace-train`.
 Carey's production path explicitly disables model quantization and uses BF16
 Torch; native XL Q4 is a new memory-saving path, not a claim of bitwise parity.
 
+The intended native rank allocation remains **balanced**, as confirmed by the
+user on 2026-10-15. Fisher analysis and exact reproduction of the historical
+Spark map are optional reference work, not requirements for this balanced Q4
+release path. Keep the Spark adapter as the qualitative reference; do not
+equate the two rank budgets or infer musical equivalence before listening.
+
+Real-data comparison found and fixed cross-attention RMSNorm backward on CUDA;
+the training plan identity advances to v2 to reject silently continuing an old
+v1 optimizer trajectory. Current grouped-query models require microbatch size
+one with gradient accumulation; unsupported larger microbatches now fail before
+preprocessing. Full-song preprocessing differences and longer-run measurements
+are recorded in `TRAINING_CAREY_PARITY.md`.
+
 | Area | Native implementation / action for migration |
 | --- | --- |
 | LoRA / DoRA | `--adapter-type lora` / `dora-rows`; Carey exposes `dora` and translates it to PEFT `use_dora`. Map the name explicitly; do not send `dora` to the native CLI. |
