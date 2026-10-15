@@ -298,3 +298,174 @@ Python-3.12 warning does not establish which implementation actually ran.
 Original optimizer moments/intermediate native-continuation state are not
 included. The snapshot therefore supports preprocessing comparison and a
 fresh matched experiment, not an exact resume of the Spark training job.
+
+## Full-song preprocessing and longer replay, 2026-10-15
+
+The intended native target is **balanced rank allocation over XL Q4**, rather
+than reproducing the historical Fisher map. Fisher analysis, arbitrary map
+training and adapter dropout are separate reference features; they do not block
+testing this intended balanced path. The Spark export remains the user's musical
+reference. Neither four native epochs nor the decoder replay below establishes
+equivalent convergence or listening quality.
+
+### Full preprocessing on the 8 GB machine
+
+All 13 original songs pass complete native preprocessing with XL Q4 and regular
+base BF16. Carey's actual two-pass preprocessing also completes all 13 with
+regular base BF16 on CUDA, without a model-residency override. It reports zero
+failed samples and about 4607 MiB peak Torch allocations. The missing local
+unquantized XL checkpoint prevents a new Torch XL preprocessing comparison here;
+the attempted XL call fails before producing tensors. No checkpoint is downloaded
+or substituted. An XL BF16 training comparison remains work for the Spark.
+
+The comparison explicitly uses **caption only** with archived captions, lyrics,
+metadata and trigger tag. It does not reproduce the historical three-song genre
+subset or Gary's newer rotating genre policy. Originals remain immutable.
+
+| Component | Result and limits |
+| --- | --- |
+| Audio loading | All 13 native/Torch planar float sample arrays are bit-identical. These inputs are already 48 kHz stereo PCM16; this does not test resampling or other formats. |
+| Native sampled VAE targets | XL Q4 and base BF16 runs produce byte-identical target dumps for all 13 at the same per-example seeds and VAE. The DiT quantization choice does not alter this preprocessing stage. |
+| VAE lengths | Native real lengths match `floor(audio_samples/1920)` for all 13. Carey produces one fewer frame on `all the good girls go to hell`, `wish you were gay` and `xanny`. Its automatic 15-second/2-second tiling differs from native's 1024/64 latent-frame tiling. |
+| Sampled VAE values | Descriptive cosines span 0.9520–0.9828. Independent posterior RNG, tiling and compute/weight precision prevent treating this as an equivalence gate. Shared posterior noise and aligned tiling/precision remain necessary. |
+| Context | Silence-plus-ones masks are finite and all mask channels equal one. F32 native versus BF16 Torch silence values have cosine about 0.99999955, relative L2 about 0.00104. |
+| Text/lyric conditioning | Native encoders produce 295–840 tokens with inference-style lyric wrappers and variable lengths. Carey uses raw lyrics, fixed 256/512 input lengths, truncation and a packed 769-position output/mask. Native's silence timbre reference also differs from Carey's zero reference. These are substantive policies, not an elementwise parity pass. |
+
+Training preprocessing does **not** use the FSQ audio tokenizer. Its earlier
+code discrepancies remain a captioning/understanding investigation, separate
+from the VAE/text/condition path measured here. Source inspection also identifies
+F32-to-BF16 truncation in `convert.py`; matching original FP32, stored BF16 and
+loaded convolution precision is still required before assigning VAE differences
+to a kernel. No converter or model artifact is changed by this audit.
+
+The opt-in `test-train-preprocess-real` executable invokes production
+`ace_prepare_training_example` and emits audio, target, context, text/lyric and
+encoder dumps to a fresh directory. It requires explicit local GGUF/data paths.
+Local evidence lives under `billie-reference-20261015/full-preprocess-*` inside
+`build-release-validation/`; `full-preprocess-torch-base-bf16/report.json` records
+the actual Carey helper hashes and component results.
+
+### CUDA cross-attention backward fix
+
+The real-data replay exposed a defect hidden by the earlier tiny synthetic
+conditioning fixture: cross-attention applied RMSNorm to a permuted Q/K view.
+The pinned CUDA RMSNorm backward kernel reads its forward input as contiguous.
+Forward values remained correct while adapter gradients were wrong. Both full
+and checkpointed native backward produced the same affected loss and gradients.
+
+Normalizing contiguous per-head rows **before** permutation fixes the application
+graph without changing ggml or any sibling pin. The first real batch preserves
+native forward bytes exactly. Its native preclip gradient norm changes from
+6.06275 to 0.39164, versus Torch 0.39502. B/magnitude gradient cosines improve
+from 0.1920/0.1858 to 0.99955/0.99971. The correction applies to quantized and
+unquantized bases. Earlier byte-identity comparisons against the old native
+trainer remain historical evidence; corrected updates should not match that bug.
+
+The new model-free `test-train-cross-attention` checks production graph layout
+and finite differences with grouped heads and unequal query/encoder lengths.
+It also checks rejection of unsupported multi-example GQA graphs. The underlying
+ggml broadcasted `MUL_MAT` backward asserts for grouped heads with batch size
+greater than one. Current native GQA training therefore requires microbatch one;
+use accumulation for effective larger batches. This is distinct from rank-4
+CUDA OUT_PROD support. Any eventual shared-kernel fix requires the coordinated
+ggml workflow; no shared-fork change is made here.
+
+The derivative regression requests F32 matmul and checks central differences at
+both 0.01 and 0.02 perturbations, retaining the same error tolerance. Initial
+1e-3 perturbations were dominated by Vulkan GPU rounding, including with an F32
+precision request. This controlled operator test does not establish default
+Vulkan arithmetic equivalence; the actual Q4 training checks have their own
+execution/continuation scope.
+
+The immutable plan algorithm advances to `ace-native-epoch-seeds-v2`; an older
+recorded plan is rejected before preprocessing. Earlier PEFT weights remain
+usable for inference or a deliberate fresh-optimizer import. See
+`TRAINING_JOB_CONTROL.md`. Prediction retention in checkpointed graphs is opt-in
+for diagnostics; default production graphs do not allocate that extra copy.
+Before the cross-attention correction, retaining predictions was verified not
+to change any of 26 losses, norms, LRs or the final adapter bytes.
+
+### Real-data trajectories and remaining precision work
+
+The regular-base BF16 replay executes **26 updates**, two passes over the 13
+prepared songs, using deterministic 4–8-second rotating windows and complete
+native conditioning. It uses balanced rank 8/alpha 16 DoRA, FP32 trainable state,
+AdamW peak LR 3e-4, two warmup steps, cosine, clip 1, weight decay 0.01, CFG 0.15,
+mu 0/sigma 1 and Min-SNR gamma 5. The native fixture calls production checkpointed
+backward/AdamW; Torch imports Carey's model, PEFT, loss weighting and optimizer
+factories. Actual batches/initial weights/applied LRs are shared. This isolates
+decoder/optimizer trajectories, not Carey's Fabric job or original Spark run.
+
+After the fix, final A/B/magnitude parameter-delta cosines improve from roughly
+0.642/0.652/0.673 to 0.954/0.954/0.966. Nevertheless the worst independent forward
+comparison falls to 0.370 and relative loss error reaches 0.596: **longer-run
+numerical equivalence does not pass**. Both runs remain finite. Peak Torch
+allocations are about 5119 MiB.
+
+Keeping replayed timesteps FP32 instead of BF16 does not resolve that drift.
+Rebasing the worst update (17) onto the exact native update-16 adapter restores
+forward cosine to 0.99950, but B/magnitude gradient cosines remain about
+0.767/0.825 with BF16 CUDA compute. A Torch FP32 CPU diagnostic improves those
+gradient cosines to 0.944/0.936 and forward cosine to 0.99986. This supports
+further precision-controlled isolation; it does not establish that all remaining
+differences are precision or that another kernel is correct. No CPU ggml BF16
+backward result is claimed.
+
+The new reusable `test-train-trajectory-real` / `.py` fixtures preserve exact
+batches, initial adapters, metrics and selected snapshots. `--snapshot-step N`
+retains weights around an update and its gradients for rebased diagnostics;
+`--timestep-precision fp32` isolates that policy. Default Torch adapter precision
+is explicitly FP32 for comparison, while `model` retains the actual Carey cast.
+Reports are under `base-bf16-balanced-r8-26updates-*`; the local rebased
+diagnostic is `base-bf16-balanced-r8-26updates-diagnostic/update17-rebased*.json`.
+
+The practical XL Q4 **production CLI** test completes four epochs / **52 updates**
+over all 13 full-song preprocessed examples with balanced rank 64/alpha 128 DoRA,
+45–60-second rotating windows, full-song conditioning, peak LR 3e-4, five warmup
+steps and the same remaining optimizer/diffusion settings above. An independent
+stop at update 19 and resume to 52 reproduces every update's loss/LR/gradient norm
+and byte-identical final adapter, config, optimizer and trainer state. Native
+checkpoint pointers are resolved before comparing immutable generations.
+
+Two-second device-memory samples peak at 7122 MiB during the cold run and
+3992/3990 MiB in warm partial/resumed runs on the 8151 MiB RTX 5070 Laptop.
+These are sampled device totals, not guaranteed allocator high-water marks.
+The actual DiT logs confirm CUDA0 and use Gary's shared CUDA 12.8 runtime. Cold,
+partial and resumed invocations take about 243/73/118 seconds respectively.
+This supports practical Q4 execution and continuation, not full-track backward
+capacity, 150-epoch convergence or musical acceptance.
+
+Evidence: `xl-q4-balanced-r64-52updates/report.json`, per-run logs and GPU samples.
+The long-run binary SHA256 is
+`148253883162fc0230d8c016a8c60aca4eeed911265b5394cac6602df24ee8b8`.
+It contains the corrected graph and v2 plan; the later source additions reject
+unsupported larger microbatches and do not change this batch-one math. Runtime
+source for the completed fixes is `ffe48361fdfece1f6b131a921ed799956cc8bc2d`;
+ggml stays `4ad3b30bfe452efc5f4f9c0e111e017d9970292a`. All 21 model-free CTests
+pass in CPU-only and dynamic CUDA/Vulkan Windows builds. Current-revision Metal,
+XL BF16 on Spark, shared-noise preprocessing and tight longer-run parity remain
+open.
+
+Final local gates at runtime/test source
+`c8762963643b66baf782c890115e4017e3f61cb9`: 21/21 CTests pass in both Windows
+builds; the controlled production cross-attention regression passes on CPU,
+CUDA0 and NVIDIA Vulkan1. Balanced rank-8 XL Q4 **LoRA and DoRA** each pass the
+current uncached/cold/warm/streamed/mid-epoch and in-place resume matrix on both
+CUDA0 and NVIDIA Vulkan1. Adapter, config, optimizer and trainer-state payloads
+match within each backend. These quick synthetic matrices do not repeat the
+older corruption/cancellation suite or claim cross-backend byte identity.
+Vulkan runs use only System32 on PATH, with device selection confirmed by props
+and DiT execution logs. Evidence is in `crossnorm-final-{cuda,vulkan}-{lora,dora}`
+under `build-release-validation/`.
+
+Current source CI is tracked separately:
+[CI Build](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38817457978),
+[ggml checks](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38817457929),
+and [release dry-run](https://github.com/betweentwomidnights/acestep.cpp/actions/runs/38817457942).
+Build/signing/package status does not replace Metal training or clean-Windows
+runtime acceptance. `full-validation-summary.json` in the local Billie evidence
+directory records the final executable hashes; all original audio and the Spark
+adapter hashes were reverified unchanged. Gary's working repository advanced
+during this work, but the compared preprocessing helper files are unchanged
+between its earlier `a4de7db1` and final observed `85183da1`; per-run helper hashes
+remain the comparison provenance.
