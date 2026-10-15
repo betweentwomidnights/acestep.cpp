@@ -47,6 +47,11 @@ int main(int argc, char ** argv) {
     int norms = 0;
     for (int i = 0; i < ggml_graph_n_nodes(forward); ++i) {
         auto * node = ggml_graph_node(forward, i);
+        if (node->op == GGML_OP_MUL_MAT) {
+            // Small finite differences require F32 arithmetic. Vulkan's
+            // default F16 matmul rounding can exceed the perturbation itself.
+            ggml_mul_mat_set_prec(node, GGML_PREC_F32);
+        }
         if (node->op == GGML_OP_RMS_NORM) {
             ++norms;
             if (!ggml_is_contiguous(node->src[0])) {
@@ -93,24 +98,28 @@ int main(int argc, char ** argv) {
     ggml_backend_tensor_get(k_gradient, dk.data(), 0, dk.size() * sizeof(float));
     auto check = [&](ggml_tensor * parameter, std::vector<float> values, const std::vector<float> & gradients) {
         for (size_t i : { size_t(0), size_t(7), size_t(32), size_t(73) }) {
-            constexpr float eps      = 1e-3f;
-            const float     original = values[i];
-            float           losses[2];
-            for (int side = 0; side < 2; ++side) {
-                values[i] = original + (side == 0 ? eps : -eps);
-                ggml_backend_tensor_set(parameter, values.data(), 0, values.size() * sizeof(float));
-                if (ggml_backend_graph_compute(backend, forward) != GGML_STATUS_SUCCESS) {
+            const float original = values[i];
+            // Check two central-difference scales above GPU input rounding.
+            // Agreement at both prevents selecting a lucky perturbation.
+            for (float eps : { 0.01f, 0.02f }) {
+                float losses[2];
+                for (int side = 0; side < 2; ++side) {
+                    values[i] = original + (side == 0 ? eps : -eps);
+                    ggml_backend_tensor_set(parameter, values.data(), 0, values.size() * sizeof(float));
+                    if (ggml_backend_graph_compute(backend, forward) != GGML_STATUS_SUCCESS) {
+                        return false;
+                    }
+                    ggml_backend_tensor_get(loss, &losses[side], 0, sizeof(float));
+                }
+                values[i]             = original;
+                const float numerical = (losses[0] - losses[1]) / (2 * eps);
+                if (!std::isfinite(gradients[i]) ||
+                    std::fabs(numerical - gradients[i]) >
+                        2e-3f + 0.02f * std::max(std::fabs(numerical), std::fabs(gradients[i]))) {
+                    std::fprintf(stderr, "FAIL: gradient[%zu] eps=%g analytic=%g numerical=%g\n", i, eps, gradients[i],
+                                 numerical);
                     return false;
                 }
-                ggml_backend_tensor_get(loss, &losses[side], 0, sizeof(float));
-            }
-            values[i]             = original;
-            const float numerical = (losses[0] - losses[1]) / (2 * eps);
-            if (!std::isfinite(gradients[i]) ||
-                std::fabs(numerical - gradients[i]) >
-                    2e-3f + 0.02f * std::max(std::fabs(numerical), std::fabs(gradients[i]))) {
-                std::fprintf(stderr, "FAIL: gradient[%zu] analytic=%g numerical=%g\n", i, gradients[i], numerical);
-                return false;
             }
         }
         ggml_backend_tensor_set(parameter, values.data(), 0, values.size() * sizeof(float));
