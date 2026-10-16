@@ -72,6 +72,15 @@ of the preferred Spark adapter. A fresh 150-epoch native XL Q4 listening run
 is tracked separately in `TRAINING_CAREY_PARITY.md`; numerical parity and human
 musical acceptance remain distinct evidence.
 
+The native listening run completed 150 epochs / 1950 updates with finite
+adapter/optimizer tensors and a verified final checkpoint. A 120-second render
+exposed an additional 8 GB configuration requirement: default 1024-frame VAE
+decode tiles failed at CUDA allocation after diffusion; 256-frame tiles with
+64-frame overlap succeeded. The server and CLI already expose these controls.
+Gary's device policy must choose a suitable VAE tile size as well as a DiT
+quantization variant. This measured workaround does not identify a kernel bug;
+see `TRAINING_CAREY_PARITY.md` for the exact evidence and remaining acceptance.
+
 Real-data comparison found and fixed cross-attention RMSNorm backward on CUDA;
 the training plan identity advances to v2 to reject silently continuing an old
 v1 optimizer trajectory. Current grouped-query models require microbatch size

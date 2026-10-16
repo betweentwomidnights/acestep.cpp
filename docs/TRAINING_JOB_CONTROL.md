@@ -117,6 +117,9 @@ checkpoint; resume to a fresh output directory to branch an older checkpoint.
 at complete optimizer updates. Either cadence can be disabled with zero. Final
 and cooperative-cancel saves use the output root. Hosts should resolve the
 pointer before reading files and retain complete generations when moving state.
+Periodic epoch saves cover intermediate epochs. The final epoch saves at the
+output root, so hosts should use the published `final_adapter`/checkpoint fields
+instead of constructing `checkpoint-epoch-<epochs>` for the completed job.
 
 Older full-state checkpoints lack the immutable plan. They are rejected unless
 `--allow-legacy-resume` is explicit, require epoch-boundary counters compatible

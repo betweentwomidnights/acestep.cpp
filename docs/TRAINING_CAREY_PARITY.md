@@ -632,3 +632,46 @@ Startup verification: all 13 preprocessing cache entries were written, actual
 DiT execution reports CUDA0, and initial loss/LR/gradient-norm history is finite.
 The frozen trainer SHA256 is
 `37dac01814c016c8a88bad16cd951a643c3d7a1658ef0179add174c428e1c46e`.
+
+Completion verified on 2026-10-16: **150 epochs / 1950 updates** finished in
+6200.906 seconds (about 103.3 minutes). All loss/LR/preclip-gradient/timing rows
+are finite. The final checkpoint's four file fingerprints match its native
+manifest. All 1056 adapter and 2112 optimizer tensors are finite FP32; the
+352 balanced projections have actual ranks 16–80. The final adapter SHA256 is
+`12710fe94d0000f313bd5e152fee21e945c3085e86dcc85dc2269e4f95da87b6`.
+The full cold-preprocessing/training telemetry peaks at a sampled device total
+of 7635 MiB on the 8151 MiB GPU; this is not an allocator high-water mark.
+Mean loss over the first/last ten epochs is 0.772707/0.471703. These diagnostic
+statistics do not establish musical quality or select a checkpoint.
+
+Intermediate checkpoints exist at epochs 25/50/75/100/125. The final epoch-150
+checkpoint is the run root selected by `checkpoint.current`. The local listening
+worker incorrectly expected a separate `checkpoint-epoch-150` directory and
+stopped before rendering; its path was corrected and rendering restarted without
+retraining or changing the adapter. The original failure report is retained.
+
+The first 120-second base render completed all 50 DiT steps, then aborted during
+VAE CUDA allocation with `device not ready` at the default 1024/64 decode tiles.
+The same request succeeds with `--vae-chunk 256 --vae-overlap 64`, producing
+120 seconds of 48 kHz stereo PCM16. Use those smaller tiles consistently across
+the listening comparisons. This is a validated workaround on this machine,
+not proof of the underlying CUDA failure's cause or a shared-kernel fix. Both
+server and synthesis CLI expose the tile controls; the 8 GB downstream runtime
+configuration needs an appropriate VAE tile policy. Default large-tile inference
+must not be assumed to fit because Q4 training fits. The failed decode log and
+all recovery attempts remain in the local run directory.
+
+Source `8582af50` now passes CI Build, ggml checks and the complete Windows /
+signed-notarized universal macOS release dry run. No tag or release is published.
+Human listening acceptance and full numerical parity remain open.
+
+All **ten listening renders** subsequently completed: six caption-only variants
+(base, earlier native, Spark, new native epochs 50/100/150) and four novel-lyrics
+variants (base, earlier native, Spark, new native epoch 150). Every file is exactly
+120 seconds of 48 kHz stereo PCM16. Prompt/seed/settings equality is checked
+within each group, audio hashes are verified, and every variant within a group
+has a distinct payload. Logs confirm actual CUDA0 execution, 256/64 VAE tiles,
+and all 352 DoRA projections loaded with none skipped for each adapted render.
+Original levels are preserved. `listening-validation.json` records these checks;
+the local `README.md` links the comparison grid. No listening preference or
+musical acceptance has been recorded.
