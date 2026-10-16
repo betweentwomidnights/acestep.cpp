@@ -469,3 +469,117 @@ adapter hashes were reverified unchanged. Gary's working repository advanced
 during this work, but the compared preprocessing helper files are unchanged
 between its earlier `a4de7db1` and final observed `85183da1`; per-run helper hashes
 remain the comparison provenance.
+
+### Shared-noise VAE, tiling and conditioning follow-up — 2026-10-15
+
+The opt-in `test-vae-posterior-real` / `.py` pair emits the actual loaded native
+encoder weights, every tile's posterior parameters and retained bounds, shared
+posterior samples, and an independent legacy-seeded production encode. The
+comparator invokes Carey's actual `training_v2.preprocess_vae.tiled_vae_encode`
+and Diffusers distribution sampler. Canonical noise is rounded through BF16
+first so both implementations receive exactly representable identical values.
+Discarded overlap noise is zero; retained-core noise is shared. Reports preserve
+Carey's production reassembly separately from a corrected diagnostic reassembly.
+No model or original dataset is modified or downloaded.
+
+**Tail frame loss is fixed upstream.** The old algorithm rounded the partial
+right overlap in a penultimate tile. For the 221.1-second affected song at
+375/50 latent-frame chunk/overlap, its 352-frame penultimate window trimmed 50
+frames on the left and 28 on the right, retaining 274 instead of 275. Both old
+native and actual Carey returned 5526 frames instead of 5527. Integer core
+bounds on the known 1920-sample latent grid retain the missing frame. Overlap
+fallback now shrinks in latent-frame units to preserve that grid.
+
+The model-free regression covers all 1920 possible sub-frame tails around core
+and overlap boundaries for 375/50, 1024/64, 256/64 and zero-overlap geometry.
+An arithmetic audit of all 13 lengths reproduces exactly the three previously
+observed losses at Carey's geometry and removes them with corrected bounds.
+The complete affected song executes the corrected native encoder on CUDA0 and
+returns 5527 frames. The same song at native's existing 1024/64 geometry retains
+byte-identical legacy-seeded targets against the earlier full preprocessing
+dump. That geometry's trim bounds were unaffected for all 13 audited lengths;
+the new fixture does not change the default RNG stream.
+
+Prepared caches advance to `ace-full-song-preprocessing-v2`, and this identity
+is also included in the immutable resume plan. Older recorded plans cannot
+silently continue with potentially changed input tensors. Earlier weights can
+be imported as PEFT-only with fresh AdamW state. No converter, precision default,
+ggml pin or downstream Carey source is changed.
+
+Shared-noise results on the same full affected song, corrected 375/50 cores:
+
+| Comparison against default native CUDA VAE | Sample cosine | Relative L2 |
+| --- | --- | --- |
+| Stock Carey BF16 encoder/sampler, corrected diagnostic core assembly | 0.982871 | 0.18437 |
+| Torch loaded with the exact native effective convolution/Snake values, FP32 pointwise ops and FP16-rounded convolution inputs | 0.999730 | 0.02331 |
+| Same diagnostic values, FP16 convolution output before adding F32 bias | 0.999763 | 0.02187 |
+| Native 1024/64 versus native 375/50, identical noise/model/precision | 0.9999945 | 0.00332 |
+
+The tile-size comparison has similar seam and interior errors (both cosine
+about 0.9999945). Tiling geometry is therefore a much smaller observed effect
+than the stock BF16 compute policy for this song. These are measured component
+differences, not musical acceptance thresholds or decoder trajectory guarantees.
+The actual unchanged Carey tiler still returns 5526 frames at 375/50; its
+production output is reported as a shape mismatch rather than compared after
+silently shortening native output. The aligned diagnostic retains samples from
+the actual Torch posterior sampler before its legacy trim.
+
+On the three-second excerpt, native default versus stock Torch FP32 gives
+sample cosine 0.997562 and relative L2 0.07044; simply substituting native loaded
+weights changes little. Rounding convolution inputs to F16 improves cosine to
+0.999838. A separate **diagnostic** native run with
+`GGML_CUDA_CUBLAS_COMPUTE_TYPE=fp32`, compared with the matching effective-weight
+and F16-input Torch control, reaches 0.99999931 / relative L2 0.00117. The native
+convolution graph uses F16 im2col and the default CUDA GEMM policy; F32 tensor
+storage does not mean every multiplication accumulates in F32. This supports
+precision isolation without claiming bitwise equivalence. The production
+precision policy stays unchanged. The original 1024-frame FP32 diagnostic was
+stopped after saturating device memory; the successful full-song effective
+controls use 375-frame tiles (about 2.8 GiB peak Torch allocations).
+
+**Conditioning policy is now separated from arithmetic.** Reviewed production
+prompt builders plus actual Carey captures reconstruct identical caption strings
+for all 13 songs; none reaches the 256-token truncation limit. All reconstructed
+caption/lyric sequence lengths match the native feature dumps. Native BPE IDs
+were not captured by this audit. Native adds a language/lyric/EOS wrapper and
+uses variable lengths. Carey embeds raw lyrics with a 512-token limit; it drops
+82 tokens from `bury a friend`. Native's silence timbre input and Carey's zero
+input produce quite different timbre outputs (cosine about 0.134 on regular
+base). Preserve native training/inference consistency while deciding downstream
+policy; copying only one side's behavior would create a new mismatch.
+
+The new `test-cond-encoder-real` / `.py` fixture feeds identical native text,
+lyric and timbre features into the actual native condition encoder and Carey's
+`run_encoder`. Regular-base replay of the 531-token sample reproduces the native
+production dump byte for byte. Torch loads through the production CPU factory,
+then removes unused decoder/tokenizer/detokenizer before putting the condition
+encoder on CUDA; this is an explicit residency override. With shared features,
+packed cosine is about 0.99999, but the high-norm text segment dominates it:
+lyric-only cosine is about 0.9966–0.9978 (BF16/FP32), text about 0.999999 and
+silence timbre about 0.999995–1.0. The aggregate score must not hide remaining
+lyric arithmetic differences. XL Torch conditioning remains untested without
+the unquantized local checkpoint. Full Carey/Fabric training parity, current
+Metal validation and the earlier longer-run drift remain open.
+
+Repeat controls qualify the FP32 result: automatic Torch SDPA FP32 replay varies
+between identical calls here, while stock BF16 replay is byte-repeatable.
+Selecting Torch's math SDPA backend with deterministic algorithms and
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` makes both precisions byte-repeatable. FP32
+lyric cosine against the default native encoder then improves to 0.99997447.
+With native F32 GEMM and manual attention (`--native-no-fa`) as additional
+diagnostic overrides, packed/lyric/text/timbre cosines become approximately
+0.99999998 / 0.99999774 / 0.99999998 / 1.0, with lyric relative L2 0.00212.
+BF16 math attention still differs (lyric cosine about 0.9955 against default
+native), so choosing deterministic attention alone is not a BF16 equivalence
+fix. These controls support arithmetic-policy isolation rather than a new
+production default; they do not identify a particular faulty Torch kernel or
+close the previous decoder trajectory gate.
+
+Local evidence is under `billie-reference-20261015/vae-shared-*`,
+`condition-shared-base-8*` and `alignment-policy-report.json` in
+`build-release-validation/`. Default CUDA0 balanced-rank-8 XL Q4 LoRA and DoRA
+each pass the new preprocessing-v2 uncached/cold/warm/streamed/mid-epoch/in-place
+resume matrix; both Windows builds pass 21/21 model-free CTests. These quick
+matrices do not repeat the older corruption/cancellation tests or claim a new
+Metal/Vulkan full-song comparison. All three previously linked CI runs at
+`c8762963` completed successfully; current follow-up source needs its own CI.

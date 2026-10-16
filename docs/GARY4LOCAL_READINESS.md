@@ -72,6 +72,15 @@ one with gradient accumulation; unsupported larger microbatches now fail before
 preprocessing. Full-song preprocessing differences and longer-run measurements
 are recorded in `TRAINING_CAREY_PARITY.md`.
 
+The shared-noise follow-up fixes a VAE tail-trimming defect shared with Carey's
+current tiler: a partial right overlap could remove a complete core frame.
+Prepared caches and resume plans now record preprocessing v2. Shared-noise
+measurements identify substantial precision differences, and same-feature
+condition replay separates arithmetic from lyric/timbre policy. Caption prompts
+match for all 13 supplied songs; lyric wrappers, truncation and silence versus
+zero timbre remain meaningful differences. Tight preprocessing and longer-run
+training equivalence are still open; see the follow-up evidence in that document.
+
 | Area | Native implementation / action for migration |
 | --- | --- |
 | LoRA / DoRA | `--adapter-type lora` / `dora-rows`; Carey exposes `dora` and translates it to PEFT `use_dora`. Map the name explicitly; do not send `dora` to the native CLI. |
@@ -223,7 +232,7 @@ gate; startup on this Visual Studio machine does not establish it.
    complete-as-repaint and progress/results/audio transport. ACE's `/synth`
    JSON/multipart and `/job` contracts differ from Carey's endpoints.
 3. Add a native training job owner, explicit option mapping, dataset staging,
-   status/cancel handling, resume plan validation, best/final registration and
+   status/cancel handling, resume plan validation, completed/checkpoint registration and
    model-family checks. Stop generation and competing services before training.
 4. Run CUDA and Vulkan through core + one backend and the shared CUDA runtime,
    then standalone. Confirm the requested GPU in logs and test unavailable

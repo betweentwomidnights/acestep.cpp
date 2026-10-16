@@ -422,6 +422,7 @@ static bool make_resume_plan(const ACETrainCommand &                 command,
     // v2 fixes CUDA cross-attention RMSNorm backward on permuted views.
     // Older optimizer state must not silently resume under changed gradients.
     yyjson_mut_obj_add_str(doc, root, "algorithm", "ace-native-epoch-seeds-v2");
+    yyjson_mut_obj_add_str(doc, root, "preprocessing", ACE_TRAIN_PREPROCESS_ALGORITHM);
     auto * settings = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "settings", settings);
     auto integer = [&](const char * name, int value) {
@@ -560,7 +561,7 @@ static bool prepare_cache_identities(const ACETrainCommand &    command,
         auto *           key = yyjson_mut_obj(doc);
         yyjson_mut_doc_set_root(doc, key);
         yyjson_mut_obj_add_int(doc, key, "schema_version", 1);
-        yyjson_mut_obj_add_str(doc, key, "algorithm", "ace-full-song-preprocessing-v1");
+        yyjson_mut_obj_add_str(doc, key, "algorithm", ACE_TRAIN_PREPROCESS_ALGORITHM);
         yyjson_mut_obj_add_str(doc, key, "application", ACE_VERSION);
         yyjson_mut_obj_add_str(doc, key, "release", ACE_RELEASE_VERSION);
         yyjson_mut_obj_add_str(doc, key, "ggml", ACE_GGML_REVISION);

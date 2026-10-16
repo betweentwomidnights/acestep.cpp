@@ -11,6 +11,9 @@
 #include <string>
 #include <vector>
 
+// Included in both prepared-cache and immutable resume-plan identities.
+static constexpr const char * ACE_TRAIN_PREPROCESS_ALGORITHM = "ace-full-song-preprocessing-v2";
+
 enum ACETrainTagPosition {
     ACE_TRAIN_TAG_PREPEND,
     ACE_TRAIN_TAG_APPEND,

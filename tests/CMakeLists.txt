@@ -77,6 +77,14 @@ add_executable(test-train-preprocess-real test-train-preprocess-real.cpp)
 target_link_libraries(test-train-preprocess-real PRIVATE acestep-core)
 link_ggml_backends(test-train-preprocess-real)
 
+add_executable(test-vae-posterior-real test-vae-posterior-real.cpp)
+target_link_libraries(test-vae-posterior-real PRIVATE acestep-core)
+link_ggml_backends(test-vae-posterior-real)
+
+add_executable(test-cond-encoder-real test-cond-encoder-real.cpp)
+target_link_libraries(test-cond-encoder-real PRIVATE acestep-core)
+link_ggml_backends(test-cond-encoder-real)
+
 add_executable(test-train-trajectory-real test-train-trajectory-real.cpp)
 target_link_libraries(test-train-trajectory-real PRIVATE acestep-core)
 link_ggml_backends(test-train-trajectory-real)

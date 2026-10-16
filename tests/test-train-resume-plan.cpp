@@ -39,6 +39,8 @@ int main() {
     ACETrainResumePlan plan;
     std::string        error;
     expect(make_resume_plan(command, dit, text, vae, sources, plan, error), "build native plan");
+    expect(plan.json.find(ACE_TRAIN_PREPROCESS_ALGORITHM) != std::string::npos,
+           "preprocessing algorithm is part of the immutable plan");
     expect(plan.total_steps == 6 && plan.batches_per_epoch == 3, "partial accumulation counts as an update");
     ACETrainResumeProgress original;
     original.next_batch    = 2;
@@ -59,6 +61,23 @@ int main() {
         return ok;
     };
     expect(restore(original, plan, 0, 1), "mid-epoch optimizer-boundary cursor is valid");
+    {
+        auto   legacy   = plan;
+        auto * doc      = yyjson_read(plan.json.data(), plan.json.size(), 0);
+        auto * modified = yyjson_doc_mut_copy(doc, nullptr);
+        yyjson_mut_obj_remove_key(yyjson_mut_doc_get_root(modified), "preprocessing");
+        char * json = yyjson_mut_write(modified, 0, nullptr);
+        legacy.json = json;
+        free(json);
+        yyjson_mut_doc_free(modified);
+        yyjson_doc_free(doc);
+        const auto             state = ace_train_continuation(legacy, original);
+        auto *                 saved = yyjson_read(state.data(), state.size(), 0);
+        ACETrainResumeProgress actual;
+        expect(!ace_train_restore_progress(yyjson_doc_get_root(saved), plan, 0, 1, actual, error),
+               "resume plans predating corrected VAE preprocessing are rejected");
+        yyjson_doc_free(saved);
+    }
     auto invalid       = original;
     invalid.next_batch = invalid.epoch_batches = 1;
     expect(!restore(invalid, plan, 0, 1), "partial accumulated update is not resumable");

@@ -84,6 +84,13 @@ the corrected gradient math. Import the PEFT adapter into a fresh job without
 old native continuation state when deliberately restarting from earlier weights;
 that restarts AdamW. The legacy override does not waive a recorded plan mismatch.
 
+The immutable plan also records `preprocessing: ace-full-song-preprocessing-v2`.
+This corrects partial-tail VAE overlap trimming and invalidates v1 prepared
+caches. Plans without this field are rejected before preprocessing, including
+earlier v2 training plans: their input tensors may differ after the correction.
+Use the same PEFT-only, fresh-optimizer import when intentionally carrying
+weights forward. The posterior RNG and default precision policy are unchanged.
+
 Grouped-query attention training currently requires `--batch-size 1` because
 ggml's broadcasted matrix-multiply backward cannot reduce grouped heads across
 multiple batch items. Use `--accumulation` to increase the effective batch size.
