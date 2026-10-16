@@ -10,6 +10,15 @@ Carey environment (Torch `2.7.1+cu128`, PEFT `0.18.1`); shared ggml remains
 profile builder/injector is unchanged from Gary `238549ab`.
 No Gary or ggml files are modified by this work.
 
+Reference roles clarified by the user on 2026-10-16: Carey is a best-effort
+downstream trainer intended to approach SideStep's capabilities. Equivalence
+between Carey, the official ACE-Step trainer and the historical SideStep run
+has not been established. Carey comparisons remain useful for isolating bugs
+and documenting policies; they do not prove reproduction of the supplied
+Billie adapter. The Spark/SideStep adapter remains the user's musical reference.
+Listening validation of native XL Q4 training is a separate task from numerical
+Carey parity, and can proceed while that numerical investigation remains open.
+
 ## Controlled production-math fixtures
 
 `test-train-carey-parity.cpp` calls native production batch preparation,
@@ -583,3 +592,43 @@ resume matrix; both Windows builds pass 21/21 model-free CTests. These quick
 matrices do not repeat the older corruption/cancellation tests or claim a new
 Metal/Vulkan full-song comparison. All three previously linked CI runs at
 `c8762963` completed successfully; current follow-up source needs its own CI.
+
+### Longer native listening run — started 2026-10-16
+
+A fresh run at source `8582af506a554c1a93aecea63e62f7ff366a4e24` targets 150
+epochs / 1950 updates on the RTX 5070 Laptop. The executable and all local ggml
+DLLs are snapshotted so subsequent rebuilds cannot change this job's runtime.
+Model, dataset, executable, backend DLL and shared CUDA DLL hashes are recorded.
+The 13 full songs and original archived caption/lyric sidecars are copied into
+an isolated local dataset; caption-only conditioning is explicit.
+
+Settings: XL-base Q4_K_M, balanced reference rank 64 / alpha 128 DoRA-row, fresh
+FP32 trainable/AdamW state, batch/accumulation 1/1, 150 epochs, peak LR 3e-4,
+100 warmup steps, cosine, weight decay 0.01, gradient clip 1, CFG dropout 0.15,
+mu 0 / sigma 1, Min-SNR gamma 5, checkpointed backward, seed 42, and rotating
+45–60-second windows with full-song preprocessing and conditioning. Checkpoints
+are retained every 25 epochs. No best-loss selection or old optimizer import is
+used. This repeats the practical native profile rather than the Spark Fisher
+map, adapter dropout or mixed-caption/genre preprocessing.
+
+Local job: `build-release-validation/billie-listening-20261016/`. Its `plan.json`
+records exact commands and hashes; `training-progress.json`, `train/metrics.jsonl`
+and `runner-status.json` report execution. `cancel.requested` requests cooperative
+cancellation. The serial worker releases training resources before generating
+matched listening renders at native epochs 50/100/150 and from the old native
+150-epoch adapter, Spark epoch-137 adapter and unadapted Q4 base. All variants
+use the current functional inference path at scale 1, identical per-prompt
+seeds, 50 inference steps, CFG 7 and shift 3. It reuses the earlier no-lyrics and
+novel-lyrics request fixtures. Older native training used earlier sidecars and
+gradient math, so this is not an isolated numerical before/after experiment.
+
+This entry records the job's plan/start, not successful completion or listening
+acceptance. The worker writes `report.json` and a linked listening index after
+the corresponding phases finish. Neither finite loss nor a lower loss selects
+a musical winner. Current source CI Build and ggml checks passed; its Windows/
+macOS release dry run was still running when this job started.
+
+Startup verification: all 13 preprocessing cache entries were written, actual
+DiT execution reports CUDA0, and initial loss/LR/gradient-norm history is finite.
+The frozen trainer SHA256 is
+`37dac01814c016c8a88bad16cd951a643c3d7a1658ef0179add174c428e1c46e`.

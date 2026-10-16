@@ -65,6 +65,13 @@ Spark map are optional reference work, not requirements for this balanced Q4
 release path. Keep the Spark adapter as the qualitative reference; do not
 equate the two rank budgets or infer musical equivalence before listening.
 
+Carey itself is the user's best-effort downstream trainer, not a verified
+reproduction of SideStep's historical run. Native/Carey component comparisons
+help isolate defects, but Carey equivalence alone cannot establish reproduction
+of the preferred Spark adapter. A fresh 150-epoch native XL Q4 listening run
+is tracked separately in `TRAINING_CAREY_PARITY.md`; numerical parity and human
+musical acceptance remain distinct evidence.
+
 Real-data comparison found and fixed cross-attention RMSNorm backward on CUDA;
 the training plan identity advances to v2 to reject silently continuing an old
 v1 optimizer trajectory. Current grouped-query models require microbatch size
