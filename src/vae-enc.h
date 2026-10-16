@@ -46,7 +46,21 @@ struct VAEEncLatentSampler {
     std::mt19937_64                 generator;
     std::normal_distribution<float> normal;
 
+    // Opt-in reference diagnostics. Production uses the original RNG stream.
+    const float * shared_noise      = nullptr;
+    size_t        shared_noise_size = 0, shared_noise_offset = 0;
+    void (*observe)(const float *, int, int, int, int, int, int, void *) = nullptr;
+    void * observer_data                                                 = nullptr;
+
     explicit VAEEncLatentSampler(uint64_t seed) : generator(seed), normal(0.0f, 1.0f) {}
+
+    float draw() {
+        if (shared_noise) {
+            GGML_ASSERT(shared_noise_offset < shared_noise_size);
+            return shared_noise[shared_noise_offset++];
+        }
+        return normal(generator);
+    }
 };
 
 static float vae_enc_standard_deviation(float scale) {
@@ -67,7 +81,13 @@ static void vae_enc_extract_latents(const float *         raw,
                                     int                   count,
                                     float *               latent_out,
                                     int                   destination_offset,
-                                    VAEEncLatentSampler * sampler) {
+                                    VAEEncLatentSampler * sampler,
+                                    int                   audio_offset = 0,
+                                    int                   audio_count  = 0) {
+    if (sampler && sampler->observe) {
+        sampler->observe(raw, raw_temporal_length, source_offset, count, destination_offset, audio_offset, audio_count,
+                         sampler->observer_data);
+    }
     for (int time = 0; time < count; ++time) {
         const int source_time = source_offset + time;
         for (int channel = 0; channel < 64; ++channel) {
@@ -75,7 +95,7 @@ static void vae_enc_extract_latents(const float *         raw,
             float       latent = mean;
             if (sampler) {
                 const float scale = raw[(size_t) (64 + channel) * raw_temporal_length + source_time];
-                latent += vae_enc_standard_deviation(scale) * sampler->normal(sampler->generator);
+                latent += vae_enc_standard_deviation(scale) * sampler->draw();
             }
             latent_out[(size_t) (destination_offset + time) * 64 + channel] = latent;
         }
@@ -322,7 +342,7 @@ static int vae_enc_encode_with_sampler(VAEEncoder *          m,
     std::vector<float> raw(128 * T_latent);
     ggml_backend_tensor_get(m->graph_output, raw.data(), 0, out_bytes);
 
-    vae_enc_extract_latents(raw.data(), T_latent, 0, T_latent, latent_out, 0, sampler);
+    vae_enc_extract_latents(raw.data(), T_latent, 0, T_latent, latent_out, 0, sampler, 0, T_audio);
 
     fprintf(stderr, "[VAE-Enc] Encode%s: T_audio=%d -> T_latent=%d (%.2fs @ 48kHz)\n", sampler ? " sampled" : "",
             T_audio, T_latent, (float) T_audio / 48000.0f);
@@ -348,6 +368,20 @@ static int vae_enc_encode_sampled(VAEEncoder *  m,
 
 // Tiled encode for long audio (same chunking strategy as decoder)
 // chunk_size: latent frames per tile, overlap: context frames on each side
+static void vae_enc_core_bounds(int   raw_frames,
+                                int   core_start,
+                                int   core_end,
+                                int   window_start,
+                                int & trim_start,
+                                int & core_frames) {
+    // Tile origins are on the 1920-sample latent grid. Keep complete frames
+    // belonging to the core. Rounding the partial right overlap can discard a
+    // complete core frame when a penultimate window reaches the audio's end.
+    trim_start    = (core_start - window_start) / 1920;
+    const int end = std::min(raw_frames, (core_end - window_start) / 1920);
+    core_frames   = std::max(0, end - trim_start);
+}
+
 static int vae_enc_encode_tiled(VAEEncoder *          m,
                                 const float *         audio,       // [T_audio, 2] interleaved stereo
                                 int                   T_audio,
@@ -357,13 +391,12 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
                                 int                   overlap    = 64,
                                 VAEEncLatentSampler * sampler    = nullptr) {
     // Work in audio-sample space. Each latent frame = 1920 audio samples.
+    // Shrink in latent-frame units to preserve the integer latent grid.
+    while (chunk_size - 2 * overlap <= 0 && overlap > 0) {
+        overlap /= 2;
+    }
     int audio_chunk   = chunk_size * 1920;
     int audio_overlap = overlap * 1920;
-
-    // Shrink overlap until stride is positive
-    while (audio_chunk - 2 * audio_overlap <= 0 && audio_overlap > 0) {
-        audio_overlap /= 2;
-    }
 
     // Short audio: encode directly
     if (T_audio <= audio_chunk) {
@@ -376,8 +409,7 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
     fprintf(stderr, "[VAE-Enc] Tiled encode: %d tiles (chunk=%d, overlap=%d, stride=%d audio samples)\n", num_steps,
             audio_chunk, audio_overlap, audio_stride);
 
-    float downsample_factor = 0.0f;
-    int   latent_write_pos  = 0;
+    int latent_write_pos = 0;
 
     for (int i = 0; i < num_steps; i++) {
         // Core range in audio samples (the part we keep)
@@ -385,6 +417,9 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
         int core_end   = core_start + audio_stride;
         if (core_end > T_audio) {
             core_end = T_audio;
+        }
+        if (core_end / 1920 == core_start / 1920) {
+            continue;  // A final sub-frame core contributes no complete latent.
         }
 
         // Window with overlap context
@@ -405,20 +440,8 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
             return -1;
         }
 
-        // Determine downsample factor from first tile
-        if (i == 0) {
-            downsample_factor = (float) tile_T / (float) win_len;
-            fprintf(stderr, "[VAE-Enc] Downsample factor: %.6f (expected ~1/1920)\n", downsample_factor);
-        }
-
-        // Trim in latent frames (mirror of decoder trim logic)
-        int added_start = core_start - win_start;
-        int trim_start  = (int) roundf((float) added_start * downsample_factor);
-        int added_end   = win_end - core_end;
-        int trim_end    = (int) roundf((float) added_end * downsample_factor);
-
-        int end_idx  = (trim_end > 0) ? (tile_T - trim_end) : tile_T;
-        int core_len = end_idx - trim_start;
+        int trim_start = 0, core_len = 0;
+        vae_enc_core_bounds(tile_T, core_start, core_end, win_start, trim_start, core_len);
         if (core_len <= 0) {
             continue;
         }
@@ -433,7 +456,8 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
         std::vector<float> raw(128 * tile_T);
         ggml_backend_tensor_get(m->graph_output, raw.data(), 0, out_bytes);
 
-        vae_enc_extract_latents(raw.data(), tile_T, trim_start, core_len, latent_out, latent_write_pos, sampler);
+        vae_enc_extract_latents(raw.data(), tile_T, trim_start, core_len, latent_out, latent_write_pos, sampler,
+                                win_start, win_len);
 
         latent_write_pos += core_len;
     }

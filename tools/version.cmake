@@ -26,7 +26,9 @@ if(NOT DATE_RESULT EQUAL 0)
     set(GIT_DATE "unknown")
 endif()
 
-set(CONTENT "#pragma once\n#define ACE_VERSION \"${GIT_HASH} (${GIT_DATE})\"\n")
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${SRC_DIR}/ggml"
+    OUTPUT_VARIABLE GGML_HASH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+set(CONTENT "#pragma once\n#define ACE_VERSION \"${GIT_HASH} (${GIT_DATE})\"\n#define ACE_RELEASE_VERSION \"${PROJECT_VERSION}\"\n#define ACE_GGML_REVISION \"${GGML_HASH}\"\n")
 
 if(EXISTS "${OUTPUT}")
     file(READ "${OUTPUT}" EXISTING)

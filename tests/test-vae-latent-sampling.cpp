@@ -13,6 +13,41 @@ static int fail(const char * message) {
 }
 
 int main() {
+    // Every sub-frame tail around representative tile
+    // boundaries. Retained cores must cover each complete frame exactly once.
+    for (const auto & geometry : {
+             std::pair<int, int>{ 375,  50 },
+              { 1024, 64 },
+              { 256,  64 },
+              { 8,    0  }
+    }) {
+        const int chunk = geometry.first * 1920, overlap = geometry.second * 1920;
+        const int stride = chunk - 2 * overlap;
+        for (int tail = 0; tail < 1920; ++tail) {
+            for (int boundary : { 0, 1, geometry.second - 1, geometry.second, geometry.second + 1 }) {
+                if (boundary < 0) {
+                    continue;
+                }
+                const int samples = 3 * stride + boundary * 1920 + tail;
+                int       written = 0;
+                for (int start = 0; start < samples; start += stride) {
+                    const int end       = std::min(samples, start + stride);
+                    const int win_start = std::max(0, start - overlap);
+                    const int win_end   = std::min(samples, end + overlap);
+                    int       trim = 0, count = 0;
+                    vae_enc_core_bounds((win_end - win_start) / 1920, start, end, win_start, trim, count);
+                    if (written != start / 1920 || trim != (start - win_start) / 1920 ||
+                        count != end / 1920 - start / 1920) {
+                        return fail("tiled VAE loses or duplicates a complete core frame");
+                    }
+                    written += count;
+                }
+                if (written != samples / 1920) {
+                    return fail("tiled VAE frame count differs from untiled downsampling");
+                }
+            }
+        }
+    }
     if (std::fabs(vae_enc_standard_deviation(0.0f) - (std::log(2.0f) + 1e-4f)) > 1e-6f ||
         std::fabs(vae_enc_standard_deviation(100.0f) - 100.0001f) > 1e-4f ||
         std::fabs(vae_enc_standard_deviation(-100.0f) - 1e-4f) > 1e-7f) {
@@ -53,6 +88,26 @@ int main() {
     for (float value : sampled_a) {
         if (!std::isfinite(value)) {
             return fail("VAE posterior sampling produced a non-finite latent");
+        }
+    }
+
+    // Explicit shared draws must follow retained frame/channel order, even
+    // when tiled extraction trims overlap and appends to an existing output.
+    std::vector<float>  noise(64, 0.5f), shared(128, -1.0f);
+    VAEEncLatentSampler controlled(42);
+    controlled.shared_noise      = noise.data();
+    controlled.shared_noise_size = noise.size();
+    for (int channel = 0; channel < 64; ++channel) {
+        raw[(size_t) (64 + channel) * temporal_length + 1] = 0.0f;
+    }
+    vae_enc_extract_latents(raw.data(), temporal_length, 1, 1, shared.data(), 1, &controlled);
+    if (controlled.shared_noise_offset != 64) {
+        return fail("shared posterior noise cursor does not match retained frames");
+    }
+    for (int channel = 0; channel < 64; ++channel) {
+        const float expected = float(channel * 10 + 1) + vae_enc_standard_deviation(0.0f) * 0.5f;
+        if (shared[channel] != -1.0f || std::fabs(shared[64 + channel] - expected) > 1e-5f) {
+            return fail("shared posterior noise changed trimming, layout or standard deviation math");
         }
     }
 

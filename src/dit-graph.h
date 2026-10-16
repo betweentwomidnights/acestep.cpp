@@ -322,21 +322,22 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
         v = dit_ggml_linear(ctx, m, ly->ca_v_proj, enc);
     }
 
-    // reshape to [D, heads, seq, N] then permute to [D, seq, heads, N]
+    // Normalize contiguous per-head rows before permuting. CUDA RMS_NORM_BACK
+    // reads the forward input as contiguous; normalizing a permuted view gives
+    // the right forward values but incorrect training gradients.
     q = ggml_reshape_4d(ctx, q, D, Nh, S, N);
-    q = ggml_permute(ctx, q, 0, 2, 1, 3);  // [D, S, Nh, N]
-
     k = ggml_reshape_4d(ctx, k, D, Nkv, enc_S, N);
-    k = ggml_permute(ctx, k, 0, 2, 1, 3);  // [D, enc_S, Nkv, N]
-
-    v = ggml_reshape_4d(ctx, v, D, Nkv, enc_S, N);
-    v = ggml_permute(ctx, v, 0, 2, 1, 3);  // [D, enc_S, Nkv, N]
 
     // QK-norm (per head)
     q = ggml_rms_norm(ctx, q, c.rms_norm_eps);
     q = ggml_mul(ctx, q, dit_ggml_f32(ctx, ly->ca_q_norm));
     k = ggml_rms_norm(ctx, k, c.rms_norm_eps);
     k = ggml_mul(ctx, k, dit_ggml_f32(ctx, ly->ca_k_norm));
+
+    q = ggml_permute(ctx, q, 0, 2, 1, 3);  // [D, S, Nh, N]
+    k = ggml_permute(ctx, k, 0, 2, 1, 3);  // [D, enc_S, Nkv, N]
+    v = ggml_reshape_4d(ctx, v, D, Nkv, enc_S, N);
+    v = ggml_permute(ctx, v, 0, 2, 1, 3);  // [D, enc_S, Nkv, N]
 
     // no RoPE for cross-attention
     // mask blocks padding positions in encoder hidden states

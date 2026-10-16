@@ -28,6 +28,7 @@
 //   /synth      DiT + Text-Enc + VAE
 //   /understand LM + DiT + VAE
 
+#include "audio-analysis.h"
 #include "audio-io.h"
 #include "model-registry.h"
 #include "model-store.h"
@@ -35,6 +36,7 @@
 #include "pipeline-synth.h"
 #include "pipeline-understand.h"
 #include "request.h"
+#include "runtime-device.h"
 #include "synth-batch-runner.h"
 #include "task-types.h"
 #include "vae.h"
@@ -1079,7 +1081,9 @@ static void understand_worker(std::shared_ptr<Job> job,
                               float *              src_interleaved,
                               int                  src_len,
                               std::vector<float>   src_latents,
-                              int                  src_T_latent) {
+                              int                  src_T_latent,
+                              bool                 caption_only   = false,
+                              ace_analysis::Result local_analysis = {}) {
     if (job->cancel.load()) {
         free(src_interleaved);
         job->status.store(JobStatus::CANCELLED);
@@ -1118,8 +1122,10 @@ static void understand_worker(std::shared_ptr<Job> job,
     std::vector<float> captured_latent;
     int                captured_T_latent = 0;
     const float *      src_lat_ptr       = src_latents.empty() ? nullptr : src_latents.data();
-    int rc = ace_understand_generate(ctx, src_interleaved, src_len, src_lat_ptr, src_T_latent, &ace_req, &out,
-                                     &captured_latent, &captured_T_latent, server_cancel_job, (void *) &job->cancel);
+    int                rc =
+        ace_understand_generate(ctx, src_interleaved, src_len, src_lat_ptr, src_T_latent, &ace_req, &out,
+                                caption_only ? nullptr : &captured_latent, caption_only ? nullptr : &captured_T_latent,
+                                server_cancel_job, (void *) &job->cancel);
     ace_understand_free(ctx);
     free(src_interleaved);
 
@@ -1140,9 +1146,57 @@ static void understand_worker(std::shared_ptr<Job> job,
         g_loaded_vae.clear();
     }
 
-    std::string json_part = "[" + request_to_json(&out) + "]";
-    job->result_body      = multipart_build_json_latent(json_part, captured_latent, captured_T_latent);
-    job->result_mime      = MULTIPART_MIME;
+    if (job->cancel.load()) {
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
+    if (caption_only) {
+        // This API provides suggestions, never writes sidecars or chooses a
+        // trainer's genre/trigger/lyric policy. Keep both estimators visible.
+        if (out.caption.find_first_not_of(" \t\r\n") == std::string::npos ||
+            out.caption.find("<think>") != std::string::npos || out.caption.find("</think>") != std::string::npos ||
+            out.caption.find("<|audio_code_") != std::string::npos ||
+            out.caption.find("\xef\xbf\xbd") != std::string::npos) {
+            fprintf(stderr, "[Server] Caption model returned empty or malformed text\n");
+            job->status.store(JobStatus::FAILED);
+            return;
+        }
+        auto * doc  = yyjson_mut_doc_new(nullptr);
+        auto * root = yyjson_mut_obj(doc);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_add_int(doc, root, "schema_version", 1);
+        yyjson_mut_obj_add_strcpy(doc, root, "caption", out.caption.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "prompt", out.caption.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "lyrics", out.lyrics.c_str());
+        yyjson_mut_obj_add_str(doc, root, "genre", "");
+        yyjson_mut_obj_add_null(doc, root, "is_instrumental");
+        yyjson_mut_obj_add_int(doc, root, "bpm", out.bpm);
+        yyjson_mut_obj_add_strcpy(doc, root, "keyscale", out.keyscale.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "time_signature", out.timesignature.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "language", out.vocal_language.c_str());
+        yyjson_mut_obj_add_real(doc, root, "duration", double(src_len) / 48000);
+        yyjson_mut_obj_add_int(doc, root, "lm_seed", ace_req.lm_seed);
+        yyjson_mut_obj_add_strcpy(doc, root, "lm_model", lm_name.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "synth_model", dit_name.c_str());
+        yyjson_mut_obj_add_strcpy(doc, root, "vae", vae_name.c_str());
+        yyjson_mut_obj_add_val(doc, root, "local_analysis", ace_analysis::result_json(doc, local_analysis));
+        yyjson_write_err error;
+        char *           json = yyjson_mut_write_opts(doc, 0, nullptr, nullptr, &error);
+        if (!json) {
+            fprintf(stderr, "[Server] Cannot serialize caption: %s\n", error.msg);
+            yyjson_mut_doc_free(doc);
+            job->status.store(JobStatus::FAILED);
+            return;
+        }
+        job->result_body = json;
+        free(json);
+        yyjson_mut_doc_free(doc);
+        job->result_mime = "application/json";
+    } else {
+        std::string json_part = "[" + request_to_json(&out) + "]";
+        job->result_body      = multipart_build_json_latent(json_part, captured_latent, captured_T_latent);
+        job->result_mime      = MULTIPART_MIME;
+    }
     job->status.store(JobStatus::DONE);
     fprintf(stderr, "[Server] Job %s done (understand)\n", job->id.c_str());
 }
@@ -1154,7 +1208,7 @@ static void understand_worker(std::shared_ptr<Job> job,
 //   part "src_latents": pre-encoded latent bytes (raw f32, [T*64])
 // returns: JSON {"id":"N"} immediately. Result is multipart/mixed of one
 // JSON part and one optional latent part.
-static void handle_understand(const httplib::Request & req, httplib::Response & res) {
+static void handle_understand_request(const httplib::Request & req, httplib::Response & res, bool caption_only) {
     if (g_registry.lm.empty() || g_registry.dit.empty() || g_registry.vae.empty()) {
         json_error(res, 501, "Understand requires LM, DiT and VAE models");
         return;
@@ -1182,6 +1236,42 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         const std::string & json = req.form.get_field("request");
         if (!request_parse_json(&ace_req, json.c_str())) {
             json_error(res, 400, "Multipart: invalid JSON in 'request' part");
+            return;
+        }
+    }
+
+    ace_analysis::Result local_analysis;
+    std::vector<float>   caption_audio;
+    int                  caption_rate = 0;
+    if (caption_only) {
+        if (!req.form.has_file("audio") || req.form.has_file("src_latents")) {
+            json_error(res, 400, "Caption requires an 'audio' WAV upload; latent-only captioning is not supported");
+            return;
+        }
+        const auto valid_model = [](const std::vector<ModelEntry> & bucket, const std::string & name) {
+            return name.empty() ? bucket.size() == 1 : registry_find(bucket, name.c_str()) != nullptr;
+        };
+        if (!valid_model(g_registry.lm, ace_req.lm_model) || !valid_model(g_registry.dit, ace_req.synth_model) ||
+            !valid_model(g_registry.vae, ace_req.vae)) {
+            json_error(res, 400,
+                       "Select exact lm_model, synth_model and vae names when a bucket is ambiguous; unknown names are "
+                       "rejected");
+            return;
+        }
+        if (!std::isfinite(ace_req.lm_temperature) || ace_req.lm_temperature < 0 || ace_req.lm_temperature > 2 ||
+            !std::isfinite(ace_req.lm_top_p) || ace_req.lm_top_p <= 0 || ace_req.lm_top_p > 1 || ace_req.lm_top_k < 0) {
+            json_error(res, 400, "Invalid caption sampling parameters");
+            return;
+        }
+        try {
+            double duration = 0;
+            local_analysis  = ace_analysis::analyze_wav_buffer(req.form.get_file("audio").content, duration,
+                                                               &caption_audio, &caption_rate);
+        } catch (const std::length_error & error) {
+            json_error(res, 413, error.what());
+            return;
+        } catch (const std::exception & error) {
+            json_error(res, 400, error.what());
             return;
         }
     }
@@ -1214,7 +1304,10 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         }
         // decode directly from multipart buffer (WAV/MP3 auto-detected)
         int     T_audio = 0;
-        float * planar  = audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
+        float * planar =
+            caption_only ?
+                audio_resample(caption_audio.data(), int(caption_audio.size() / 2), caption_rate, 48000, 2, &T_audio) :
+                audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
         if (!planar || T_audio <= 0) {
             json_error(res, 400, "Failed to decode audio");
             return;
@@ -1236,12 +1329,49 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
 
     request_resolve_lm_seed(&ace_req);
 
-    work_push([job, ace_req, src_interleaved, src_len, latents = std::move(src_latents), src_T_latent]() mutable {
-        understand_worker(job, ace_req, src_interleaved, src_len, std::move(latents), src_T_latent);
+    work_push([job, ace_req, src_interleaved, src_len, latents = std::move(src_latents), src_T_latent, caption_only,
+               local_analysis]() mutable {
+        understand_worker(job, ace_req, src_interleaved, src_len, std::move(latents), src_T_latent, caption_only,
+                          local_analysis);
     });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
     res.set_content(body, "application/json");
+}
+
+static void handle_understand(const httplib::Request & req, httplib::Response & res) {
+    handle_understand_request(req, res, false);
+}
+
+static void handle_caption(const httplib::Request & req, httplib::Response & res) {
+    handle_understand_request(req, res, true);
+}
+
+static void handle_analyze(const httplib::Request & req, httplib::Response & res) {
+    if (!req.is_multipart_form_data() || !req.form.has_file("audio")) {
+        json_error(res, 400, "Analyze requires an 'audio' WAV upload");
+        return;
+    }
+    try {
+        double     duration = 0;
+        const auto result   = ace_analysis::analyze_wav_buffer(req.form.get_file("audio").content, duration);
+        auto *     doc      = yyjson_mut_doc_new(nullptr);
+        auto *     root     = ace_analysis::result_json(doc, result);
+        yyjson_mut_doc_set_root(doc, root);
+        yyjson_mut_obj_add_real(doc, root, "duration", duration);
+        char * json = yyjson_mut_write(doc, 0, nullptr);
+        yyjson_mut_doc_free(doc);
+        if (!json) {
+            json_error(res, 500, "Cannot serialize analysis result");
+            return;
+        }
+        res.set_content(json, "application/json");
+        free(json);
+    } catch (const std::length_error & error) {
+        json_error(res, 413, error.what());
+    } catch (const std::exception & error) {
+        json_error(res, 400, error.what());
+    }
 }
 
 // decode worker: VAE decode only. Loads the requested VAE from the store,
@@ -1532,7 +1662,63 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     yyjson_mut_val * root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
-    yyjson_mut_obj_add_str(doc, root, "version", ACE_VERSION);
+    yyjson_mut_obj_add_str(doc, root, "version", ACE_RELEASE_VERSION);
+    yyjson_mut_obj_add_str(doc, root, "build_revision", ACE_VERSION);
+    yyjson_mut_obj_add_str(doc, root, "service", "acestep");
+    yyjson_mut_obj_add_int(doc, root, "api_version", 1);
+    // Enumeration loads backend libraries, but never model weights or a listener.
+    static std::once_flag backends_loaded;
+    std::call_once(backends_loaded, [] { ggml_backend_load_all(); });
+    auto             selected = ace_runtime_device(std::getenv("GGML_BACKEND"));
+    yyjson_mut_val * hardware = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "hardware", hardware);
+    if (selected) {
+        size_t free_bytes = 0, total_bytes = 0;
+        ggml_backend_dev_memory(selected, &free_bytes, &total_bytes);
+        yyjson_mut_obj_add_str(doc, hardware, "selected_device", ggml_backend_dev_name(selected));
+        auto type = ggml_backend_dev_type(selected);
+        yyjson_mut_obj_add_bool(doc, hardware, "accelerator_available",
+                                type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU);
+        yyjson_mut_obj_add_uint(doc, hardware, "memory_total_bytes", total_bytes);
+        yyjson_mut_obj_add_uint(doc, hardware, "memory_free_bytes", free_bytes);
+    }
+    yyjson_mut_val * devices = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "devices", devices);
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        auto   device     = ggml_backend_dev_get(i);
+        size_t free_bytes = 0, total_bytes = 0;
+        ggml_backend_dev_memory(device, &free_bytes, &total_bytes);
+        yyjson_mut_val * entry = yyjson_mut_obj(doc);
+        yyjson_mut_arr_add_val(devices, entry);
+        yyjson_mut_obj_add_str(doc, entry, "name", ggml_backend_dev_name(device));
+        yyjson_mut_obj_add_str(doc, entry, "description", ggml_backend_dev_description(device));
+        const char * registry = ggml_backend_reg_name(ggml_backend_dev_backend_reg(device));
+        yyjson_mut_obj_add_str(doc, entry, "backend", !strcmp(registry, "MTL") ? "Metal" : registry);
+        yyjson_mut_obj_add_str(doc, entry, "registry_backend", registry);
+        auto type = ggml_backend_dev_type(device);
+        yyjson_mut_obj_add_str(doc, entry, "type",
+                               type == GGML_BACKEND_DEVICE_TYPE_GPU  ? "gpu" :
+                               type == GGML_BACKEND_DEVICE_TYPE_IGPU ? "igpu" :
+                                                                       "cpu");
+        yyjson_mut_obj_add_uint(doc, entry, "memory_total_bytes", total_bytes);
+        yyjson_mut_obj_add_uint(doc, entry, "memory_free_bytes", free_bytes);
+    }
+    yyjson_mut_val * capabilities = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "capabilities", capabilities);
+    yyjson_mut_obj_add_bool(doc, capabilities, "native_training_cli", true);
+    yyjson_mut_obj_add_bool(doc, capabilities, "training_http", false);
+    yyjson_mut_obj_add_bool(doc, capabilities, "functional_adapters", true);
+    yyjson_mut_obj_add_bool(doc, capabilities, "quantized_frozen_base_training", true);
+    yyjson_mut_obj_add_bool(doc, capabilities, "caption_http", true);
+    yyjson_mut_obj_add_bool(doc, capabilities, "local_audio_analysis", true);
+    // A single inference encoding heuristic would misrepresent XL training
+    // memory (rank, duration and checkpointing matter). The application must
+    // choose an explicit family/encoding and validate its workload budget.
+    yyjson_mut_val * training = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, root, "training", training);
+    yyjson_mut_obj_add_str(doc, training, "executable", "ace-train");
+    yyjson_mut_obj_add_str(doc, training, "xl_base_low_memory_encoding", "Q4_K_M");
+    yyjson_mut_obj_add_bool(doc, training, "automatic_memory_fit", false);
 
     // helper: build a JSON array of model entry names
     auto add_names = [&](yyjson_mut_val * parent, const char * key, const std::vector<ModelEntry> & bucket) {
@@ -1616,7 +1802,7 @@ static void usage(const char * prog) {
             "\n"
             "Adapter:\n"
             "  --adapters <dir>        Directory of adapters\n"
-            "  --adapter-mode <mode>   functional or merge (default: merge)\n"
+            "  --adapter-mode <mode>   functional or merge (default: functional)\n"
             "\n"
             "Memory control:\n"
             "  --keep-loaded           Keep models in VRAM between requests\n"
@@ -1624,6 +1810,9 @@ static void usage(const char * prog) {
             "  --vae-overlap <N>       Overlap frames per side (default: %d)\n"
             "\n"
             "Server:\n"
+            "  --version              Print the release version and exit\n"
+            "  --props                Print runtime JSON without models or a port\n"
+            "  --device <name>        auto, cpu, cuda, vulkan, metal, or exact GGML device\n"
             "  --host <addr>           Listen address (default: 127.0.0.1)\n"
             "  --port <N>              Listen port (default: 8080)\n"
             "  --max-batch <N>         LM batch limit (default: %d)\n"
@@ -1638,15 +1827,30 @@ static void usage(const char * prog) {
 }
 
 int main(int argc, char ** argv) {
+    if (argc == 2 && !strcmp(argv[1], "--version")) {
+        puts(ACE_RELEASE_VERSION);
+        return 0;
+    }
     ace_lm_default_params(&g_lm_params);
     ace_synth_default_params(&g_synth_params);
+    g_synth_params.functional_adapter = true;
 
-    const char * host         = "127.0.0.1";
+    const char * host         = std::getenv("ACE_HOST");
     int          port         = 8080;
-    const char * models_dir   = nullptr;
-    const char * adapters_dir = nullptr;
+    const char * models_dir   = std::getenv("ACE_MODELS_DIR");
+    const char * adapters_dir = std::getenv("ACE_ADAPTERS_DIR");
+    const char * device       = std::getenv("ACE_DEVICE");
+    const char * adapter_mode = std::getenv("ACE_ADAPTER_MODE");
+    const char * port_string  = std::getenv("ACE_PORT");
+    bool         props_only   = false;
+    if (!host || !*host) {
+        host = "127.0.0.1";
+    }
+    if (!device || !*device) {
+        device = std::getenv("GGML_BACKEND");
+    }
 
-    if (argc < 2) {
+    if (argc < 2 && !models_dir) {
         usage(argv[0]);
         return 1;
     }
@@ -1654,15 +1858,14 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--models") && i + 1 < argc) {
             models_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--props")) {
+            props_only = true;
+        } else if (!strcmp(argv[i], "--device") && i + 1 < argc) {
+            device = argv[++i];
         } else if (!strcmp(argv[i], "--adapters") && i + 1 < argc) {
             adapters_dir = argv[++i];
         } else if (!strcmp(argv[i], "--adapter-mode") && i + 1 < argc) {
-            const char * mode = argv[++i];
-            if (strcmp(mode, "functional") && strcmp(mode, "merge")) {
-                fprintf(stderr, "[Server] ERROR: adapter-mode must be functional or merge\n");
-                return 1;
-            }
-            g_synth_params.functional_adapter = !strcmp(mode, "functional");
+            adapter_mode = argv[++i];
         } else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc) {
             g_lm_params.max_seq = atoi(argv[++i]);
 
@@ -1678,7 +1881,7 @@ int main(int argc, char ** argv) {
         } else if (!strcmp(argv[i], "--host") && i + 1 < argc) {
             host = argv[++i];
         } else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
-            port = atoi(argv[++i]);
+            port_string = argv[++i];
         } else if (!strcmp(argv[i], "--max-batch") && i + 1 < argc) {
             g_max_batch = atoi(argv[++i]);
 
@@ -1705,7 +1908,50 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // --models is required
+    if (adapter_mode) {
+        if (strcmp(adapter_mode, "functional") && strcmp(adapter_mode, "merge")) {
+            fprintf(stderr, "[Server] ERROR: adapter-mode must be functional or merge\n");
+            return 1;
+        }
+        g_synth_params.functional_adapter = !strcmp(adapter_mode, "functional");
+    }
+    if (port_string) {
+        char * end   = nullptr;
+        long   value = strtol(port_string, &end, 10);
+        if (!*port_string || *end || value < 1 || value > 65535) {
+            fprintf(stderr, "[Server] ERROR: port must be an integer from 1 to 65535\n");
+            return 1;
+        }
+        port = (int) value;
+    }
+    ggml_backend_load_all();
+    auto selected = ace_runtime_device(device);
+    if (!selected) {
+        fprintf(stderr, "[Server] ERROR: requested device '%s' is unavailable\n", device ? device : "auto");
+        return 1;
+    }
+    // Initialize the chosen device so an explicitly selected GPU cannot silently
+    // pass the install probe and later fall back to another backend.
+    auto probe = ggml_backend_dev_init(selected, nullptr);
+    if (!probe) {
+        fprintf(stderr, "[Server] ERROR: could not initialize requested device\n");
+        return 1;
+    }
+    ggml_backend_free(probe);
+#ifdef _WIN32
+    _putenv_s("GGML_BACKEND", ggml_backend_dev_name(selected));
+#else
+    setenv("GGML_BACKEND", ggml_backend_dev_name(selected), 1);
+#endif
+    if (props_only) {
+        httplib::Request  req;
+        httplib::Response res;
+        handle_props(req, res);
+        puts(res.body.c_str());
+        return 0;
+    }
+
+    // --models is required for serving, but never for the installation probe.
     if (!models_dir) {
         fprintf(stderr, "[Server] ERROR: --models is required\n");
         usage(argv[0]);
@@ -1810,6 +2056,8 @@ int main(int argc, char ** argv) {
     svr.Post("/lm", handle_lm);
     svr.Post("/synth", handle_synth);
     svr.Post("/understand", handle_understand);
+    svr.Post("/caption", handle_caption);
+    svr.Post("/analyze", handle_analyze);
     svr.Post("/vae", handle_vae);
     svr.Get("/health", [](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");

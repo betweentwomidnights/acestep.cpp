@@ -10,6 +10,7 @@ the forward result, loss, every adapter gradient, and every updated parameter.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from contextlib import nullcontext
 import json
 import math
@@ -69,7 +70,7 @@ def aggregate_metrics(reference: dict[str, np.ndarray], candidate: dict[str, np.
                       predicate: Callable[[str], bool]) -> dict[str, float]:
     keys = sorted(key for key in reference if key in candidate and predicate(key))
     if not keys:
-        return {"count": 0, "cosine": 0.0, "relative_l2": float("inf"), "max_abs": float("inf")}
+        return {"count": 0, "cosine": 0.0, "relative_l2": None, "max_abs": None}
     a = np.concatenate([reference[key].astype(np.float32, copy=False).reshape(-1) for key in keys])
     b = np.concatenate([candidate[key].astype(np.float32, copy=False).reshape(-1) for key in keys])
     result = flat_metrics(a, b)
@@ -81,12 +82,21 @@ def run_native(args: argparse.Namespace) -> None:
     args.work_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["GGML_BACKEND"] = args.backend
-    command = [str(args.native_exe), str(args.gguf), str(args.work_dir)]
+    command = [str(args.native_exe), str(args.gguf), str(args.work_dir), args.adapter_type]
+    if args.nonzero_b:
+        command.append("nonzero-b")
     print("[Parity] Native:", subprocess.list2cmdline(command), flush=True)
     subprocess.run(command, check=True, env=env)
 
 
 def load_pytorch_model(args: argparse.Namespace):
+    if args.carey_root:
+        sys.path.insert(0, str(args.carey_root))
+        from acestep.training_v2.model_loader import load_decoder_for_training
+        return load_decoder_for_training(
+            checkpoint_dir=args.checkpoint_root, variant=args.variant,
+            device=args.device, precision=args.precision,
+        )
     sys.path.insert(0, str(args.sidestep_root))
     from sidestep_engine.models.loader import load_decoder_for_training
 
@@ -111,8 +121,14 @@ def main() -> int:
     parser.add_argument("--native-exe", type=Path, required=True)
     parser.add_argument("--gguf", type=Path, required=True)
     parser.add_argument("--checkpoint-root", type=Path, required=True)
-    parser.add_argument("--sidestep-root", type=Path, required=True,
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sidestep-root", type=Path,
                         help="Side-Step checkout containing sidestep_engine")
+    source.add_argument("--carey-root", type=Path, help="Gary services/carey containing acestep")
+    parser.add_argument("--adapter-type", choices=("lora", "dora-rows"), default="dora-rows")
+    parser.add_argument("--adapter-precision", choices=("fp32", "model"), default="fp32",
+                        help="FP32 isolates native math; model reproduces Carey's post-injection dtype cast")
+    parser.add_argument("--nonzero-b", action="store_true", help="Exercise nonzero A gradients after adapter initialization")
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--variant", default="base")
     parser.add_argument("--device", default="cuda")
@@ -124,7 +140,10 @@ def main() -> int:
     args.native_exe = args.native_exe.resolve()
     args.gguf = args.gguf.resolve()
     args.checkpoint_root = args.checkpoint_root.resolve()
-    args.sidestep_root = args.sidestep_root.resolve()
+    if args.sidestep_root:
+        args.sidestep_root = args.sidestep_root.resolve()
+    if args.carey_root:
+        args.carey_root = args.carey_root.resolve()
     args.work_dir = args.work_dir.resolve()
     if not args.skip_native:
         run_native(args)
@@ -154,13 +173,19 @@ def main() -> int:
         model.decoder.config.use_cache = False
 
     trainable = adapter_tensors(model)
-    initial = {key: value.detach().float().cpu().numpy().copy() for key, value in trainable.items()}
     native_initial = {key: value.float().cpu().numpy() for key, value in load_file(
         str(initial_dir / "adapter_model.safetensors"), device="cpu").items()}
     missing = sorted(set(native_initial) - set(trainable))
     extra = sorted(set(trainable) - set(native_initial))
     if missing or extra:
         raise RuntimeError(f"adapter inventory mismatch; missing={missing[:5]}, extra={extra[:5]}")
+    # PEFT first casts loaded weights to the base dtype. Restore the exact native
+    # initial values for a controlled FP32 comparison; keep model precision when
+    # measuring Carey's actual post-injection model.to(module.dtype) policy.
+    if args.adapter_precision == "fp32":
+        for key, parameter in trainable.items():
+            parameter.data = torch.from_numpy(native_initial[key].copy()).to(device=parameter.device, dtype=torch.float32)
+    initial = {key: value.detach().float().cpu().numpy().copy() for key, value in trainable.items()}
 
     combined = torch.from_numpy(load_dump(args.work_dir / "input_latents.bin")).to(args.device)
     encoder_hidden = torch.from_numpy(load_dump(args.work_dir / "encoder_hidden.bin")).to(args.device)
@@ -195,11 +220,15 @@ def main() -> int:
             encoder_attention_mask=encoder_attention_mask,
             context_latents=context,
         )[0]
-        per_sample = functional.mse_loss(prediction, target, reduction="none").mean(dim=(-1, -2))
-        t_f32 = timesteps.float().clamp(min=1e-4, max=1.0 - 1e-4)
-        snr = (((1.0 - t_f32) / t_f32) ** 2).clamp(max=1e6)
-        weights = torch.clamp(snr, max=5.0) / snr.clamp(min=1e-6)
-        loss = (weights.to(per_sample.dtype) * per_sample).mean().float()
+        per_sample = functional.mse_loss(prediction, target, reduction="none").mean(dim=(-1, -2)).float()
+        if args.carey_root:
+            from acestep.training_v2.loss_weighting import flow_min_snr_weights
+            weights = flow_min_snr_weights(timesteps, gamma=5.0)
+        else:
+            t_f32 = timesteps.float().clamp(min=1e-4, max=1.0 - 1e-4)
+            snr = (((1.0 - t_f32) / t_f32) ** 2).clamp(max=1e6)
+            weights = torch.clamp(snr, max=5.0) / snr.clamp(min=1e-6)
+        loss = (weights * per_sample).mean().float()
 
     loss.backward()
     python_velocity = prediction.detach().float().cpu().numpy()
@@ -224,6 +253,11 @@ def main() -> int:
         foreach=False,
         fused=False,
     )
+    if args.carey_root:
+        from acestep.training_v2.optim import build_optimizer
+        optimizer = build_optimizer(parameters, lr=native_metrics["learning_rate"],
+                                    weight_decay=native_metrics["weight_decay"],
+                                    device_type=torch.device(args.device).type)
     optimizer.step()
     python_updated = {key: value.detach().float().cpu().numpy().copy() for key, value in trainable.items()}
     native_updated = {
@@ -239,6 +273,15 @@ def main() -> int:
         "all": lambda _key: True,
     }
     report = {
+        "reference": "carey" if args.carey_root else "sidestep",
+        "adapter_type": args.adapter_type,
+        "adapter_precision": args.adapter_precision,
+        "nonzero_b": args.nonzero_b,
+        "torch_version": torch.__version__,
+        "torch_device": str(next(iter(trainable.values())).device),
+        "trainable_dtypes": sorted({str(parameter.dtype) for parameter in trainable.values()}),
+        "precision": args.precision,
+        "native_backend": args.backend,
         "initial": {name: aggregate_metrics(native_initial, initial, pred) for name, pred in groups.items()},
         "forward": flat_metrics(native_velocity, python_velocity),
         "loss": {
@@ -254,19 +297,33 @@ def main() -> int:
                               / max(abs(native_metrics["gradient_norm"]), 1e-30),
         },
         "updated": {name: aggregate_metrics(native_updated, python_updated, pred) for name, pred in groups.items()},
+        "parameter_deltas": {name: aggregate_metrics(
+            {key: native_updated[key] - native_initial[key] for key in native_initial},
+            {key: python_updated[key] - initial[key] for key in initial}, pred)
+            for name, pred in groups.items()},
     }
-    (args.work_dir / "parity_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-
-    print(json.dumps(report, indent=2))
-    print(f"[Parity] Report: {args.work_dir / 'parity_report.json'}")
+    if args.carey_root:
+        names = ['training_v2/model_loader.py', 'training_v2/loss_weighting.py',
+                 'training_v2/optim.py', 'training_v2/trainer_fixed.py']
+        report['carey_sources'] = {name: hashlib.sha256((args.carey_root / 'acestep' / name).read_bytes()).hexdigest()
+                                   for name in names}
     # Full-model BF16 implementations need not be bit-identical, but a real
     # parity pass must preserve direction through forward and non-zero grads.
     passed = (
         report["forward"]["cosine"] >= 0.99
+        and report["initial"]["all"]["max_abs"] == 0
         and report["loss"]["relative_error"] <= 0.10
         and report["gradients"]["lora_B"]["cosine"] >= 0.95
-        and report["gradients"]["magnitude"]["cosine"] >= 0.95
+        and (not args.nonzero_b or report["gradients"]["lora_A"]["cosine"] >= 0.95)
+        and report["parameter_deltas"]["lora_B"]["cosine"] >= 0.90
+        and (args.adapter_type == "lora" or (
+            report["gradients"]["magnitude"]["cosine"] >= 0.95
+            and report["parameter_deltas"]["magnitude"]["cosine"] >= 0.90))
     )
+    report["passed"] = bool(passed)
+    (args.work_dir / "parity_report.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    print(json.dumps(report, indent=2))
+    print(f"[Parity] Report: {args.work_dir / 'parity_report.json'}")
     print("PASS" if passed else "FAIL", "PyTorch/native one-step parity")
     return 0 if passed else 1
 

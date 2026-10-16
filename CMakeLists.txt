@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(acestep-ggml LANGUAGES C CXX)
+project(acestep-ggml VERSION 0.1.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # runs on every build, only rewrites if the hash changed.
 set(VERSION_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/version.h")
 add_custom_target(version ALL
-    COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUTPUT=${VERSION_OUTPUT}"
+    COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUTPUT=${VERSION_OUTPUT}" "-DPROJECT_VERSION=${PROJECT_VERSION}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/version.cmake"
     BYPRODUCTS "${VERSION_OUTPUT}"
     COMMENT "Checking git version"
@@ -41,9 +41,10 @@ if(NOT MSVC AND NOT GGML_SYCL)
     add_compile_definitions(_FORTIFY_SOURCE=2)
 endif()
 
-# CUDA architectures: cover Turing to Blackwell for distributed binaries.
+# Local builds retain ACE's CUDA defaults. Portable releases set GGML_NATIVE=OFF
+# and inherit the shared ggml fork's architecture coverage, like sa3/yuey.
 # Users can override with -DCMAKE_CUDA_ARCHITECTURES=native for local builds.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND (NOT DEFINED GGML_NATIVE OR GGML_NATIVE))
     find_package(CUDAToolkit QUIET)
     set(_ace_cuda_architectures 75-virtual 80-virtual 86-real 89-real)
     if(CUDAToolkit_FOUND AND CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
@@ -74,6 +75,19 @@ if(NOT DEFINED GGML_CUDA_GRAPHS)
     set(GGML_CUDA_GRAPHS_DEFAULT ON)
 endif()
 add_subdirectory(ggml)
+
+# Cache tensors must not cross incompatible numerical build configurations.
+get_cmake_property(_ace_cache_variables CACHE_VARIABLES)
+list(SORT _ace_cache_variables)
+set(_ace_cache_configuration "${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION}")
+foreach(_ace_var ${_ace_cache_variables})
+    if(_ace_var MATCHES "^(GGML_|CMAKE_(CXX_FLAGS|C_FLAGS|CUDA_FLAGS|CUDA_ARCHITECTURES|OSX_ARCHITECTURES))")
+        string(APPEND _ace_cache_configuration ";${_ace_var}=${${_ace_var}}")
+    endif()
+endforeach()
+string(SHA256 _ace_cache_configuration_id "${_ace_cache_configuration}")
+file(WRITE "${CMAKE_BINARY_DIR}/cache-build.h" "#pragma once\n#define ACE_CACHE_CONFIG_ID \"${_ace_cache_configuration_id}\"\n")
+add_compile_definitions(ACE_CACHE_BUILD_CONFIGURATION="$<CONFIG>")
 
 # cpp-httplib (HTTP server library, used by ace-server)
 add_subdirectory(vendor/cpp-httplib)
@@ -176,6 +190,14 @@ link_ggml_backends(ace-server)
 add_executable(ace-understand tools/ace-understand.cpp)
 target_link_libraries(ace-understand PRIVATE acestep-core)
 link_ggml_backends(ace-understand)
+
+# CPU metadata suggestions share sa3.cpp's estimators and require no models/ggml.
+add_executable(ace-audio-analyze tools/ace-audio-analyze.cpp)
+target_include_directories(ace-audio-analyze PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/vendor ${CMAKE_BINARY_DIR})
+target_link_libraries(ace-audio-analyze PRIVATE yyjson)
+add_dependencies(ace-audio-analyze version)
+target_include_directories(ace-server SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/vendor)
 
 # quantize: GGUF requantizer (BF16 -> K-quants)
 add_executable(quantize tools/quantize.cpp)

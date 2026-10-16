@@ -344,7 +344,10 @@ static std::vector<int> build_custom_prompt(BPETokenizer & bpe, const char * sys
 // Build understand prompt: system instruction + raw audio code tokens as user input.
 // codes[] are FSQ indices (from tok_ggml_encode or parsed from audio_codes string).
 // They become token IDs AUDIO_CODE_BASE + codes[i] in the user turn.
-static std::vector<int> build_understand_prompt(BPETokenizer & bpe, const int * codes, int n_codes) {
+static std::vector<int> build_understand_prompt(BPETokenizer & bpe,
+                                                const int *    codes,
+                                                int            n_codes,
+                                                bool           metadata_prefix = false) {
     std::vector<int> ids;
     auto             append = [&](const std::string & text) {
         auto t = bpe_encode(&bpe, text, false);
@@ -359,10 +362,15 @@ static std::vector<int> build_understand_prompt(BPETokenizer & bpe, const int * 
     for (int i = 0; i < n_codes; i++) {
         ids.push_back(AUDIO_CODE_BASE + codes[i]);
     }
-    append("\n");
     ids.push_back(TOKEN_IM_END);
     append("\n");
     ids.push_back(TOKEN_IM_START);
     append("assistant\n");
+    // The constrained decoder starts at BPM_NAME; condition the LM on the
+    // reasoning opener that unconstrained decoding would emit first.
+    if (metadata_prefix) {
+        ids.push_back(TOKEN_THINK);
+        append("\n");
+    }
     return ids;
 }

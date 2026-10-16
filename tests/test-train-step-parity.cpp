@@ -78,8 +78,8 @@ static void dump_batch(const std::filesystem::path &  output,
 }
 
 int main(int argc, char ** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "Usage: %s <DiT-GGUF> <output-dir>\n", argv[0]);
+    if (argc < 3 || argc > 5) {
+        std::fprintf(stderr, "Usage: %s <DiT-GGUF> <output-dir> [lora|dora-rows] [nonzero-b]\n", argv[0]);
         return 1;
     }
     const std::filesystem::path output(argv[2]);
@@ -102,8 +102,24 @@ int main(int argc, char ** argv) {
     constexpr int                      base_rank  = 8;
     constexpr int                      base_alpha = 16;
     if (!ace_train_adapter_targets(model, "balanced", base_rank, base_alpha, targets, error) ||
-        !ace_init_train_adapter_state(targets, "dora-rows", 123, state, error) ||
-        !ace_save_train_adapter_checkpoint((output / "initial").string(), state, error)) {
+        !ace_init_train_adapter_state(targets, argc >= 4 ? argv[3] : "dora-rows", 123, state, error)) {
+        std::fprintf(stderr, "FAIL: %s\n", error.c_str());
+        dit_ggml_free(&model);
+        return 1;
+    }
+    if (argc == 5) {
+        if (std::string(argv[4]) != "nonzero-b") {
+            std::fprintf(stderr, "FAIL: expected nonzero-b\n");
+            dit_ggml_free(&model);
+            return 1;
+        }
+        for (auto & parameter : state.params) {
+            for (size_t i = 0; i < parameter.b.size(); ++i) {
+                parameter.b[i] = 0.002f * std::sin(float(i) * 0.013f);
+            }
+        }
+    }
+    if (!ace_save_train_adapter_checkpoint((output / "initial").string(), state, error)) {
         std::fprintf(stderr, "FAIL: %s\n", error.c_str());
         dit_ggml_free(&model);
         return 1;

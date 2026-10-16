@@ -137,7 +137,9 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
                                   uint64_t                                seed,
                                   const ACETrainPreprocessConfig &        config,
                                   std::vector<ACETrainDiffusionExample> & prepared,
-                                  std::string &                           error) {
+                                  std::string &                           error,
+                                  bool (*cancel)(void *),
+                                  void * cancel_data) {
     prepared.clear();
     error.clear();
     if (!synth || !synth->store || sources.empty()) {
@@ -155,6 +157,10 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
         }
         ModelHandle encoder_guard(synth->store, encoder);
         for (size_t i = 0; i < sources.size(); ++i) {
+            if (cancel && cancel(cancel_data)) {
+                error = "training cancelled during preprocessing";
+                return false;
+            }
             if (!ace_prepare_training_audio(synth, encoder, sources[i], seed + (uint64_t) i, prepared[i], durations[i],
                                             error)) {
                 return false;
@@ -162,6 +168,10 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
         }
     }
 
+    if (cancel && cancel(cancel_data)) {
+        error = "training cancelled during preprocessing";
+        return false;
+    }
     std::vector<AceRequest> requests;
     requests.reserve(sources.size());
     for (size_t i = 0; i < sources.size(); ++i) {

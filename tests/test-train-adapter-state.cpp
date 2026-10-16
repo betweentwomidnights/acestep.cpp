@@ -3,8 +3,8 @@
 
 #include "adapter-merge.h"
 #include "dit-graph.h"
-#include "ggml-cpu.h"
 #include "qwen3-enc.h"
+#include "test-backend.h"
 #include "train-adapter-checkpoint.h"
 #include "train-adapter-optimizer.h"
 #include "train-adapter-state.h"
@@ -420,7 +420,7 @@ int main() {
     tiny.cfg.sliding_window    = 2;
     tiny.cfg.rope_theta        = 10000.0f;
     tiny.cfg.rms_norm_eps      = 1e-5f;
-    tiny.backend               = ggml_backend_cpu_init();
+    tiny.backend               = test_cpu_backend();
     tiny.cpu_backend           = tiny.backend;
     tiny.use_flash_attn        = true;
 
@@ -438,11 +438,11 @@ int main() {
     ggml_backend_tensor_set(encoder.embed_tokens, encoder_weights, 0, sizeof(encoder_weights));
     ggml_backend_t encoder_backends[] = { tiny.backend };
     encoder.sched                     = ggml_backend_sched_new(encoder_backends, nullptr, 1, 32, false, true);
-    ggml_backend_cpu_set_abort_callback(tiny.backend, abort_backend_compute, nullptr);
+    test_cpu_abort_callback(tiny.backend, abort_backend_compute, nullptr);
     const int  encoder_token     = 1;
     float      encoder_output[]  = { 123.0f, 456.0f };
     const bool encoder_succeeded = qwen3_embed_lookup(&encoder, &encoder_token, 1, encoder_output);
-    ggml_backend_cpu_set_abort_callback(tiny.backend, nullptr, nullptr);
+    test_cpu_abort_callback(tiny.backend, nullptr, nullptr);
     ggml_backend_sched_free(encoder.sched);
     ggml_backend_buffer_free(encoder_buffer);
     ggml_free(encoder_ctx);
