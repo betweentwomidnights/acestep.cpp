@@ -66,7 +66,8 @@ static void debug_dump_2d(const DebugDumper * d, const char * name, const float 
 
 // Convenience: dump 1D tensor [n]
 static void debug_dump_1d(const DebugDumper * d, const char * name, const float * data, int n) {
-    debug_dump(d, name, data, &n, 1);
+    int shape[1] = { n };
+    debug_dump(d, name, data, shape, 1);
 }
 
 // Load a debug dump, returns data and fills shape/ndims
