@@ -1806,7 +1806,7 @@ static void usage(const char * prog) {
             "\n"
             "Memory control:\n"
             "  --keep-loaded           Keep models in VRAM between requests\n"
-            "  --vae-chunk <N>         Latent frames per tile (default: %d)\n"
+            "  --vae-chunk <N>         Latent frames per tile (default: auto, largest that fits)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: %d)\n"
             "\n"
             "Server:\n"
@@ -1823,7 +1823,7 @@ static void usage(const char * prog) {
             "  --no-fa                 Disable flash attention\n"
             "  --no-batch-cfg          Split CFG into two separate forwards (LM + DiT)\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n",
-            prog, synth_d.vae_chunk, synth_d.vae_overlap, g_max_batch, lm_d.max_seq);
+            prog, synth_d.vae_overlap, g_max_batch, lm_d.max_seq);
 }
 
 int main(int argc, char ** argv) {

@@ -32,7 +32,7 @@ void ace_synth_default_params(AceSynthParams * p) {
     p->use_fa                      = true;
     p->clamp_fp16                  = false;
     p->use_batch_cfg               = true;
-    p->vae_chunk                   = 1024;
+    p->vae_chunk                   = 0;  // 0: largest tile that fits free device memory
     p->vae_overlap                 = 64;
     p->dump_dir                    = NULL;
 }

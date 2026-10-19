@@ -236,7 +236,7 @@ Adapter:
 
 Memory control:
   --keep-loaded           Keep models in VRAM between requests
-  --vae-chunk <N>         Latent frames per tile (default: 1024)
+  --vae-chunk <N>         Latent frames per tile (default: auto, largest that fits)
   --vae-overlap <N>       Overlap frames per side (default: 64)
 
 Output:

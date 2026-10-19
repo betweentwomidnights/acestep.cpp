@@ -785,7 +785,7 @@ Optional:
   --ref-audio <path>      Timbre reference audio (WAV or MP3)
 
 Memory control:
-  --vae-chunk <N>         Latent frames per tile (default: 1024)
+  --vae-chunk <N>         Latent frames per tile (default: auto, largest that fits)
   --vae-overlap <N>       Overlap frames per side (default: 64)
 
 Debug:
@@ -863,7 +863,11 @@ quantisation raise both columns.
 
 VAE tile activations scale with `--vae-chunk` and `--vae-overlap`. Bigger
 tiles process audio faster with fewer seams but cost more transient VRAM
-during encode or decode; the project default targets 8 GB consumer cards.
+during encode or decode. By default (`--vae-chunk 0`) each encode or decode
+measures its graph at 1024, 512, 256 and 128 frames without allocating it and
+uses the largest that fits the device's free memory at that moment, so a
+1024-frame tile (over 7 GiB to decode) is used only where it fits. `ace-train`
+keeps a fixed 1024-frame tile, because the tile is part of its cache identity.
 Under STRICT those tiles get the full GPU budget alone; under
 `--keep-loaded` they sit on top of everything else, so larger cards
 earn back the latency they spend reloading.
@@ -882,7 +886,7 @@ Adapter:
 
 Memory control:
   --keep-loaded           Keep models in VRAM between requests
-  --vae-chunk <N>         Latent frames per tile (default: 1024)
+  --vae-chunk <N>         Latent frames per tile (default: auto, largest that fits)
   --vae-overlap <N>       Overlap frames per side (default: 64)
 
 Server:
@@ -1140,7 +1144,7 @@ Output:
   -o <json>               Output JSON (default: stdout summary)
 
 Memory control:
-  --vae-chunk <N>         Latent frames per tile (default: 1024)
+  --vae-chunk <N>         Latent frames per tile (default: auto, largest that fits)
   --vae-overlap <N>       Overlap frames per side (default: 64)
 
 Debug:

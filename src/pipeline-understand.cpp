@@ -48,7 +48,7 @@ void ace_understand_default_params(AceUnderstandParams * p) {
     p->max_batch   = 1;
     p->use_fsm     = true;
     p->use_fa      = true;
-    p->vae_chunk   = 1024;
+    p->vae_chunk   = 0;  // 0: largest tile that fits free device memory
     p->vae_overlap = 64;
 }
 

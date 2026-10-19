@@ -40,7 +40,7 @@ static void usage(const char * prog) {
             "  -o <json>               Output JSON (default: stdout summary)\n"
             "\n"
             "Memory control:\n"
-            "  --vae-chunk <N>         Latent frames per tile (default: %d)\n"
+            "  --vae-chunk <N>         Latent frames per tile (default: auto, largest that fits)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: %d)\n"
             "\n"
             "Debug:\n"
@@ -48,7 +48,7 @@ static void usage(const char * prog) {
             "  --no-fsm                Disable FSM constrained decoding\n"
             "  --no-fa                 Disable flash attention\n"
             "  --dump <dir>            Dump tok_latents + tok_codes (skip LM)\n",
-            prog, d.vae_chunk, d.vae_overlap, d.max_seq);
+            prog, d.vae_overlap, d.max_seq);
 }
 
 int main(int argc, char ** argv) {

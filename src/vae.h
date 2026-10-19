@@ -12,6 +12,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "vae-tile.h"
 
 #include <cmath>
 #include <cstdio>
@@ -463,6 +464,7 @@ static int vae_ggml_decode(VAEGGML * m, const float * latent, int T_latent, floa
 // For each tile: decode latent window with overlap context, trim to core, concatenate.
 // Default chunk=256/overlap=64 matches reference code. Larger chunks (e.g. 1024)
 // reduce tile count and improve throughput; adjust chunk/overlap to tune.
+// chunk_size 0 chooses the largest tile that fits the device's free memory.
 // Returns T_audio (total samples per channel) or -1 on error.
 static int vae_ggml_decode_tiled(VAEGGML *     m,
                                  const float * latent,     // [T_latent, 64] flat time-major (DiT output layout)
@@ -473,6 +475,14 @@ static int vae_ggml_decode_tiled(VAEGGML *     m,
                                  int           overlap    = 64,
                                  bool (*cancel)(void *)   = nullptr,
                                  void * cancel_data       = nullptr) {
+    if (chunk_size <= 0) {
+        chunk_size = vae_tile_choose(
+            m->sched, m->backend, m->cpu_backend, T_latent,
+            [m](struct ggml_context * ctx, int T) {
+                return vae_ggml_build_graph(ctx, m, ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T, 64));
+            },
+            [](int frames) { return frames; }, "VAE");
+    }
     // Ensure positive stride (matches Python effective_overlap reduction)
     while (chunk_size - 2 * overlap <= 0 && overlap > 0) {
         overlap /= 2;

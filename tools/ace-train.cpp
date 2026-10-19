@@ -662,6 +662,7 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
     ModelStore *   store = store_create(EVICT_STRICT);
     AceSynthParams params;
     ace_synth_default_params(&params);
+    params.vae_chunk         = ACE_TRAIN_VAE_CHUNK;
     params.dit_path          = dit_entry.path.c_str();
     params.text_encoder_path = text_entry.path.c_str();
     params.vae_path          = vae_entry.path.c_str();

@@ -367,7 +367,8 @@ static int vae_enc_encode_sampled(VAEEncoder *  m,
 }
 
 // Tiled encode for long audio (same chunking strategy as decoder)
-// chunk_size: latent frames per tile, overlap: context frames on each side
+// chunk_size: latent frames per tile (0 chooses the largest that fits the
+// device's free memory), overlap: context frames on each side
 static void vae_enc_core_bounds(int   raw_frames,
                                 int   core_start,
                                 int   core_end,
@@ -390,6 +391,14 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
                                 int                   chunk_size = 256,
                                 int                   overlap    = 64,
                                 VAEEncLatentSampler * sampler    = nullptr) {
+    if (chunk_size <= 0) {
+        chunk_size = vae_tile_choose(
+            m->sched, m->backend, m->cpu_backend, (T_audio + 1919) / 1920,
+            [m](struct ggml_context * ctx, int T) {
+                return vae_enc_build_graph(ctx, m, ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T, 2));
+            },
+            [](int frames) { return frames * 1920; }, "VAE-Enc");
+    }
     // Work in audio-sample space. Each latent frame = 1920 audio samples.
     // Shrink in latent-frame units to preserve the integer latent grid.
     while (chunk_size - 2 * overlap <= 0 && overlap > 0) {
