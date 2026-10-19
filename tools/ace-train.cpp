@@ -901,9 +901,10 @@ static bool train_adapter(const ACETrainCommand &          command,
         const auto genre_selected = ace_train_genre_selection(
             prepared.genre_eligible, order, size_t(examples_per_epoch), command.genre_ratio, command.seed, epoch);
         if (command.genre_ratio > 0) {
-            std::fprintf(stderr, "[Ace-Train] prompt mix epoch=%d genre=%zu/%d ratio=%d%%\n", epoch + 1,
-                         size_t(std::count(genre_selected.begin(), genre_selected.end(), true)), examples_per_epoch,
-                         command.genre_ratio);
+            const size_t genre_count =
+                static_cast<size_t>(std::count(genre_selected.begin(), genre_selected.end(), true));
+            std::fprintf(stderr, "[Ace-Train] prompt mix epoch=%d genre=%zu/%d ratio=%d%%\n", epoch + 1, genre_count,
+                         examples_per_epoch, command.genre_ratio);
         }
         double epoch_loss    = progress.epoch_loss;
         int    epoch_batches = progress.epoch_batches;
