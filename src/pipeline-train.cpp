@@ -102,9 +102,9 @@ static bool ace_prepare_training_audio(AceSynth *                 synth,
 
     const int          maximum_latent_length = audio_length / 1920 + 64;
     std::vector<float> target((size_t) maximum_latent_length * synth->Oc);
-    const int          real_temporal_length =
-        vae_enc_encode_tiled_sampled(encoder, audio, audio_length, target.data(), maximum_latent_length, seed,
-                                     synth->params.vae_chunk, synth->params.vae_overlap);
+    const int          real_temporal_length = vae_enc_encode_tiled_sampled(
+        encoder, audio, audio_length, target.data(), maximum_latent_length, seed,
+        synth->params.vae_chunk > 0 ? synth->params.vae_chunk : ACE_TRAIN_VAE_CHUNK, synth->params.vae_overlap);
     free(audio);
     if (real_temporal_length <= 0) {
         error = "VAE training posterior encoding failed: " + source.audio_path.string();

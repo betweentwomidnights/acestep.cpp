@@ -36,14 +36,14 @@ static void usage(const char * prog) {
             "  --src-audio <path>      Source audio (WAV or MP3)\n"
             "  --ref-audio <path>      Timbre reference audio (WAV or MP3)\n\n"
             "Memory control:\n"
-            "  --vae-chunk <N>         Latent frames per tile (default: %d)\n"
+            "  --vae-chunk <N>         Latent frames per tile (default: auto, largest that fits)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: %d)\n\n"
             "Debug:\n"
             "  --no-fa                 Disable flash attention\n"
             "  --no-batch-cfg          Split DiT CFG into two separate forwards\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
             "  --dump <dir>            Dump intermediate tensors\n",
-            prog, d.vae_chunk, d.vae_overlap);
+            prog, d.vae_overlap);
 }
 
 int main(int argc, char ** argv) {

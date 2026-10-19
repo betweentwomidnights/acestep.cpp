@@ -13,6 +13,9 @@
 
 // Included in both prepared-cache and immutable resume-plan identities.
 static constexpr const char * ACE_TRAIN_PREPROCESS_ALGORITHM = "ace-full-song-preprocessing-v2";
+// Training encodes with a fixed VAE tile, never one chosen from free memory:
+// the tile is part of every prepared example's cache identity.
+static constexpr int          ACE_TRAIN_VAE_CHUNK            = 1024;
 
 enum ACETrainTagPosition {
     ACE_TRAIN_TAG_PREPEND,
