@@ -58,11 +58,36 @@ add_executable(test-train-adapter-state test-train-adapter-state.cpp)
 target_link_libraries(test-train-adapter-state PRIVATE acestep-core)
 link_ggml_backends(test-train-adapter-state)
 
+add_executable(test-train-cli-control test-train-cli-control.cpp)
+target_include_directories(test-train-cli-control PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(test-train-cli-control PRIVATE yyjson)
+
+add_executable(test-train-resume-plan test-train-resume-plan.cpp)
+target_link_libraries(test-train-resume-plan PRIVATE acestep-core)
+link_ggml_backends(test-train-resume-plan)
+
 # test-train-step-parity: emit a deterministic real-model step for the
 # companion PyTorch comparison script. Invoked manually with explicit model paths.
 add_executable(test-train-step-parity test-train-step-parity.cpp)
 target_link_libraries(test-train-step-parity PRIVATE acestep-core)
 link_ggml_backends(test-train-step-parity)
+
+# Opt-in real-audio preprocessing emitter; requires explicit local models/data.
+add_executable(test-train-preprocess-real test-train-preprocess-real.cpp)
+target_link_libraries(test-train-preprocess-real PRIVATE acestep-core)
+link_ggml_backends(test-train-preprocess-real)
+
+add_executable(test-vae-posterior-real test-vae-posterior-real.cpp)
+target_link_libraries(test-vae-posterior-real PRIVATE acestep-core)
+link_ggml_backends(test-vae-posterior-real)
+
+add_executable(test-cond-encoder-real test-cond-encoder-real.cpp)
+target_link_libraries(test-cond-encoder-real PRIVATE acestep-core)
+link_ggml_backends(test-cond-encoder-real)
+
+add_executable(test-train-trajectory-real test-train-trajectory-real.cpp)
+target_link_libraries(test-train-trajectory-real PRIVATE acestep-core)
+link_ggml_backends(test-train-trajectory-real)
 
 # Register every self-contained test with CTest. Model-backed tests are
 # enabled when ACE_TEST_MODELS_DIR points at a complete registry.
@@ -77,6 +102,7 @@ endfunction()
 add_executable(test-server-regressions test-server-regressions.cpp)
 add_dependencies(test-server-regressions ace-server)
 target_link_libraries(test-server-regressions PRIVATE acestep-core httplib)
+target_include_directories(test-server-regressions SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/vendor")
 link_ggml_backends(test-server-regressions)
 ace_register_test(test-server-regressions)
 set_tests_properties(test-server-regressions PROPERTIES TIMEOUT 30)
@@ -92,6 +118,10 @@ ace_register_test(test-quantize-policy)
 
 ace_register_test(test-philox)
 ace_register_test(test-dit-linear-transform)
+add_executable(test-train-cross-attention test-train-cross-attention.cpp)
+target_link_libraries(test-train-cross-attention PRIVATE acestep-core)
+link_ggml_backends(test-train-cross-attention)
+ace_register_test(test-train-cross-attention)
 ace_register_test(test-dora-backend)
 ace_register_test(test-adapter-merge)
 ace_register_test(test-adapter-functional)
@@ -99,6 +129,39 @@ ace_register_test(test-vae-latent-sampling)
 ace_register_test(test-train-dataset)
 ace_register_test(test-train-window)
 ace_register_test(test-train-adapter-state)
+ace_register_test(test-train-cli-control)
+ace_register_test(test-train-resume-plan)
+add_executable(test-train-preprocess-cache test-train-preprocess-cache.cpp)
+target_link_libraries(test-train-preprocess-cache PRIVATE acestep-core)
+link_ggml_backends(test-train-preprocess-cache)
+ace_register_test(test-train-preprocess-cache)
+
+add_executable(test-train-history test-train-history.cpp)
+target_link_libraries(test-train-history PRIVATE acestep-core)
+link_ggml_backends(test-train-history)
+ace_register_test(test-train-history)
+
+# Opt-in comparator invokes this model-free production-math fixture explicitly.
+add_executable(test-train-carey-parity test-train-carey-parity.cpp)
+target_link_libraries(test-train-carey-parity PRIVATE acestep-core)
+link_ggml_backends(test-train-carey-parity)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test-train-cli-control-smoke COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test-train-cli-control.py" $<TARGET_FILE:ace-train>)
+    set_tests_properties(test-train-cli-control-smoke PROPERTIES LABELS "ace;training;integration" TIMEOUT 30)
+    add_test(NAME test-audio-analysis-cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test-audio-analysis-cli.py" $<TARGET_FILE:ace-audio-analyze>)
+    add_test(NAME test-caption-api COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test-caption-api.py" $<TARGET_FILE:ace-server> $<TARGET_FILE:ace-audio-analyze>)
+    set_tests_properties(test-audio-analysis-cli test-caption-api PROPERTIES
+        LABELS "ace;caption;integration" TIMEOUT 60)
+    add_test(NAME test-runtime-contract COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test-runtime-contract.py"
+        $<TARGET_FILE:ace-server> $<TARGET_FILE:ace-train> "${PROJECT_VERSION}")
+    set_tests_properties(test-runtime-contract PROPERTIES LABELS "ace;runtime;integration" TIMEOUT 60)
+endif()
 
 set_tests_properties(
     test-dora-backend

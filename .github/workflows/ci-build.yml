@@ -1,4 +1,4 @@
-# ABOUTME: Builds and smoke-tests Sawhee on its supported host platforms.
+# ABOUTME: Builds and smoke-tests acestep.cpp on its supported host platforms.
 # ABOUTME: Compiles the CUDA training path on a free, time-bounded runner.
 name: CI Build
 
@@ -44,6 +44,9 @@ jobs:
           ./build/ace-lm --help 2>&1 | head -5
           ./build/ace-synth --help 2>&1 | head -5
           ./build/quantize --help 2>&1 | head -3
+
+      - name: Model-free runtime and training tests
+        run: ctest --test-dir build --output-on-failure
 
   lint:
     name: Lint & Static Analysis

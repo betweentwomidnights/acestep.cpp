@@ -838,6 +838,12 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
     s.output.resize(batch_n * s.Oc * s.T);
 
     // Debug dumps (sample 0)
+    if (!s.cover_latents.empty()) {
+        debug_dump_2d(&s.dbg, "source_vae_latents", s.cover_latents.data(), s.T_cover, s.Oc);
+    }
+    debug_dump_1d(&s.dbg, "sampling_schedule", s.schedule.data(), (int) s.schedule.size());
+    debug_dump_1d(&s.dbg, "enc_hidden_full", s.enc_hidden.data(), (int) s.enc_hidden.size());
+    debug_dump_1d(&s.dbg, "null_condition", s.null_cond_vec.data(), (int) s.null_cond_vec.size());
     debug_dump_2d(&s.dbg, "noise", s.noise.data(), s.T, s.Oc);
     debug_dump_2d(&s.dbg, "context", s.context.data(), s.T, s.ctx_ch);
 

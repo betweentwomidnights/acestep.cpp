@@ -2,7 +2,7 @@
 // ABOUTME: Verifies module alpha resolution, normalization, and adapter-strength interpolation.
 
 #include "adapter-merge.h"
-#include "ggml-cpu.h"
+#include "test-backend.h"
 #include "train-adapter-checkpoint.h"
 
 #include <cmath>
@@ -150,7 +150,7 @@ static bool reload_adapter(const std::filesystem::path & directory,
     wctx_init(&weights, 2);
     ggml_tensor *  q       = gf_load_tensor(&weights, model, "decoder.layers.0.self_attn.q_proj.weight");
     ggml_tensor *  v       = gf_load_tensor(&weights, model, "decoder.layers.0.self_attn.v_proj.weight");
-    ggml_backend_t backend = ggml_backend_cpu_init();
+    ggml_backend_t backend = test_cpu_backend();
     if (!backend || !adapter_merge(&weights, model, directory.string().c_str(), adapter_scale, backend) ||
         !wctx_alloc(&weights, backend)) {
         wctx_free(&weights);
@@ -183,7 +183,7 @@ static bool rejects_adapter_merge(const std::filesystem::path &     directory,
     for (const char * name : staged_weights) {
         gf_load_tensor(&weights, model, name);
     }
-    ggml_backend_t backend  = ggml_backend_cpu_init();
+    ggml_backend_t backend  = test_cpu_backend();
     const bool     rejected = backend && !adapter_merge(&weights, model, directory.string().c_str(), 1.0f, backend);
     wctx_free(&weights);
     if (backend) {

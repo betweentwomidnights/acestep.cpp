@@ -109,13 +109,14 @@ static bool ace_train_crop_example(const ACETrainDiffusionExample & source,
 
     const size_t target_first = (size_t) window.first_latent * output_channels;
     const size_t target_count = (size_t) window.latent_length * output_channels;
-    destination.target_latents.assign(source.target_latents.begin() + (std::ptrdiff_t) target_first,
-                                      source.target_latents.begin() + (std::ptrdiff_t)(target_first + target_count));
+    destination.target_latents.assign(
+        source.target_latents.begin() + (std::ptrdiff_t) target_first,
+        source.target_latents.begin() + static_cast<std::ptrdiff_t>(target_first + target_count));
     const size_t context_first = (size_t) window.first_latent * context_channels;
     const size_t context_count = (size_t) window.latent_length * context_channels;
     destination.context_latents.assign(
         source.context_latents.begin() + (std::ptrdiff_t) context_first,
-        source.context_latents.begin() + (std::ptrdiff_t)(context_first + context_count));
+        source.context_latents.begin() + static_cast<std::ptrdiff_t>(context_first + context_count));
     destination.encoder_hidden               = source.encoder_hidden;
     destination.real_temporal_length         = window.latent_length;
     destination.real_encoder_sequence_length = source.real_encoder_sequence_length;

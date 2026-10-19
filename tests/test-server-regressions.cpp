@@ -52,10 +52,16 @@ static int test_multipart() {
     g_registry.dit.resize(1);
     g_registry.text_enc.resize(1);
     g_registry.vae.resize(1);
-    const char * bodies[] = { "{\"caption\":\"one\"}", "[{\"caption\":\"one\"},{\"caption\":\"two\"}]", "[]",
-                              "[broken" };
+    const char * bodies[] = {
+        "{\"caption\":\"one\"}",
+        "[{\"caption\":\"one\"},{\"caption\":\"two\"}]",
+        "{\"task_type\":\"repaint\",\"caption\":\"\",\"duration\":120,\"repainting_start\":8,\"repainting_end\":120}",
+        "{\"task_type\":\"text2music\",\"caption\":\"\"}",
+        "[]",
+        "[broken"
+    };
     for (bool file_part : { false, true }) {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 6; ++i) {
             httplib::Request req;
             req.set_header("Content-Type", "multipart/form-data; boundary=test");
             if (file_part) {
@@ -79,15 +85,17 @@ static int test_multipart() {
                 LogCapture capture;
                 handle_synth(req, res);
             }
-            const bool accepted = i < 2;
+            const bool accepted = i < 3;
             if ((accepted && (res.status != 200 || g_work_queue.size() != 1)) ||
                 (!accepted && (res.status != 400 || !g_work_queue.empty()))) {
                 fprintf(stderr, "multipart case %d file=%d: status=%d body=%s\n", i, (int) file_part, res.status,
                         res.body.c_str());
-                return fail("multipart objects/batches must queue; empty/malformed batches must reject");
+                return fail(
+                    "multipart objects/batches and blank-caption repaint must queue; blank text2music and "
+                    "empty/malformed batches must reject");
             }
             if (accepted) {
-                const std::string count = i == 0 ? "(1 requests)" : "(2 requests)";
+                const std::string count = i == 1 ? "(2 requests)" : "(1 requests)";
                 bool              found = false;
                 for (uint64_t n = first_log; n < log_seq; ++n) {
                     found |= log_ring[n & LOG_RING_MASK].find(count) != std::string::npos;

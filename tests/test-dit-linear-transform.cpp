@@ -2,7 +2,7 @@
 // ABOUTME: Verifies callback dispatch and the unchanged frozen-weight fallback path.
 
 #include "dit-graph.h"
-#include "ggml-cpu.h"
+#include "test-backend.h"
 #include "train-adapter.h"
 
 #include <cmath>
@@ -112,7 +112,7 @@ int main() {
     transformed         = dit_ggml_linear(ctx, &model, weight, input);
     ggml_cgraph * graph = ggml_new_graph(ctx);
     ggml_build_forward_expand(graph, transformed);
-    ggml_backend_t cpu = ggml_backend_cpu_init();
+    ggml_backend_t cpu = test_cpu_backend();
     if (!cpu || ggml_backend_graph_compute(cpu, graph) != GGML_STATUS_SUCCESS) {
         std::fputs("DoRA graph computation failed\n", stderr);
         ggml_free(ctx);

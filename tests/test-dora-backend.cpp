@@ -3,7 +3,7 @@
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
-#include "ggml-cpu.h"
+#include "test-backend.h"
 #include "train-adapter.h"
 
 #include <cmath>
@@ -14,7 +14,7 @@
 
 static ggml_backend_t open_backend(const char * name) {
     if (!name || std::strcmp(name, "CPU") == 0) {
-        return ggml_backend_cpu_init();
+        return test_cpu_backend();
     }
     ggml_backend_load_all();
     return ggml_backend_init_by_name(name, nullptr);

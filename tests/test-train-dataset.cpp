@@ -3,6 +3,7 @@
 
 #include "pipeline-train.h"
 #include "train-dataset.h"
+#include "train-prompt.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -79,6 +80,43 @@ int main() {
     if (request.caption != "alternative pop, reference_voice") {
         std::filesystem::remove_all(directory);
         return fail("training request must support Gary's genre and appended-tag prompt mode");
+    }
+    preprocess.tag_position = ACE_TRAIN_TAG_REPLACE;
+    if (ace_training_request(examples[0], 42.5f, preprocess).caption != "reference_voice") {
+        return fail("genre variant must preserve replace-tag semantics");
+    }
+    auto missing_genre = examples[0];
+    missing_genre.metadata.genre.clear();
+    preprocess.tag_position = ACE_TRAIN_TAG_PREPEND;
+    if (ace_training_request(missing_genre, 42.5f, preprocess).caption != "reference_voice, sparse electronic pop") {
+        return fail("missing genre must fall back to tagged caption");
+    }
+    std::vector<int>          genre_counts(3);
+    const std::vector<size_t> order = { 2, 0, 1 };
+    for (int epoch = 0; epoch < 10; ++epoch) {
+        const auto mix = ace_train_genre_selection({ true, true, true }, order, 3, 30, 42, epoch);
+        if (mix != ace_train_genre_selection({ true, true, true }, order, 3, 30, 42, epoch)) {
+            return fail("resumed epoch must reproduce prompt selection");
+        }
+        for (size_t i = 0; i < mix.size(); ++i) {
+            genre_counts[i] += mix[i];
+        }
+    }
+    if (genre_counts != std::vector<int>({ 3, 3, 3 }) ||
+        ace_train_genre_selection({ true, false, true }, order, 3, 100, 42, 0) !=
+            std::vector<bool>({ true, false, true }) ||
+        ace_train_genre_selection({ true, true, true }, order, 3, 0, 42, 0) !=
+            std::vector<bool>({ false, false, false }) ||
+        ace_train_genre_selection({ true, true, true }, order, 1, 100, 42, 0) !=
+            std::vector<bool>({ false, false, true })) {
+        return fail("prompt ratio, fair cycle, missing genre or subset policy");
+    }
+    int tiny_count = 0;
+    for (int epoch = 0; epoch < 10; ++epoch) {
+        tiny_count += ace_train_genre_selection({ true }, { 0 }, 1, 20, 42, epoch)[0];
+    }
+    if (tiny_count != 2) {
+        return fail("fractional genre draws must carry across epochs");
     }
 
     if (!write_file(directory / "unpaired.wav", "RIFFtest") || ace_training_load_dataset(directory, examples, error) ||

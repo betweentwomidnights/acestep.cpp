@@ -42,7 +42,18 @@ See [the research report](docs/research.md) and
 - [ ] Add LoRA training to the WebUI and reach parity with gary4local's PyTorch implementation.
 - [ ] Validate LoRA training on the Metal backend with unquantized and quantized bases, including checkpoint resume and trained-adapter inference.
 - [ ] Integrate this native backend into gary4local.
-- [ ] Replicate the release CI used by sa3.cpp and yuey.cpp for consistent releases across the sibling repos.
+- [x] Replicate the release CI used by sa3.cpp and yuey.cpp for consistent Windows/macOS packages (release acceptance pending).
+
+Release scripts and the supervisor contract are described in
+[packaging](docs/packaging.md). The [gary4local readiness audit](docs/GARY4LOCAL_READINESS.md)
+records training/API gaps, XL-base Q4 requirements, and complete-as-repaint
+continuation mapping. Native Carey integration and current-revision Metal LoRA
+validation remain open; building a package alone does not complete those gates.
+
+The [trainer caption API](docs/TRAINER_CAPTION_API.md) provides model-free local
+BPM/key suggestions and queued native auto-captioning for future SA3/ACE trainer
+integration. The [M4 handoff](docs/METAL_TRAINING_HANDOFF.md) records the remaining
+BF16 backward and current-revision Metal training gates.
 
 ## Runtime
 
@@ -175,18 +186,41 @@ This baseline crops only the audio latents. The complete caption, lyrics, and
 full-song duration from the sidecar remain attached to every window, and each
 logged window includes its reproducible song name, offset, and duration.
 `--examples-per-epoch N` can bound diagnostic runs while preserving
-deterministic epoch-level resume; zero uses the complete dataset. Large
-optimizer checkpoints can be throttled with `--checkpoint-every N`; zero
-disables intermediate checkpoints, and the final state is always saved once.
+deterministic resume; zero uses the complete dataset. Large optimizer
+checkpoints can be throttled with `--checkpoint-every N` (epochs) or
+`--checkpoint-every-steps N` (optimizer updates); zero disables that cadence.
+Final state is saved after completion or cooperative cancellation during training.
 
 Use `CUDA0`, `Vulkan0`, `MTL0`, or `CPU` for `GGML_BACKEND`. The output
 directory contains PEFT-compatible adapter files and complete native optimizer
-state. Pass an epoch checkpoint or PEFT adapter directory to `--resume`. Run
+state, the compatible training plan and a mid-epoch cursor. Pass a native
+checkpoint directory to `--resume` with the original training settings; a
+PEFT-only directory starts a weight-only restart. `--progress-file` and
+`--cancel-file` use SA3's host-control contract. See
+[training job control and continuation](docs/TRAINING_JOB_CONTROL.md) for the
+schema, schedule-budget rules and explicit migration of older checkpoints. Run
 `./build/ace-train --help` for optimizer, scheduling, batching, and model
 selection options.
 
 Use `--adapter-type dora-rows` to train a DoRA-row adapter instead. Metal LoRA
 training validation is tracked in the TODO list above.
+
+Training defaults to a reusable disk cache under `DATASET/.ace-train-cache`.
+`--preprocess-cache-dir` selects its location; `--cache-memory-mb` bounds prepared
+tensor residency and zero streams from disk. See the
+[preprocessing cache contract](docs/TRAINING_PREPROCESS_CACHE.md) for identities,
+memory limits, cancellation and cache cleanup ownership.
+
+`--genre-ratio 30` rotates tagged genre prompts across roughly 30 percent of
+tracks per epoch, retaining caption prompts for the remainder. See
+[caption/genre mixing](docs/TRAINING_PROMPT_MIXING.md) for small-dataset counts,
+missing-genre fallback and deterministic resume.
+
+Training also appends SA3-style `metrics.jsonl` history with loss, applied learning
+rate, pre-clip gradient norm and timing for each optimizer update. See the
+[history contract](docs/TRAINING_HISTORY.md) for accumulation and resume semantics,
+and the [Carey parity checks](docs/TRAINING_CAREY_PARITY.md) for numerical scope.
+Training loss does not select or rank the saved adapters.
 
 ## Server options
 

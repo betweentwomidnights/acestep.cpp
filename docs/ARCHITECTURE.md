@@ -329,6 +329,10 @@ outpainting (start < 0) or source duration otherwise.
 Negative start outpaints before the source, end beyond source duration
 outpaints after. The source audio is padded with silence before VAE
 encoding. `audio_cover_strength` is ignored (the mask handles everything).
+The caption may be empty for direct `ace-synth` and server `/synth` repaint
+requests, including continuation through outpainting. Source audio or source
+latents are still required. An empty caption retains the task instruction,
+metadata, lyrics and source context; it is not the CFG null-conditioning path.
 
 ```bash
 # Inpaint: regenerate seconds 10-25
@@ -466,9 +470,10 @@ require a base or SFT model (not turbo).
 ## Request JSON reference
 
 Every field below has a default. Omitting a field from the JSON is strictly
-equivalent to sending that field with its default value. Only `caption` is
-effectively required: the other defaults produce a valid text2music job on
-their own, but without caption the LLM has nothing to work from.
+equivalent to sending that field with its default value. `caption` is required
+for LM generation and direct text2music synthesis. Direct synthesis accepts an
+empty caption for `repaint`, `lego`, `extract` and `complete`, which use source
+audio or source latents without the LM.
 
 ```json
 {
@@ -531,7 +536,7 @@ picks the audio encoder: `"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`.
 
 ### Text conditioning (ace-lm + ace-synth)
 
-**`caption`** (string, required)
+**`caption`** (string, default `""`; required except for the direct source tasks above)
 Natural language description of the music style, mood, instruments, etc.
 Fed to both the LLM and the DiT text encoder.
 
@@ -675,6 +680,11 @@ adapter is evaluated functionally or merged into the base weights.
 
 **`adapter_scale`** (float, default `1.0`)
 Adapter scaling factor. Only used when `adapter` is set.
+Exactly zero bypasses adapter loading and retains the normal unadapted DiT
+graph, including projection fusion. Functional adapters at nonzero strengths
+use separate projections. On quantized CUDA inference, changing that graph
+layout alone can change floating-point results; a zero-strength control must
+therefore preserve the unadapted layout as well as bypassing adapter arithmetic.
 
 ### LM sampling (ace-lm)
 

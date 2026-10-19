@@ -214,7 +214,8 @@ static bool ace_train_adapter_adamw_step_accumulated(ACETrainAdapterGraphState &
                                                      ACETrainAdapterOptimizer &           optimizer,
                                                      const ACETrainAdamWConfig &          config,
                                                      ACETrainAdapterGradientAccumulator & accumulator,
-                                                     std::string &                        error) {
+                                                     std::string &                        error,
+                                                     double *                             grad_norm_out = nullptr) {
     error.clear();
     if (graph_state.params.size() != state.params.size() || state.params.empty() ||
         accumulator.params.size() != state.params.size() || accumulator.microbatch_count <= 0 ||
@@ -243,12 +244,15 @@ static bool ace_train_adapter_adamw_step_accumulated(ACETrainAdapterGraphState &
         add_norm(gradient.magnitude);
     }
 
-    const double global_norm    = std::sqrt(global_norm_sq);
-    const float  clip_scale     = (config.max_gradient_norm > 0.0f && global_norm > config.max_gradient_norm) ?
-                                      (float) (config.max_gradient_norm / global_norm) :
-                                      1.0f;
-    const float  gradient_scale = accumulation_scale * clip_scale;
-    const int    next_step      = optimizer.step + 1;
+    const double global_norm = std::sqrt(global_norm_sq);
+    if (grad_norm_out) {
+        *grad_norm_out = global_norm;
+    }
+    const float clip_scale     = (config.max_gradient_norm > 0.0f && global_norm > config.max_gradient_norm) ?
+                                     (float) (config.max_gradient_norm / global_norm) :
+                                     1.0f;
+    const float gradient_scale = accumulation_scale * clip_scale;
+    const int   next_step      = optimizer.step + 1;
     if (optimizer.params.size() != state.params.size()) {
         optimizer.params.resize(state.params.size());
     }

@@ -11,6 +11,9 @@
 #include <string>
 #include <vector>
 
+// Included in both prepared-cache and immutable resume-plan identities.
+static constexpr const char * ACE_TRAIN_PREPROCESS_ALGORITHM = "ace-full-song-preprocessing-v2";
+
 enum ACETrainTagPosition {
     ACE_TRAIN_TAG_PREPEND,
     ACE_TRAIN_TAG_APPEND,
@@ -18,8 +21,9 @@ enum ACETrainTagPosition {
 };
 
 struct ACETrainPreprocessConfig {
-    ACETrainTagPosition tag_position = ACE_TRAIN_TAG_PREPEND;
-    bool                use_genre    = false;
+    ACETrainTagPosition tag_position   = ACE_TRAIN_TAG_PREPEND;
+    bool                use_genre      = false;
+    bool                genre_variants = false;
 };
 
 AceRequest ace_training_request(const ACETrainingExample &       example,
@@ -38,7 +42,9 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
                                   uint64_t                                seed,
                                   const ACETrainPreprocessConfig &        config,
                                   std::vector<ACETrainDiffusionExample> & prepared,
-                                  std::string &                           error);
+                                  std::string &                           error,
+                                  bool (*cancel)(void *) = nullptr,
+                                  void * cancel_data     = nullptr);
 
 bool ace_training_null_condition(const AceSynth * synth, std::vector<float> & condition, std::string & error);
 
