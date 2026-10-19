@@ -9,6 +9,7 @@
 // (a DAW, another model) shares the GPU.
 
 #pragma once
+#include "backend.h"
 #include "ggml-backend.h"
 #include "ggml.h"
 
@@ -67,11 +68,13 @@ static size_t vae_tile_bytes(ggml_backend_sched_t sched, ggml_backend_t backend,
 // The largest candidate tile whose graph fits on `backend` now. `full_length`
 // is the whole input in latent frames: a tile never needs to be longer.
 // `to_graph_length` converts a tile in latent frames to the graph's input
-// length (audio samples for the encoder). The caller's cached graph must be
-// dropped first; measuring resets the scheduler.
+// length (audio samples for the encoder). Candidates are measured on a
+// scratch scheduler over the same devices: measuring replans a scheduler's
+// allocations, and the caller's `sched` must keep the plan for its graph.
 template <typename Build, typename ToGraphLength>
 static int vae_tile_choose(ggml_backend_sched_t sched,
                            ggml_backend_t       backend,
+                           ggml_backend_t       cpu_backend,
                            int                  full_length,
                            Build                build,
                            ToGraphLength        to_graph_length,
@@ -81,15 +84,19 @@ static int vae_tile_choose(ggml_backend_sched_t sched,
     // The scheduler's compute buffer is ours to reuse, so it counts as free.
     const size_t available = free_bytes + ggml_backend_sched_get_buffer_size(sched, backend);
 
-    const int smallest = VAE_TILE_CANDIDATES[sizeof(VAE_TILE_CANDIDATES) / sizeof(int) - 1];
+    const BackendPair    pair     = { backend, cpu_backend, backend != cpu_backend };
+    ggml_backend_sched_t scratch  = backend_sched_new(pair, 8192);
+    const int            smallest = VAE_TILE_CANDIDATES[sizeof(VAE_TILE_CANDIDATES) / sizeof(int) - 1];
     for (int tile : VAE_TILE_CANDIDATES) {
         const int    length = std::min(tile, full_length);
-        const size_t needed = vae_tile_with_headroom(vae_tile_bytes(sched, backend, build, to_graph_length(length)));
+        const size_t needed = vae_tile_with_headroom(vae_tile_bytes(scratch, backend, build, to_graph_length(length)));
         if (needed <= available || tile == smallest) {
+            ggml_backend_sched_free(scratch);
             fprintf(stderr, "[%s] Auto tile: %d frames (needs %zu MiB, %zu MiB available)%s\n", tag, tile, needed >> 20,
                     available >> 20, needed <= available ? "" : " -- may not fit");
             return tile;
         }
     }
+    ggml_backend_sched_free(scratch);
     return smallest;
 }

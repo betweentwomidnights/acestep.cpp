@@ -369,18 +369,6 @@ static struct ggml_tensor * vae_ggml_build_graph(struct ggml_context * ctx,
     return x;  // [T_audio, 2]
 }
 
-// Drop the cached graph so the next compute rebuilds it.
-static void vae_ggml_drop_graph(VAEGGML * m) {
-    if (m->graph_ctx) {
-        ggml_backend_sched_reset(m->sched);
-        ggml_free(m->graph_ctx);
-        free(m->graph_buf);
-        m->graph_ctx = NULL;
-        m->graph_buf = NULL;
-    }
-    m->graph_T = 0;
-}
-
 // Core compute: ensure graph cached, set input, run. Returns T_audio or -1.
 // Output remains in m->graph_output for caller to read as needed.
 static int vae_ggml_compute(VAEGGML *     m,
@@ -488,9 +476,8 @@ static int vae_ggml_decode_tiled(VAEGGML *     m,
                                  bool (*cancel)(void *)   = nullptr,
                                  void * cancel_data       = nullptr) {
     if (chunk_size <= 0) {
-        vae_ggml_drop_graph(m);
         chunk_size = vae_tile_choose(
-            m->sched, m->backend, T_latent,
+            m->sched, m->backend, m->cpu_backend, T_latent,
             [m](struct ggml_context * ctx, int T) {
                 return vae_ggml_build_graph(ctx, m, ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T, 64));
             },

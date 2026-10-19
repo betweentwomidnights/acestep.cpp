@@ -244,18 +244,6 @@ static struct ggml_tensor * vae_enc_build_graph(struct ggml_context * ctx,
 
 // Core compute: build/cache graph, set input, run. Returns T_latent or -1.
 // Output stays in m->graph_output for caller to read.
-// Drop the cached graph so the next compute rebuilds it.
-static void vae_enc_drop_graph(VAEEncoder * m) {
-    if (m->graph_ctx) {
-        ggml_backend_sched_reset(m->sched);
-        ggml_free(m->graph_ctx);
-        free(m->graph_buf);
-        m->graph_ctx = NULL;
-        m->graph_buf = NULL;
-    }
-    m->graph_T = 0;
-}
-
 static int vae_enc_compute(VAEEncoder *  m,
                            const float * audio,  // [T_audio, 2] time-major interleaved stereo
                            int           T_audio) {
@@ -404,9 +392,8 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
                                 int                   overlap    = 64,
                                 VAEEncLatentSampler * sampler    = nullptr) {
     if (chunk_size <= 0) {
-        vae_enc_drop_graph(m);
         chunk_size = vae_tile_choose(
-            m->sched, m->backend, (T_audio + 1919) / 1920,
+            m->sched, m->backend, m->cpu_backend, (T_audio + 1919) / 1920,
             [m](struct ggml_context * ctx, int T) {
                 return vae_enc_build_graph(ctx, m, ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T, 2));
             },
