@@ -146,7 +146,7 @@ int main(int argc, char ** argv) {
         }
         request_dump(&reqs[ri], stderr);
         if (reqs[ri].caption.empty() && reqs[ri].task_type != TASK_LEGO && reqs[ri].task_type != TASK_EXTRACT &&
-            reqs[ri].task_type != TASK_COMPLETE) {
+            reqs[ri].task_type != TASK_COMPLETE && reqs[ri].task_type != TASK_REPAINT) {
             fprintf(stderr, "[Ace-Synth] FATAL: caption is empty in %s\n", rpath);
             return 1;
         }

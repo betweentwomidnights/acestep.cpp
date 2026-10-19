@@ -211,6 +211,11 @@ tensor residency and zero streams from disk. See the
 [preprocessing cache contract](docs/TRAINING_PREPROCESS_CACHE.md) for identities,
 memory limits, cancellation and cache cleanup ownership.
 
+`--genre-ratio 30` rotates tagged genre prompts across roughly 30 percent of
+tracks per epoch, retaining caption prompts for the remainder. See
+[caption/genre mixing](docs/TRAINING_PROMPT_MIXING.md) for small-dataset counts,
+missing-genre fallback and deterministic resume.
+
 Training also appends SA3-style `metrics.jsonl` history with loss, applied learning
 rate, pre-clip gradient norm and timing for each optimizer update. See the
 [history contract](docs/TRAINING_HISTORY.md) for accumulation and resume semantics,

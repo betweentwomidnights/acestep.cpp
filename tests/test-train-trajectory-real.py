@@ -7,9 +7,12 @@ It is not a replay of Carey's Fabric job loop or the historical Spark run.
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import time
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -18,9 +21,13 @@ p.add_argument('--carey-root', type=Path, required=True)
 p.add_argument('--checkpoint-root', type=Path, required=True)
 p.add_argument('--trajectory', type=Path, required=True)
 p.add_argument('--adapter-precision', choices=('fp32', 'model'), default='fp32')
+p.add_argument('--precision', choices=('bf16', 'fp32'), default='bf16',
+               help='FP32 is a decoder-only arithmetic diagnostic, widening the same BF16 frozen values')
+p.add_argument('--attention', choices=('auto', 'math'), default='auto')
 p.add_argument('--timestep-precision', choices=('fp32', 'model'), default='model',
                help='FP32 isolates native timestep math; model measures Carey BF16 sampling/storage')
 a = p.parse_args()
+os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
 spec = importlib.util.spec_from_file_location('step_parity', Path(__file__).with_name('test-train-step-parity.py'))
 helpers = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helpers)
@@ -35,7 +42,19 @@ from acestep.training_v2.optim import build_optimizer
 torch.manual_seed(42)
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
-model = load_decoder_for_training(a.checkpoint_root, variant='base', device='cuda', precision='bf16')
+if a.attention == 'math':
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+dtype = torch.float32 if a.precision == 'fp32' else torch.bfloat16
+if a.precision == 'fp32':
+    loaded = load_decoder_for_training(a.checkpoint_root, variant='base', device='cpu', precision='bf16')
+    model = SimpleNamespace(decoder=loaded.decoder)
+    del loaded
+    model.decoder.to(device='cuda', dtype=dtype)
+else:
+    model = load_decoder_for_training(a.checkpoint_root, variant='base', device='cuda', precision='bf16')
 model.decoder = PeftModel.from_pretrained(model.decoder, str(a.trajectory/'initial'), is_trainable=True,
                                         autocast_adapter_dtype=False)
 model.decoder.train()
@@ -51,9 +70,12 @@ starting = {k:v.detach().float().cpu().numpy().copy() for k,v in params.items()}
 optimizer = build_optimizer(list(params.values()), lr=3e-4, weight_decay=0.01, device_type='cuda')
 groups = {'A': lambda k:'.lora_A.' in k, 'B':lambda k:'.lora_B.' in k,
           'magnitude':lambda k:'magnitude' in k}
-report = {'scope':__doc__, 'adapter_precision':a.adapter_precision, 'timestep_precision':a.timestep_precision, 'torch':torch.__version__,
+report = {'scope':__doc__, 'adapter_precision':a.adapter_precision, 'timestep_precision':a.timestep_precision,
+          'compute_precision':a.precision, 'attention':a.attention, 'torch':torch.__version__,
           'device':torch.cuda.get_device_name(), 'updates':[], 'checkpoints':{}}
 tag = a.adapter_precision + ('-t-fp32' if a.timestep_precision == 'fp32' else '')
+if a.precision != 'bf16' or a.attention != 'auto':
+    tag += '-' + a.precision + '-' + a.attention
 path = a.trajectory/f'torch-trajectory-{tag}.json'
 if path.exists():
     raise RuntimeError('refusing to overwrite a previous trajectory report')
@@ -63,20 +85,20 @@ for row in native_rows:
     started=time.monotonic()
     directory=a.trajectory/str(row['update'])
     def tensor(name):
-        return torch.from_numpy(helpers.load_dump(directory/(name+'.bin'))).to(device='cuda',dtype=torch.bfloat16)
+        return torch.from_numpy(helpers.load_dump(directory/(name+'.bin'))).to(device='cuda',dtype=dtype)
     combined=tensor('input_latents'); target=tensor('target_velocity')
     enc=tensor('encoder_hidden')
     t=torch.from_numpy(helpers.load_dump(directory/'timesteps.bin')).to(device='cuda',
-         dtype=torch.float32 if a.timestep_precision == 'fp32' else torch.bfloat16)
+         dtype=torch.float32 if a.timestep_precision == 'fp32' else dtype)
     noisy=combined[...,128:]; context=combined[...,:128]
     optimizer.zero_grad(set_to_none=True)
     for group in optimizer.param_groups:
         group['lr']=row['lr']  # Exact applied native schedule; previously audited factory differences remain explicit.
-    with torch.autocast(device_type='cuda',dtype=torch.bfloat16):
+    with (torch.autocast(device_type='cuda',dtype=dtype) if dtype != torch.float32 else nullcontext()):
         prediction=model.decoder(hidden_states=noisy,timestep=t,timestep_r=t,
-            attention_mask=torch.ones(noisy.shape[:2],device='cuda',dtype=torch.bfloat16),
+            attention_mask=torch.ones(noisy.shape[:2],device='cuda',dtype=dtype),
             encoder_hidden_states=enc,
-            encoder_attention_mask=torch.ones(enc.shape[:2],device='cuda',dtype=torch.bfloat16),
+            encoder_attention_mask=torch.ones(enc.shape[:2],device='cuda',dtype=dtype),
             context_latents=context)[0]
         mse=torch.nn.functional.mse_loss(prediction,target,reduction='none').mean(dim=(-1,-2)).float()
         loss=(mse*flow_min_snr_weights(t,gamma=5.0)).mean().float()

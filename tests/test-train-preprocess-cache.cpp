@@ -102,6 +102,31 @@ int main() {
     expect(allocated.resident_bytes() == (actual_bytes <= allocated.memory_limit ? actual_bytes : 0),
            "budget accounts for allocated capacity after padding");
     expect(data.write(0, a, error), "restore original entry");
+    {
+        ACETrainPreparedDataset variants;
+        configure(variants);
+        variants.genre_variants = true;
+        variants.identities[0] += "/caption-and-genre";
+        auto mixed                          = a;
+        mixed.genre_encoder_sequence_length = 3;
+        mixed.genre_encoder_hidden.assign(12, 0.125f);
+        variants.observe(mixed);
+        variants.observe(b);
+        expect(variants.write(0, mixed, error) && variants.read_raw(0, loaded, error) &&
+                   loaded.genre_encoder_hidden == mixed.genre_encoder_hidden &&
+                   loaded.target_latents == a.target_latents && loaded.genre_encoder_sequence_length == 3,
+               "both prompts round trip with shared audio");
+        auto padded = variants.get(0, error);
+        expect(padded && padded->genre_encoder_hidden.size() == 16 && padded->genre_encoder_hidden[12] == 10 &&
+                   variants.resident_bytes() == 0,
+               "genre padding and both conditioning allocations count toward budget");
+        mixed.genre_encoder_sequence_length = 4;
+        expect(!variants.write(0, mixed, error), "invalid genre length rejected");
+        mixed = a;
+        expect(variants.write(1, mixed, error) && variants.read_raw(1, loaded, error) &&
+                   loaded.genre_encoder_hidden.empty(),
+               "missing genre remains caption-only in variant cache");
+    }
 #ifdef _WIN32
     HANDLE lock = CreateFileW(data.path(0).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     expect(lock != INVALID_HANDLE_VALUE, "simulate persistent reader lock");

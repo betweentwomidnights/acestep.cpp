@@ -674,4 +674,376 @@ has a distinct payload. Logs confirm actual CUDA0 execution, 256/64 VAE tiles,
 and all 352 DoRA projections loaded with none skipped for each adapted render.
 Original levels are preserved. `listening-validation.json` records these checks;
 the local `README.md` links the comparison grid. No listening preference or
-musical acceptance has been recorded.
+musical acceptance had been recorded when that grid was completed.
+
+Subsequent user listening feedback describes the current native adapter as close
+to the Spark reference, with a preference for Spark on the caption-only example,
+and describes native Lego vocals as sounding good. These are preferences on
+specific outputs, not acceptance of full training parity or a finding of
+overfitting. Both lyric-conditioned and wordless Lego outputs are retained in
+the local editing run.
+
+The caption audit confirms `custom_tag: billie` on all 13 native training
+sidecars, with prepend mode and `use_genre=false` in the immutable resume plan.
+The trigger is therefore present in this native adapter's training. The adapter
+is applied independently of caption text; the tag is a conditioning cue, not
+an inference enable switch. Native's global `--use-genre` still does not express
+Carey's rotating caption/genre mixture. The archived Spark 30-percent policy
+selected three fixed genre-conditioned tracks, including ilomilo. Its ilomilo
+example therefore used `billie, Synth-pop`, while this native run used the full
+ilomilo caption with the same tag. This difference can affect prompt responses;
+it does not establish the cause of a perceived musical resemblance.
+
+The initial continuation used a new generic instrumental caption with the tag,
+not the archived ilomilo caption. A matched follow-up clears only `caption`,
+retaining the same source, seed, adapter, 120 BPM/G major metadata, instrumental
+lyric marker and 8-to-120-second repaint region. It exposed a CLI/server guard
+that unnecessarily required repaint captions. Both direct synthesis entry points
+now accept empty repaint captions; multipart handler regressions cover acceptance
+and continued rejection of blank text2music captions. The actual CUDA0 blank
+render completes with all 352 DoRA projections and preserves the resampled
+eight-second source prefix bitexactly in the float master. An empty caption
+still carries task, metadata, lyrics and audio context, and is distinct from
+training's CFG null conditioning. Listening across new captions, seeds and
+earlier checkpoints is needed before attributing a resemblance to overfitting.
+
+On 2026-10-17 the user reports an excellent result from the Spark/SideStep
+adapter in the PyTorch backend with caption `billie` alone. This supports that
+minimal cue for that adapter; the remote output and complete effective request
+have not been captured locally. It does not independently isolate native
+training quality from precision or inference differences.
+
+The local Carey continuation path confirms inference shift 3.0: its wrapper
+maps complete to repaint and omits `shift`; `api_server.py` defaults both the
+request model and multipart parsing to 3.0, forwards `req.shift` into generation
+parameters, and `inference.py` forwards `params.shift` to the handler. The XL-base
+sampler applies that supplied value to its timestep schedule. Its low-level
+function signature defaults to 1.0, but that default is overridden on this API
+path. The native listening/continuation requests also explicitly use 3.0.
+This source trace verifies the local checkout, not the deployed remote process.
+
+That control completed on 2026-10-18: the unchanged Spark epoch-137 adapter
+rendered a 120-second continuation in native XL Q4 repaint, using the same
+86 BPM source and request as the previous native-adapter comparison. Only the
+adapter selection changes: caption `billie`, instrumental lyric marker, seed
+424242, 50 Euler steps, CFG 7 and shift 3 remain fixed. Model, frozen runtime,
+backend DLL and adapter hashes were checked. Actual CUDA0 executes both VAE
+and DiT; all 352 DoRA projections load with none skipped. The local run is
+`build-release-validation/billie-spark-q4-repaint-20261018/`.
+
+The source-preserving float master retains the full resampled source clip,
+following the same assembly as the prior comparison; raw native output is
+retained separately with its 25-Hz waveform-splice boundary. The new PCM24
+audition uses the exact previous shared gain, with no clipping. Source and
+previous comparison assets are unchanged. Human listening remains pending;
+the remote run's complete effective settings have not been captured. Holding
+the trained adapter fixed helps investigate native/PyTorch
+inference differences before assigning a result to native training. Caption/
+genre sampling, crop policy and adapter dropout remain known training-policy
+differences, rather than established causes of the reported musical difference.
+
+The user subsequently confirmed on 2026-10-18 that the successful PyTorch take
+used empty lyrics. The preceding native continuations used `[Instrumental]`;
+that is a material vocal-conditioning difference, so those outputs do not form
+a matched remote/native comparison. A corrected pair uses caption `billie` and
+empty lyrics for both the Spark and native epoch-150 adapters, retaining the
+same 86 BPM source, Q4 model, seed and inference settings. These direct native
+requests bypass the LM; empty lyrics do not imply an LM-generated lyric pass.
+Both corrected 120-second renders completed on CUDA0 with all 352 DoRA
+projections loaded and none skipped. Their raw payloads differ from each other
+and from their corresponding `[Instrumental]` takes. The same previous playback
+gain fits both without clipping; source-preserving float masters and raw native
+outputs remain separate. Requests, hashes and logs are retained under
+`build-release-validation/billie-repaint-empty-lyrics-20261018/`. Human listening
+and a captured remote effective request remain outstanding before drawing a
+musical-quality or quantization-parity conclusion.
+
+The user describes very long beat drops in both the Spark epoch-137 and native
+epoch-150 continuations and raises Q4 adapter/repaint inference as a possibility.
+This shared listening observation is not evidence of native-training overfitting
+by itself. A fresh matched `[Instrumental]` pair uses seed 424243, retaining the
+86 BPM source and all other generation settings. The earlier instrumental
+seed-424242 takes remain the seed control; comparing this new pair with the
+empty-lyrics pair changes both lyric conditioning and seed. The cause of the
+reported arrangement behavior remains open.
+When asked about the unadapted XL Q4 control, the user clarifies that the long
+drops occur mainly in the adapted takes. This makes the adapter/repaint path a
+priority for investigation, while remaining a qualitative observation rather
+than proof of a quantization or functional-DoRA defect.
+The fresh instrumental pair completed on CUDA0 with all 352 DoRA projections
+loaded for both adapters. Both outputs are 120-second stereo WAVs at seed
+424243 and use the unchanged previous shared playback gain. Logs, requests,
+raw audio and source-preserving masters are retained under
+`build-release-validation/billie-repaint-instrumental-seed2-20261018/`.
+
+For that fresh pair, the user reports the two outputs are fairly close
+musically, with higher quality from Spark, and describes muffled drums and
+generally muffled audio in both adapted continuations relative to unadapted Q4.
+This feedback is recorded as a listening observation. A source trace places
+adapter parameters on the DiT model key only; source VAE, text and conditioning
+encoding precede the adapted DiT load. This does not replace a captured tensor
+comparison: verify identical encoder/context/noise tensors with adapters off/on,
+then check adapter scale zero against the unadapted result and inspect DoRA
+strength behavior before assigning the muffling to training or quantization.
+
+The 2026-10-18 tensor investigation reproduced a separate zero-strength issue.
+All 11 captured VAE/text/lyric/combined-conditioning, null-conditioning,
+schedule, initial-noise and repaint-context tensors match byte for byte, but
+the original Spark scale-zero render differs from the default unadapted render.
+Its DiT latent RMS difference is 0.116531 and decoded-waveform RMS difference is
+0.0399924. Selecting a functional adapter disables projection fusion even at
+zero; the default unadapted XL Q4 graph fuses self-attention Q/K and MLP gate/up.
+An isolated unadapted build with projection fusion disabled reproduces the
+original scale-zero DiT latents, decoded waveform and raw WAV **bitexactly**.
+The temporary fusion override was restored; it is not a production policy.
+
+The DiT loader now bypasses an exactly-zero adapter before deciding projection
+fusion, preserving the normal unadapted graph. Actual CUDA0 checks for both
+Spark and native adapters now reproduce unadapted input captures, DiT latents,
+VAE output and raw WAV byte for byte. Strength-one renders for both adapters
+also reproduce their previous raw WAV hashes, so this fix does not change the
+reported strength-one muffling. The existing CPU functional LoRA/DoRA tests
+pass. The shared ggml pin and frozen validation DLLs are unchanged.
+
+The original failure and unfused control are retained under
+`build-release-validation/billie-repaint-adapter-checks-20261018/`; the corrected
+matrix is under the sibling directory ending `-zero-fixed/`. Source tensor
+captures are valid host snapshots and terminal outputs; scratch intermediate
+graph tensors are not used as numerical evidence because their storage can be
+reused after graph execution. These results isolate a graph-layout effect and
+rule out changed encoder inputs in this fixture, not the cause of the adapted
+audio's perceived muffling. The positive-strength sweep and later matched
+PyTorch comparison address the remaining inference question.
+
+The corrected matrix completed all nine CUDA0 renders: unadapted Q4 and both
+adapters at strengths 0, 0.25, 0.5 and 1. All 11 captured input tensors match
+bitexactly in every case; both zero controls match unadapted DiT/VAE/WAV outputs,
+and both strength-one files match their preceding raw WAV hashes. The recorded
+spectral measures use generated audio from six seconds onward, excluding the
+source. Fused/unfused unadapted controls have similar 8-20 kHz energy fractions
+(8.11%/7.82%) and spectral centroids (1864/1840 Hz). Full-strength Spark/native
+outputs have lower fractions (2.31%/1.07%) and centroids (830/512 Hz). At strength
+0.5 the fractions are 14.13%/11.25% and centroids 2321/2049 Hz; the trend is not
+monotonic. These arrangement-dependent diagnostics support listening tests;
+they do not independently establish a filter, normalization defect or musical
+quality. Shared-gain and generated-tail-RMS-matched auditions are retained.
+
+The local corrected run's `RESULTS.md`, spectral figure and
+`validation-summary.json` summarize the checks. A 4.6 MB
+`reference-inputs-for-spark.zip` contains the source input, requests, reference
+input tensors, adapter configs, model/adapter hashes, source patch and handoff
+notes; model and adapter weight files are not duplicated in that small bundle.
+No DGX execution or remote numerical parity is claimed. Compare effective
+adapter strength policy and captured initial noise/conditioning, not seed alone,
+when preparing a PyTorch reference on the Spark.
+
+The user rejects both half-strength auditions as poor musical results,
+describing an almost immediate beat drop, skittering hi-hat-like sounds and
+cavernous background ambience. The higher measured high-frequency energy is
+therefore not musical improvement. The matched unadapted Q4 control is provided
+for listening with the same seed 424243, caption, lyric marker, source,
+sampler settings and shared playback gain.
+
+After hearing that matched unadapted control, the user also judged this seed's
+unadapted result poor and asked to resume release-readiness work. This weakens
+the musical case for assigning these particular failed takes to the adapters.
+It does not invalidate the independently reproduced zero-strength graph issue,
+or establish general Q4/PyTorch inference equivalence. Retain the evidence and
+stop extending this listening matrix without a new, specific failure to isolate.
+
+### Remaining trainer work after the listening controls — 2026-10-18
+
+The next concrete training-policy gap is caption/genre mixing. Native currently
+selects captions or genres globally; current Carey caches both prompt variants
+and rotates genre selections across tracks and epochs. A native implementation
+should keep one track per epoch, preserve trigger/tag placement for both
+variants, and include the policy and deterministic selection in cache identity
+and full-state resume. Validate small-dataset ratios, missing-genre fallback,
+and uninterrupted versus mid-epoch resumed training before another long run.
+The archived Spark run's fixed genre subset is a different policy; neither
+policy difference has been established as the cause of the listening preference.
+
+Strict numerical parity also remains open: the controlled regular-base BF16
+longer trajectory diverged, and the shared-noise/conditioning follow-ups isolate
+precision and lyric/timbre policy differences without closing that gate. Keep
+these component comparisons separate from practical native Q4 acceptance.
+Preserve native training/inference conditioning consistency and FP32 adapter /
+optimizer state rather than copying Python rounding or padding behavior merely
+to match it. Fisher analysis and best-loss checkpoint selection are not required
+for the intended native trainer.
+
+After the prompt-policy work, use a bounded Q4 training/resume check and the
+existing controlled numerical fixtures to assess new changes. Current-revision
+Metal training validation and downstream native trainer integration remain
+separate release-readiness gates. The successful 150-epoch Q4 run, history and
+resume checks are practical evidence, not a claim of full Carey/SideStep parity.
+
+### Prompt mixing and arithmetic isolation — 2026-10-18
+
+**Rotating prompt mixing is implemented.** `ace-train --genre-ratio 0..100`
+follows current Carey's one-track-per-epoch substitutions, cumulative rounding
+for fractional small-dataset counts, and seeded genre-track cycle. Native keeps
+its C++ RNG/order rather than claiming Python RNG identity. Both variants retain
+tag placement and full-song metadata/lyrics. Missing genres fall back to captions.
+Audio/posterior tensors are shared; mixed cache entries add only the alternate
+conditioning. Ratio and sampler version are immutable resume settings; both
+conditioning allocations count toward the LRU budget. Existing default plans
+and single-prompt cache representation are preserved. See
+`TRAINING_PROMPT_MIXING.md` for the full contract and validation scope.
+
+CUDA0 XL Q4 balanced rank-8 LoRA and DoRA each pass uncached/cold/warm-streamed
+and mid-epoch resume comparisons: adapter/config/optimizer/trainer-state payloads
+match bitexactly. The three-track fixture includes unequal caption lengths and
+one missing genre. All 21 model-free Windows CTests pass. This closes the native
+prompt-policy feature gap; the prior 150-epoch adapter still used captions only.
+The same complete matrix also passes on the RTX 5070 through NVIDIA Vulkan0;
+identities/checkpoints are compared within each backend, not across backends.
+
+**Frozen values are identical in the regular-base reference.** The optional
+GGUF audit in `test-train-rebased-real.py` compares all 476 decoder parameters
+against Carey's loaded BF16 checkpoint: zero differing tensors. The retained
+update-17 native replay reproduces its original forward and gradient captures
+bitexactly. This isolates arithmetic/trajectory effects from changed frozen
+weights in this fixture. It does not audit a dequantized XL Q4 Torch reference.
+
+The rebased fixture holds the native update-16 adapter and all update-17 inputs
+fixed, then compares forward/backward with no optimizer step. Torch FP32 math
+SDPA and BF16 math SDPA each repeat their forward/gradients bitexactly on CUDA0.
+The FP32-only decoder residency override fits here (about 6508 MiB peak Torch
+allocations). It widens the original BF16 frozen values, rather than loading a
+different FP32 checkpoint. Native training already disables flash attention.
+
+| Native policy / Torch policy, same adapter and inputs | Forward cosine | B / magnitude gradient cosine |
+| --- | --- | --- |
+| Default native / Torch BF16, math SDPA | 0.998858 | 0.7543 / 0.8163 |
+| Default native / Torch FP32, math SDPA | 0.999864 | 0.9435 / 0.9356 |
+| Native TF32 off only / Torch FP32 | 0.999870 | 0.9254 / 0.9167 |
+| Native FP32 cuBLAS + TF32 off / Torch FP32 | 0.999955 | 0.9773 / 0.9728 |
+| Widened F32 GGUF, same frozen values, FP32 cuBLAS + TF32 off / Torch FP32 | 0.999955 | 0.9773 / 0.9728 |
+
+The native controls use `GGML_CUDA_CUBLAS_COMPUTE_TYPE=fp32` and
+`GGML_CUDA_TF32=0`. These affect cuBLAS; custom CUDA matmul paths can bypass the
+compute-type environment selector. They are diagnostics, not a claim that every
+operation becomes identical FP32 arithmetic. Disabling TF32 alone is not an
+equivalence fix. Widening frozen storage adds no material agreement beyond the
+cuBLAS control in this update. Original model/checkpoint files are unchanged.
+
+A fresh **26-update** trajectory with the same full-song fixtures, windows,
+initial adapters, random inputs and applied LR schedule compares native FP32
+cuBLAS/TF32-off against Torch FP32 math SDPA:
+
+| Metric | Earlier BF16 comparison | Arithmetic controls |
+| --- | --- | --- |
+| Worst forward cosine (update 17) | 0.369762 | 0.976568 |
+| Maximum relative loss error | 0.595625 | 0.020600 |
+| Final A / B / magnitude parameter-delta cosine | 0.9545 / 0.9536 / 0.9660 | 0.9961 / 0.9964 / 0.9963 |
+| Peak Torch allocations | 5119 MiB | 6575 MiB |
+
+**Strict longer-trajectory parity remains open.** The worst forward still misses
+the existing 0.99 gate; preclip gradient norms differ substantially on some
+updates (up to about 6.98x Torch/native at update 23). Better final adapter-change
+directions and closer losses do not close that gap. These controls establish
+that compute policy matters, not that all remaining differences are harmless
+rounding, or that a specific kernel is faulty. The next numerical diagnostic is
+same-weight per-layer forward/backward isolation at the remaining sensitive
+updates. Actual Carey/Fabric BF16 training and historical SideStep equivalence
+are separate from this FP32 decoder/optimizer comparison.
+
+Nondefault CUDA cuBLAS/TF32 policies are now recorded canonically in the native
+immutable plan. Full-state resume rejects changing those policies; default plans
+retain their existing representation. Production training precision defaults,
+the shared ggml pin, and downstream Carey are unchanged. No BF16 frozen-DiT
+backward validation on CPU/Metal, remote Spark execution or new long Q4 listening
+run is claimed. Local reports, requests, captures and the comparison plot are
+under `build-release-validation/trainer-gaps-20261018/`.
+
+Final source checks repeat all 26 native controlled updates with identical
+losses, gradient norms, adapters and 142 retained payloads. Both latest-build
+CUDA mixed-prompt resumes match the earlier uninterrupted checkpoints, and an
+actual CLI precision-policy mismatch fails before preprocessing. `manifest.json`
+records the final binaries, build/device identities and source snapshot;
+`RESULTS.md` summarizes the outcome. These changes were local/uncommitted at
+measurement time; see the publication handoff below.
+
+### Focused update-17 layer trace — 2026-10-18
+
+The regular-base arithmetic-control trajectory's native update-16 adapter and
+exact update-17 inputs are held fixed. A diagnostic observer on production
+checkpointed backward copies persistent forward boundaries after the forward
+graph and each boundary gradient before its ping-pong buffer is reused. The
+replay CLI exposes this through `--trace`; normal training passes no observer.
+Torch activation hooks also retain host copies. Enabling either trace leaves
+its final prediction and every adapter gradient **bitexactly unchanged** against
+the corresponding untraced control. No scratch graph tensor is treated as a
+persistent activation.
+
+Input projection, projected conditioning and timestep features agree closely:
+relative L2 is approximately 3.2e-7, 6.1e-7 and 0.7–2.7e-7 respectively. Forward
+differences accumulate across the 24 layers rather than revealing a large abrupt
+first-layer failure. At identical adapter weights the complete prediction cosine
+is 0.9998305; A/B/magnitude gradient cosines are 0.999907/0.999962/0.999966, while
+gradient norms still differ by roughly 14 percent. This is a same-weight replay,
+separate from the independent 26-update comparison's 0.976568 worst forward.
+
+**Every layer is also isolated.** Feed the actual Torch/PEFT layer the native
+input boundary, timestep modulation, projected condition and incoming native
+loss gradient, then compute its vector-Jacobian product. Native masks are
+equivalent here: 77 latent patches fit inside the 128-patch sliding window,
+and all captured temporal/encoder positions are valid. Frozen values and
+FP32 trainable parameters remain shared; Torch uses deterministic FP32 math
+SDPA, native uses FP32 cuBLAS/TF32-off controls with BF16 frozen storage.
+
+| Worst result over all 24 independently reset layers | Value |
+| --- | --- |
+| Forward cosine | 0.999999522 |
+| Forward relative L2 | 0.000978 |
+| Input-gradient cosine | 0.999955476 |
+| Input-gradient relative L2 | 0.009437 |
+| A/B/magnitude gradient cosine, minimum across groups/layers | 0.999984386 |
+| A/B/magnitude gradient relative L2, maximum across groups/layers | 0.005645 |
+
+Resetting the output head to the native final boundary and timestep embedding
+reproduces the real loss to the reported F32 value (1.113356113433838). Output
+and input-gradient relative L2 are 7.8e-7 and 7.3e-7 respectively. The comparison
+includes the actual norm/modulation, transposed-convolution projection and
+Min-SNR loss, rather than a synthetic output-head objective.
+
+These checks find **no additional broken backward operator in this controlled
+case**. The results support accumulated numerical differences and sensitivity
+across composed layers/independent optimizer trajectories as the explanation to
+investigate, rather than justifying another production kernel change. They do
+not establish that every backend/type is equivalent or close the strict longer
+trajectory gate. In particular, this is regular-base DoRA on CUDA0, not a new
+XL Q4 Torch comparison, actual Carey/Fabric run, or Metal result.
+
+All 21 model-free CTests pass with the observer API present. Latest-build Q4
+CUDA LoRA and NVIDIA Vulkan DoRA resumes reproduce the prior uninterrupted
+adapter/config/optimizer/trainer-state payloads exactly with tracing disabled.
+Runtime defaults, ggml and downstream Carey are unchanged. Reports, all layer
+captures, trace-invariance checks and the figure are retained under
+`build-release-validation/trainer-layer-trace-20261018/`. The fixtures can be
+reused for a concrete future failure; another broad listening sweep is not
+required by this result.
+
+### PR #10 publication handoff — 2026-10-18
+
+The release-readiness branch now includes the prompt-mixing implementation,
+variant cache/resume and arithmetic-policy guards, blank-caption repaint,
+zero-strength adapter graph fix, input capture hooks, and reusable trajectory /
+layer-trace fixtures. The relevant code, tests and documentation are included
+in [PR #10](https://github.com/betweentwomidnights/acestep.cpp/pull/10) so downstream
+audits can use its published head rather than this machine's working files.
+
+Raw listening audio, training checkpoints, model weights, tensor captures and
+build outputs remain local validation artifacts. They are not runtime source
+dependencies. The detailed metrics and limitations above are recorded here;
+the committed opt-in fixtures reproduce the numerical experiments given the
+local reference models/data. The unrelated working edit to
+`docs/TRAINING_CONTROL_VALIDATION.md` is excluded from this publication.
+
+Local final gates include 21/21 model-free CTests, clang-format checks for the
+changed C++ files, and Python fixture syntax checks, alongside the GPU evidence
+above. Current-head CI and package dry-run results must be checked separately
+on the PR; historical CI success does not validate a newly published head.
+The PR remains a draft with the documented Metal, caption semantic acceptance,
+clean-machine packaging, application integration and strict trajectory gaps.

@@ -21,8 +21,9 @@ enum ACETrainTagPosition {
 };
 
 struct ACETrainPreprocessConfig {
-    ACETrainTagPosition tag_position = ACE_TRAIN_TAG_PREPEND;
-    bool                use_genre    = false;
+    ACETrainTagPosition tag_position   = ACE_TRAIN_TAG_PREPEND;
+    bool                use_genre      = false;
+    bool                genre_variants = false;
 };
 
 AceRequest ace_training_request(const ACETrainingExample &       example,

@@ -11,6 +11,29 @@ static void expect(bool ok, const char * message) {
 }
 
 int main() {
+    auto parse_ratio = [](const char * ratio, bool global, bool expected) {
+        std::vector<std::string> arguments = { "ace-train", "--validate-dataset", "--dataset",
+                                               "unused",    "--genre-ratio",      ratio };
+        if (global) {
+            arguments.emplace_back("--use-genre");
+        }
+        std::vector<char *> pointers;
+        for (auto & argument : arguments) {
+            pointers.push_back(argument.data());
+        }
+        ACETrainCommand parsed;
+        const bool      ok = parse_command(int(pointers.size()), pointers.data(), parsed);
+        expect(ok == expected, "genre ratio bounds and conflicting global mode");
+        if (ok) {
+            expect(parsed.preprocess.genre_variants == (parsed.genre_ratio > 0),
+                   "positive ratio prepares alternatives");
+        }
+    };
+    parse_ratio("0", false, true);
+    parse_ratio("100", false, true);
+    parse_ratio("101", false, false);
+    parse_ratio("-1", false, false);
+    parse_ratio("30", true, false);
     namespace fs        = std::filesystem;
     const fs::path root = fs::temp_directory_path() / ("ace-plan-" + std::to_string(std::random_device{}()));
     fs::create_directories(root);
@@ -139,6 +162,30 @@ int main() {
                cache.identities != alternative.identities,
            "model content invalidates preprocessing");
     write(vae.path, "VAE");
+    changed                           = command;
+    changed.genre_ratio               = 30;
+    changed.preprocess.genre_variants = true;
+    expect(make_resume_plan(changed, dit, text, vae, sources, other, error) && !restore(original, other, 0, 1),
+           "adding rotating prompt policy rejects old resume plan");
+    expect(prepare_cache_identities(changed, other, params, alternative, error) &&
+               cache.identities != alternative.identities && alternative.genre_variants,
+           "dual conditioning changes cache identity");
+    const auto mixed_identities = alternative.identities;
+    const auto mixed_plan       = other;
+    changed.genre_ratio         = 60;
+    expect(make_resume_plan(changed, dit, text, vae, sources, other, error) &&
+               prepare_cache_identities(changed, other, params, alternative, error) &&
+               mixed_identities == alternative.identities,
+           "ratio changes reuse both encoded variants");
+    {
+        const auto             state = ace_train_continuation(mixed_plan, original);
+        auto *                 saved = yyjson_read(state.data(), state.size(), 0);
+        ACETrainResumeProgress actual;
+        expect(ace_train_restore_progress(yyjson_doc_get_root(saved), mixed_plan, 0, 1, actual, error) &&
+                   !ace_train_restore_progress(yyjson_doc_get_root(saved), other, 0, 1, actual, error),
+               "mixed prompt resume accepts exact ratio and rejects changed ratio");
+        yyjson_doc_free(saved);
+    }
     changed        = command;
     changed.epochs = 4;
     expect(make_resume_plan(changed, dit, text, vae, sources, other, error) && !restore(original, other, 0, 1),
@@ -163,6 +210,41 @@ int main() {
            "metadata edits invalidate only the changed example");
     write(sources[0].metadata_path, "metadata");
     const auto relocated = root / "moved";
+    {
+        auto environment = [](const char * key, const char * value) {
+#ifdef _WIN32
+            _putenv_s(key, value);
+#else
+            if (*value) {
+                setenv(key, value, 1);
+            } else {
+                unsetenv(key);
+            }
+#endif
+        };
+        const std::string old_tf32 = std::getenv("GGML_CUDA_TF32") ? std::getenv("GGML_CUDA_TF32") : "";
+        const std::string old_compute =
+            std::getenv("GGML_CUDA_CUBLAS_COMPUTE_TYPE") ? std::getenv("GGML_CUDA_CUBLAS_COMPUTE_TYPE") : "";
+        environment("GGML_CUDA_TF32", "0");
+        environment("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "fp32");
+        ACETrainResumePlan precise, alias, automatic;
+        expect(make_resume_plan(command, dit, text, vae, sources, precise, error), "record arithmetic overrides");
+        environment("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "F32");
+        expect(make_resume_plan(command, dit, text, vae, sources, alias, error) && precise.json == alias.json,
+               "equivalent arithmetic override spelling is canonical");
+        environment("GGML_CUDA_TF32", "");
+        environment("GGML_CUDA_CUBLAS_COMPUTE_TYPE", "auto");
+        expect(make_resume_plan(command, dit, text, vae, sources, automatic, error), "build default precision plan");
+        const auto             state = ace_train_continuation(precise, original);
+        auto *                 saved = yyjson_read(state.data(), state.size(), 0);
+        ACETrainResumeProgress actual;
+        expect(ace_train_restore_progress(yyjson_doc_get_root(saved), precise, 0, 1, actual, error) &&
+                   !ace_train_restore_progress(yyjson_doc_get_root(saved), automatic, 0, 1, actual, error),
+               "resume rejects changed arithmetic policy");
+        yyjson_doc_free(saved);
+        environment("GGML_CUDA_TF32", old_tf32.c_str());
+        environment("GGML_CUDA_CUBLAS_COMPUTE_TYPE", old_compute.c_str());
+    }
     fs::create_directory(relocated);
     for (auto & source : sources) {
         fs::copy_file(source.audio_path, relocated / source.audio_path.filename());

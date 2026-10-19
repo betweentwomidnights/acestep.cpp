@@ -25,8 +25,11 @@ struct ACETrainDiffusionExample {
     std::vector<float> target_latents;
     std::vector<float> context_latents;
     std::vector<float> encoder_hidden;
-    int                real_temporal_length         = 0;
-    int                real_encoder_sequence_length = 0;
+    // Optional cached prompt alternative. Audio/posterior tensors are shared.
+    std::vector<float> genre_encoder_hidden;
+    int                genre_encoder_sequence_length = 0;
+    int                real_temporal_length          = 0;
+    int                real_encoder_sequence_length  = 0;
 };
 
 struct ACETrainDiffusionBatch {
@@ -375,12 +378,21 @@ static bool ace_compute_train_adapter_gradients(ACETrainDiTGraph &             t
     return true;
 }
 
+// Optional diagnostic observer. Read persistent boundaries / transient boundary
+// gradients immediately; the two gradient buffers are reused by later blocks.
+struct ACETrainCheckpointTrace {
+    void * data                                            = nullptr;
+    void (*forward)(void *, const ACETrainDiTCheckpoint &) = nullptr;
+    void (*gradient)(void *, int, const ggml_tensor *)     = nullptr;
+};
+
 static bool ace_compute_train_adapter_gradients_checkpointed(ACETrainDiTCheckpoint &              training,
                                                              const ACETrainDiffusionBatch &       batch,
                                                              ACETrainAdapterGradientAccumulator & accumulator,
                                                              int                                  example_count,
                                                              float &                              loss,
-                                                             std::string &                        error) {
+                                                             std::string &                        error,
+                                                             const ACETrainCheckpointTrace *      trace = nullptr) {
     loss = 0.0f;
     if (!training.backend) {
         error = "DiT training backend is not initialized";
@@ -401,6 +413,9 @@ static bool ace_compute_train_adapter_gradients_checkpointed(ACETrainDiTCheckpoi
     if (!compute(training.forward_graph, "forward")) {
         return false;
     }
+    if (trace && trace->forward) {
+        trace->forward(trace->data, training);
+    }
     ggml_graph_reset(training.tail_graph);
     if (!compute(training.tail_graph, "tail")) {
         return false;
@@ -409,6 +424,9 @@ static bool ace_compute_train_adapter_gradients_checkpointed(ACETrainDiTCheckpoi
     if (!std::isfinite(loss)) {
         error = "checkpointed DiT training loss is not finite";
         return false;
+    }
+    if (trace && trace->gradient) {
+        trace->gradient(trace->data, training.layer_count, training.gradient_input(training.layer_count - 1));
     }
 
     for (int layer = training.layer_count - 1; layer >= 0; --layer) {
@@ -420,6 +438,9 @@ static bool ace_compute_train_adapter_gradients_checkpointed(ACETrainDiTCheckpoi
         ggml_graph_reset(block.graph);
         if (!compute(block.graph, "block")) {
             return false;
+        }
+        if (trace && trace->gradient) {
+            trace->gradient(trace->data, layer, training.gradient_output(layer));
         }
         if (!ace_train_adapter_accumulate_gradient_subset(training.adapters, block.graph, block.param_indices,
                                                           accumulator, example_count, false, error)) {

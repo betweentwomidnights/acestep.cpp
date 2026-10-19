@@ -280,6 +280,13 @@ static bool dit_ggml_load(DiTGGML *    m,
         fprintf(stderr, "[Adapter] Normalized strength requires functional mode\n");
         return false;
     }
+    // A disabled adapter must retain the unadapted graph, including projection
+    // fusion. Fused and separate quantized projections can select different CUDA
+    // kernels, so bypassing only the low-rank math is not an exact zero control.
+    if (adapter_path && adapter_scale == 0.0f) {
+        fprintf(stderr, "[Adapter] scale=0: using the unadapted DiT graph\n");
+        adapter_path = nullptr;
+    }
     if (adapter_path && functional_adapter) {
         fuse_projections = false;
     }

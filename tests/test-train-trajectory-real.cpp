@@ -34,7 +34,117 @@ static bool save_gradients(const std::filesystem::path &              path,
     return ace_write_safetensors(path, tensors, error);
 }
 
+// Replay the retained, fully valid short-window fixture with identical adapter
+// weights. Reconstruct masks through the production batch builder, then replace
+// its random inputs with captures. No optimizer update is performed.
+static void trace_tensor(DebugDumper & dump, const std::string & name, const ggml_tensor * tensor) {
+    GGML_ASSERT(tensor->type == GGML_TYPE_F32 && ggml_is_contiguous(tensor));
+    std::vector<float> values(size_t(ggml_nelements(tensor)));
+    ggml_backend_tensor_get(tensor, values.data(), 0, values.size() * sizeof(float));
+    const int shape[] = { int(tensor->ne[2]), int(tensor->ne[1]), int(tensor->ne[0]) };
+    debug_dump(&dump, name.c_str(), values.data(), shape, 3);
+}
+
+static int replay_update(int argc, char ** argv) {
+    const bool tracing = argc == 7 && std::string(argv[6]) == "--trace";
+    if ((argc != 6 && !tracing) || std::filesystem::exists(argv[5])) {
+        std::fprintf(stderr,
+                     "Usage: %s replay <dit.gguf> <before-adapter> <captured-update> <fresh-output> [--trace]\n",
+                     argv[0]);
+        return 1;
+    }
+    const std::filesystem::path input(argv[4]), output(argv[5]);
+    DiTGGML                     model = {};
+    std::string                 error;
+    if (!dit_ggml_load(&model, argv[2], nullptr, 1.0f, false)) {
+        return 1;
+    }
+    std::vector<ACETrainAdapterTarget> targets;
+    ACETrainAdapterState               state;
+    bool                               ok = ace_train_adapter_targets(model, "balanced", 8, 16, targets, error) &&
+              ace_load_train_adapter_checkpoint(argv[3], targets, state, error, "dora-rows");
+    std::vector<int> shape;
+    const auto       combined = debug_load((input / "input_latents.bin").string().c_str(), shape);
+    const int        temporal = shape.size() == 3 && shape[0] == 1 && shape[2] == model.cfg.in_channels ? shape[1] : 0;
+    auto             encoder  = debug_load((input / "encoder_hidden.bin").string().c_str(), shape);
+    const int sequence = shape.size() == 3 && shape[0] == 1 && shape[2] == model.cond_emb_w->ne[0] ? shape[1] : 0;
+    if (temporal <= 0 || sequence <= 0) {
+        std::fprintf(stderr, "FAIL replay: invalid captured tensor shapes\n");
+        dit_ggml_free(&model);
+        return 1;
+    }
+    ACETrainDiffusionExample example;
+    example.target_latents.resize(size_t(temporal) * model.cfg.out_channels);
+    example.context_latents.resize(size_t(temporal) * (model.cfg.in_channels - model.cfg.out_channels));
+    example.encoder_hidden               = encoder;
+    example.real_temporal_length         = temporal;
+    example.real_encoder_sequence_length = sequence;
+    ACETrainDiffusionConfig config;
+    config.cfg_dropout = 0;
+    ACETrainDiffusionBatch batch;
+    ok = ok && temporal > 0 && sequence > 0 &&
+         ace_prepare_train_diffusion_batch(model, { example }, temporal, sequence, {}, 0, config, batch, error);
+    batch.input_latents       = combined;
+    batch.encoder_hidden      = std::move(encoder);
+    batch.target_velocity     = debug_load((input / "target_velocity.bin").string().c_str(), shape);
+    batch.timesteps           = debug_load((input / "timesteps.bin").string().c_str(), shape);
+    batch.reference_timesteps = batch.timesteps;
+    if (batch.timesteps.size() != 1) {
+        ok = false;
+    } else {
+        std::fill(batch.loss_weights.begin(), batch.loss_weights.end(),
+                  ace_train_flow_min_snr_weight(batch.timesteps[0], 5) / temporal);
+    }
+    ACETrainDiTCheckpoint              graph = {};
+    ACETrainAdapterGradientAccumulator gradients;
+    DebugDumper                        trace_dump = {};
+    ACETrainCheckpointTrace            trace;
+    if (tracing) {
+        const auto directory = output / "trace";
+        std::filesystem::create_directories(directory);
+        debug_init(&trace_dump, directory.string().c_str());
+        trace.data    = &trace_dump;
+        trace.forward = [](void * data, const ACETrainDiTCheckpoint & checkpoint) {
+            auto & dump = *static_cast<DebugDumper *>(data);
+            trace_tensor(dump, "temb", checkpoint.saved_timestep_embedding);
+            trace_tensor(dump, "tproj", checkpoint.saved_timestep_projection);
+            trace_tensor(dump, "condition", checkpoint.saved_encoder_hidden);
+            for (size_t i = 0; i < checkpoint.boundaries.size(); ++i) {
+                trace_tensor(dump, "boundary-" + std::to_string(i), checkpoint.boundaries[i]);
+            }
+        };
+        trace.gradient = [](void * data, int boundary, const ggml_tensor * gradient) {
+            trace_tensor(*static_cast<DebugDumper *>(data), "gradient-" + std::to_string(boundary), gradient);
+        };
+    }
+    float loss = 0;
+    ok         = ok && ace_build_train_dit_checkpoint(model, state, temporal, sequence, 1, graph, error, true) &&
+         ace_compute_train_adapter_gradients_checkpointed(graph, batch, gradients, 1, loss, error,
+                                                          tracing ? &trace : nullptr);
+    if (ok) {
+        std::filesystem::create_directories(output);
+        ok = save_gradients(output / "native_gradients.safetensors", state, gradients, error);
+        std::vector<float> velocity(size_t(temporal) * model.cfg.out_channels);
+        ggml_backend_tensor_get(graph.velocity_snapshot, velocity.data(), 0, velocity.size() * sizeof(float));
+        DebugDumper dump;
+        debug_init(&dump, output.string().c_str());
+        const int target_shape[] = { 1, temporal, model.cfg.out_channels };
+        debug_dump(&dump, "native_velocity", velocity.data(), target_shape, 3);
+        std::ofstream metrics(output / "native_metrics.json");
+        metrics << std::setprecision(12) << "{\"loss\":" << loss << "}\n";
+    }
+    ace_free_train_dit_checkpoint(graph);
+    dit_ggml_free(&model);
+    if (!ok) {
+        std::fprintf(stderr, "FAIL replay: %s\n", error.c_str());
+    }
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char ** argv) {
+    if (argc > 1 && std::string(argv[1]) == "replay") {
+        return replay_update(argc, argv);
+    }
     if (argc < 5 || argc > 8) {
         std::fprintf(stderr,
                      "Usage: %s <dit.gguf> <preprocess-fixture-dir> <fresh-output> <steps> "

@@ -177,6 +177,17 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
     for (size_t i = 0; i < sources.size(); ++i) {
         requests.push_back(ace_training_request(sources[i], durations[i], config));
     }
+    std::vector<size_t> genre_sources;
+    if (config.genre_variants) {
+        auto genre_config      = config;
+        genre_config.use_genre = true;
+        for (size_t i = 0; i < sources.size(); ++i) {
+            if (!sources[i].metadata.genre.empty()) {
+                genre_sources.push_back(i);
+                requests.push_back(ace_training_request(sources[i], durations[i], genre_config));
+            }
+        }
+    }
     SynthState state         = {};
     state.Oc                 = synth->Oc;
     state.ctx_ch             = synth->ctx_ch;
@@ -189,18 +200,25 @@ bool ace_prepare_training_dataset(AceSynth *                              synth,
     debug_init(&state.dbg, synth->params.dump_dir);
     ops_encode_timbre(synth, nullptr, 0, nullptr, 0, state);
     if (ops_encode_text(synth, requests.data(), (int) requests.size(), state) != 0 ||
-        state.per_enc_S.size() != sources.size() || state.max_enc_S <= 0 || state.enc_hidden.empty() ||
-        state.enc_hidden.size() % ((size_t) state.max_enc_S * sources.size()) != 0) {
+        state.per_enc_S.size() != requests.size() || state.max_enc_S <= 0 || state.enc_hidden.empty() ||
+        state.enc_hidden.size() % ((size_t) state.max_enc_S * requests.size()) != 0) {
         error = "ACE-Step text conditioning failed for the training dataset";
         return false;
     }
 
-    const size_t hidden_size = state.enc_hidden.size() / ((size_t) state.max_enc_S * sources.size());
+    const size_t hidden_size = state.enc_hidden.size() / ((size_t) state.max_enc_S * requests.size());
     const size_t sample_size = (size_t) state.max_enc_S * hidden_size;
     for (size_t i = 0; i < prepared.size(); ++i) {
         const float * first = state.enc_hidden.data() + i * sample_size;
         prepared[i].encoder_hidden.assign(first, first + sample_size);
         prepared[i].real_encoder_sequence_length = state.per_enc_S[i];
+    }
+    for (size_t j = 0; j < genre_sources.size(); ++j) {
+        const size_t  request_index = sources.size() + j;
+        const float * first         = state.enc_hidden.data() + request_index * sample_size;
+        auto &        example       = prepared[genre_sources[j]];
+        example.genre_encoder_hidden.assign(first, first + sample_size);
+        example.genre_encoder_sequence_length = state.per_enc_S[request_index];
     }
     return true;
 }

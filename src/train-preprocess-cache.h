@@ -40,6 +40,8 @@ class ACETrainPreparedDataset {
     int                                   max_encoder_length = 0;
     std::vector<float>                    null_condition;
     size_t                                reused = 0, written = 0, rebuilt = 0;
+    bool                                  genre_variants = false;
+    std::vector<bool>                     genre_eligible;
 
     size_t size() const { return identities.empty() ? memory.size() : identities.size(); }
 
@@ -67,7 +69,14 @@ class ACETrainPreparedDataset {
             (unpadded && e.size() != size_t(example.real_encoder_sequence_length) * size_t(hidden_size))) {
             return false;
         }
-        for (const auto * values : { &t, &c, &e }) {
+        const auto & g  = example.genre_encoder_hidden;
+        const int    gs = example.genre_encoder_sequence_length;
+        if ((g.empty() && gs != 0) || (!g.empty() && (gs <= 0 || gs > 65536 || g.size() % size_t(hidden_size) != 0 ||
+                                                      size_t(gs) > g.size() / size_t(hidden_size) ||
+                                                      (unpadded && g.size() != size_t(gs) * size_t(hidden_size))))) {
+            return false;
+        }
+        for (const auto * values : { &t, &c, &e, &g }) {
             for (float value : *values) {
                 if (!std::isfinite(value)) {
                     return false;
@@ -88,11 +97,12 @@ class ACETrainPreparedDataset {
             return false;
         }
         std::ifstream input(path(index), std::ios::binary);
-        char          magic[8];
+        char          magic[8] = {};
         input.read(magic, 8);
-        uint64_t header_size = 0;
-        if (!input || std::memcmp(magic, "ACETC001", 8) || !read_u64(input, header_size) || header_size > 65536 ||
-            header_size > file_size - 24) {
+        uint64_t   header_size = 0;
+        const bool variants    = !std::memcmp(magic, "ACETC002", 8);
+        if (!input || (!variants && std::memcmp(magic, "ACETC001", 8)) || variants != genre_variants ||
+            !read_u64(input, header_size) || header_size > 65536 || header_size > file_size - 24) {
             return false;
         }
         std::string header(size_t(header_size), '\0');
@@ -100,7 +110,7 @@ class ACETrainPreparedDataset {
         yyjson_doc * doc      = input ? yyjson_read(header.data(), header.size(), 0) : nullptr;
         auto *       root     = doc ? yyjson_doc_get_root(doc) : nullptr;
         auto *       key      = yyjson_obj_get(root, "identity");
-        uint64_t     sizes[3] = {}, temporal = 0, sequence = 0;
+        uint64_t     sizes[4] = {}, temporal = 0, sequence = 0, genre_sequence = 0;
         auto         number = [&](const char * name, uint64_t & value) {
             auto * v = yyjson_obj_get(root, name);
             if (!yyjson_is_int(v) || yyjson_get_sint(v) < 0) {
@@ -113,6 +123,10 @@ class ACETrainPreparedDataset {
                   number("context", sizes[1]) && number("encoder", sizes[2]) &&
                   number("real_temporal_length", temporal) && number("real_encoder_sequence_length", sequence) &&
                   temporal > 0 && temporal <= INT_MAX && sequence > 0 && sequence <= 65536;
+        if (variants) {
+            ok = ok && number("genre_encoder", sizes[3]) && number("genre_sequence", genre_sequence) &&
+                 genre_sequence <= 65536;
+        }
         yyjson_doc_free(doc);
         uint64_t count = 0;
         for (uint64_t size : sizes) {
@@ -127,14 +141,16 @@ class ACETrainPreparedDataset {
             count * sizeof(float) != file_size - 24 - header_size || sizes[0] > max_latents || output_channels <= 0 ||
             context_channels <= 0 || hidden_size <= 0 || sizes[0] % size_t(output_channels) ||
             sizes[1] != sizes[0] / size_t(output_channels) * size_t(context_channels) ||
-            sizes[2] != sequence * size_t(hidden_size)) {
+            sizes[2] != sequence * size_t(hidden_size) || sizes[3] != genre_sequence * size_t(hidden_size)) {
             return false;
         }
-        result.real_temporal_length         = int(temporal);
-        result.real_encoder_sequence_length = int(sequence);
-        uint64_t hash                       = ace_cache_hash(header.data(), header.size());
-        size_t   i                          = 0;
-        for (auto * values : { &result.target_latents, &result.context_latents, &result.encoder_hidden }) {
+        result.real_temporal_length          = int(temporal);
+        result.real_encoder_sequence_length  = int(sequence);
+        result.genre_encoder_sequence_length = int(genre_sequence);
+        uint64_t hash                        = ace_cache_hash(header.data(), header.size());
+        size_t   i                           = 0;
+        for (auto * values : { &result.target_latents, &result.context_latents, &result.encoder_hidden,
+                               &result.genre_encoder_hidden }) {
             values->resize(size_t(sizes[i++]));
             input.read(reinterpret_cast<char *>(values->data()), (std::streamsize)(values->size() * sizeof(float)));
             hash = ace_cache_hash(values->data(), values->size() * sizeof(float), hash);
@@ -163,6 +179,14 @@ class ACETrainPreparedDataset {
         yyjson_mut_obj_add_uint(doc, root, "encoder", example.encoder_hidden.size());
         yyjson_mut_obj_add_int(doc, root, "real_temporal_length", example.real_temporal_length);
         yyjson_mut_obj_add_int(doc, root, "real_encoder_sequence_length", example.real_encoder_sequence_length);
+        if (genre_variants) {
+            yyjson_mut_obj_add_uint(doc, root, "genre_encoder", example.genre_encoder_hidden.size());
+            yyjson_mut_obj_add_int(doc, root, "genre_sequence", example.genre_encoder_sequence_length);
+        } else if (!example.genre_encoder_hidden.empty()) {
+            yyjson_mut_doc_free(doc);
+            error = "genre conditioning requires a variant cache identity";
+            return false;
+        }
         char * data = yyjson_mut_write(doc, 0, nullptr);
         yyjson_mut_doc_free(doc);
         if (!data) {
@@ -183,11 +207,12 @@ class ACETrainPreparedDataset {
         try {
             std::filesystem::create_directories(directory);
             std::ofstream output(stage, std::ios::binary | std::ios::trunc);
-            output.write("ACETC001", 8);
+            output.write(genre_variants ? "ACETC002" : "ACETC001", 8);
             write_u64(output, header.size());
             output.write(header.data(), (std::streamsize) header.size());
             uint64_t hash = ace_cache_hash(header.data(), header.size());
-            for (const auto * values : { &example.target_latents, &example.context_latents, &example.encoder_hidden }) {
+            for (const auto * values : { &example.target_latents, &example.context_latents, &example.encoder_hidden,
+                                         &example.genre_encoder_hidden }) {
                 const size_t bytes = values->size() * sizeof(float);
                 output.write(reinterpret_cast<const char *>(values->data()), (std::streamsize) bytes);
                 hash = ace_cache_hash(values->data(), bytes, hash);
@@ -221,6 +246,7 @@ class ACETrainPreparedDataset {
 
     void observe(const ACETrainDiffusionExample & example) {
         max_encoder_length = std::max(max_encoder_length, example.real_encoder_sequence_length);
+        max_encoder_length = std::max(max_encoder_length, example.genre_encoder_sequence_length);
     }
 
     std::shared_ptr<const ACETrainDiffusionExample> get(size_t index, std::string & error) {
@@ -240,7 +266,9 @@ class ACETrainPreparedDataset {
         if (!read_raw(index, *result, error)) {
             return {};
         }
-        if (max_encoder_length < result->real_encoder_sequence_length || null_condition.size() != size_t(hidden_size)) {
+        if (max_encoder_length <
+                std::max(result->real_encoder_sequence_length, result->genre_encoder_sequence_length) ||
+            null_condition.size() != size_t(hidden_size)) {
             error = "invalid dataset-wide conditioning padding";
             return {};
         }
@@ -249,6 +277,13 @@ class ACETrainPreparedDataset {
         for (int s = length; s < max_encoder_length; ++s) {
             std::copy(null_condition.begin(), null_condition.end(),
                       result->encoder_hidden.begin() + size_t(s) * size_t(hidden_size));
+        }
+        if (!result->genre_encoder_hidden.empty()) {
+            result->genre_encoder_hidden.resize(size_t(max_encoder_length) * size_t(hidden_size));
+            for (int s = result->genre_encoder_sequence_length; s < max_encoder_length; ++s) {
+                std::copy(null_condition.begin(), null_condition.end(),
+                          result->genre_encoder_hidden.begin() + size_t(s) * size_t(hidden_size));
+            }
         }
         const size_t bytes = tensor_bytes(*result);
         while (!lru.empty() && (bytes > memory_limit || resident > memory_limit - bytes)) {
@@ -292,7 +327,8 @@ class ACETrainPreparedDataset {
     static size_t tensor_bytes(const ACETrainDiffusionExample & e) {
         // resize() may reserve more than the logical padded shape. Bound the
         // actual owned tensor allocation, including that spare capacity.
-        return (e.target_latents.capacity() + e.context_latents.capacity() + e.encoder_hidden.capacity()) *
+        return (e.target_latents.capacity() + e.context_latents.capacity() + e.encoder_hidden.capacity() +
+                e.genre_encoder_hidden.capacity()) *
                sizeof(float);
     }
 

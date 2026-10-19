@@ -22,6 +22,7 @@ ace-train --models models --dataset training-data --output adapter \
 | `--cache-memory-mb N` | 256 MiB of prepared-tensor LRU residency. Zero streams from disk. |
 | `--preprocess-batch-size N` | One cold-preprocessing example at a time. Larger chunks trade host RAM for fewer model reloads. |
 | `--preprocess-cache false` | Explicit legacy compatibility/debug mode: preprocess and retain the whole dataset in RAM. |
+| `--genre-ratio N` | Positive ratios cache caption and genre conditioning with shared audio; see `TRAINING_PROMPT_MIXING.md`. |
 
 Enabled caching retains only metadata for the entire dataset. Cold preprocessing
 holds at most the configured chunk of prepared examples, plus one decoded audio

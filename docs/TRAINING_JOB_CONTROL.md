@@ -153,6 +153,18 @@ after changing the runtime PATH or package composition.
 Disk preprocessing cache and bounded tensor loading are described in
 `TRAINING_PREPROCESS_CACHE.md`. SA3-style diagnostic history is documented in
 `TRAINING_HISTORY.md`; best-loss checkpoint ranking is intentionally excluded.
+
+Positive `--genre-ratio` jobs also record the rotating prompt sampler version
+and ratio. Changing the ratio rejects full-state resume, even though the two
+encoded prompt variants can remain reusable in the preprocessing cache. See
+`TRAINING_PROMPT_MIXING.md`.
+
+Nondefault `GGML_CUDA_CUBLAS_COMPUTE_TYPE` (`fp32`, `fp16`, `bf16`) and
+`GGML_CUDA_TF32=0` are immutable arithmetic settings. Equivalent compute-type
+spellings are canonicalized; changing the policy rejects full-state resume.
+Default/auto policies retain the prior plan representation. Preserve the job's
+environment when restarting its process; PEFT-only import is a fresh optimizer
+run when intentionally changing arithmetic policy.
 WebUI training, full Carey/PyTorch parity and downstream integration remain open.
 Current Metal LoRA and BF16 frozen-DiT backward gates remain in
 `METAL_TRAINING_HANDOFF.md`.

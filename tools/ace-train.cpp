@@ -12,11 +12,13 @@
 #include "train-diffusion.h"
 #include "train-history.h"
 #include "train-preprocess-cache.h"
+#include "train-prompt.h"
 #include "train-resume.h"
 #include "train-window.h"
 #include "version.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -64,6 +66,7 @@ struct ACETrainCommand {
     bool                     allow_legacy_resume    = false;
     int                      max_steps              = 0;
     int                      examples_per_epoch     = 0;
+    int                      genre_ratio            = 0;
     ACETrainWindowConfig     window;
     ACETrainSchedule         schedule = ACE_TRAIN_SCHEDULE_COSINE;
     ACETrainPreprocessConfig preprocess;
@@ -118,6 +121,7 @@ static void usage(const char * program) {
                  "  --cache-memory-mb N        Prepared-tensor LRU budget; 0 streams (default: 256)\n"
                  "  --preprocess-batch-size N  Maximum cold-preprocessing examples in RAM (default: 1)\n"
                  "  --use-genre                 Use genre instead of caption when available\n"
+                 "  --genre-ratio <0-100>       Rotate caption/genre prompts (default: 0; excludes --use-genre)\n"
                  "  --tag-position <name>       prepend, append, or replace\n\n"
                  "Model selection:\n"
                  "  --dit <name>                DiT filename in the model registry\n"
@@ -325,6 +329,11 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
             } else {
                 return false;
             }
+        } else if (!std::strcmp(option, "--genre-ratio")) {
+            if (!read_integer(next(), command.genre_ratio) || command.genre_ratio > 100) {
+                return false;
+            }
+            command.preprocess.genre_variants = command.genre_ratio > 0;
         } else if (!std::strcmp(option, "--use-genre")) {
             command.preprocess.use_genre = true;
         } else if (!std::strcmp(option, "--preprocess-cache")) {
@@ -374,6 +383,7 @@ static bool parse_command(int argc, char ** argv, ACETrainCommand & command) {
            command.weight_decay >= 0.0f && command.max_grad_norm >= 0.0f && command.cfg_dropout >= 0.0f &&
            command.cfg_dropout <= 1.0f && command.timestep_std >= 0.0f && command.min_snr_gamma > 0.0f &&
            ace_train_window_config_valid(command.window) &&
+           !(command.preprocess.use_genre && command.genre_ratio > 0) &&
            (command.adapter_type == "lora" || command.adapter_type == "dora-rows") &&
            (command.module_profile == "attention" || command.module_profile == "balanced");
 }
@@ -423,6 +433,25 @@ static bool make_resume_plan(const ACETrainCommand &                 command,
     // Older optimizer state must not silently resume under changed gradients.
     yyjson_mut_obj_add_str(doc, root, "algorithm", "ace-native-epoch-seeds-v2");
     yyjson_mut_obj_add_str(doc, root, "preprocessing", ACE_TRAIN_PREPROCESS_ALGORITHM);
+    // CUDA arithmetic overrides materially change the optimizer trajectory.
+    // Omit default policies to retain compatibility with prior native plans.
+    const char * tf32 = std::getenv("GGML_CUDA_TF32");
+    if (tf32 && tf32[0] == '0') {
+        yyjson_mut_obj_add_bool(doc, root, "cuda_tf32", false);
+    }
+    if (const char * compute = std::getenv("GGML_CUDA_CUBLAS_COMPUTE_TYPE")) {
+        std::string policy(compute);
+        std::transform(policy.begin(), policy.end(), policy.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        if (policy == "f32") {
+            policy = "fp32";
+        } else if (policy == "f16") {
+            policy = "fp16";
+        }
+        if (policy == "fp32" || policy == "fp16" || policy == "bf16") {
+            yyjson_mut_obj_add_strcpy(doc, root, "cuda_cublas_compute_type", policy.c_str());
+        }
+    }
     auto * settings = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "settings", settings);
     auto integer = [&](const char * name, int value) {
@@ -461,6 +490,11 @@ static bool make_resume_plan(const ACETrainCommand &                 command,
     yyjson_mut_obj_add_bool(doc, settings, "checkpoint_backward", command.checkpoint_backward);
     yyjson_mut_obj_add_bool(doc, settings, "use_genre", command.preprocess.use_genre);
     integer("tag_position", int(command.preprocess.tag_position));
+    // Preserve existing caption-only / global-genre plan compatibility.
+    if (command.genre_ratio > 0) {
+        integer("genre_ratio", command.genre_ratio);
+        yyjson_mut_obj_add_str(doc, settings, "prompt_sampling", ACE_TRAIN_PROMPT_ALGORITHM);
+    }
     auto * models = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "models", models);
     auto fingerprint = [&](yyjson_mut_val * obj, const char * name, const std::filesystem::path & path) {
@@ -556,6 +590,7 @@ static bool prepare_cache_identities(const ACETrainCommand &    command,
     auto * settings = yyjson_obj_get(root, "settings");
     auto * dataset  = yyjson_obj_get(root, "dataset");
     prepared.identities.clear();
+    prepared.genre_variants = command.preprocess.genre_variants;
     for (size_t i = 0; i < yyjson_arr_size(dataset); ++i) {
         yyjson_mut_doc * doc = yyjson_mut_doc_new(nullptr);
         auto *           key = yyjson_mut_obj(doc);
@@ -581,6 +616,9 @@ static bool prepare_cache_identities(const ACETrainCommand &    command,
         yyjson_mut_obj_add_uint(doc, key, "posterior_seed", command.seed + uint64_t(i));
         for (const char * name : { "tag_position", "use_genre" }) {
             yyjson_mut_obj_add_val(doc, key, name, yyjson_val_mut_copy(doc, yyjson_obj_get(settings, name)));
+        }
+        if (prepared.genre_variants) {
+            yyjson_mut_obj_add_str(doc, key, "prompt_variants", "caption-and-genre-v1");
         }
         yyjson_mut_obj_add_int(doc, key, "vae_chunk", params.vae_chunk);
         yyjson_mut_obj_add_int(doc, key, "vae_overlap", params.vae_overlap);
@@ -653,6 +691,11 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
     prepared.hidden_size      = int(null_condition.size());
     prepared.null_condition   = null_condition;
     prepared.max_latents      = silence_latents.size();
+    prepared.genre_variants   = command.preprocess.genre_variants;
+    prepared.genre_eligible.clear();
+    for (const auto & source : sources) {
+        prepared.genre_eligible.push_back(!source.metadata.genre.empty());
+    }
     std::fprintf(stderr, "[Ace-Train] Preprocessing %zu examples in model phases\n", sources.size());
     bool ok = true;
     if (!command.preprocess_cache) {
@@ -697,6 +740,8 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
                 auto & example = examples[i];
                 example.encoder_hidden.resize(size_t(example.real_encoder_sequence_length) *
                                               size_t(prepared.hidden_size));
+                example.genre_encoder_hidden.resize(size_t(example.genre_encoder_sequence_length) *
+                                                    size_t(prepared.hidden_size));
                 prepared.observe(example);
                 ok = prepared.write(first + i, example, error);
             }
@@ -852,7 +897,14 @@ static bool train_adapter(const ACETrainCommand &          command,
             std::mt19937_64 shuffle(command.seed + (uint64_t) epoch);
             std::shuffle(order.begin(), order.end(), shuffle);
         }
-        progress.order       = order;
+        progress.order            = order;
+        const auto genre_selected = ace_train_genre_selection(
+            prepared.genre_eligible, order, size_t(examples_per_epoch), command.genre_ratio, command.seed, epoch);
+        if (command.genre_ratio > 0) {
+            std::fprintf(stderr, "[Ace-Train] prompt mix epoch=%d genre=%zu/%d ratio=%d%%\n", epoch + 1,
+                         size_t(std::count(genre_selected.begin(), genre_selected.end(), true)), examples_per_epoch,
+                         command.genre_ratio);
+        }
         double epoch_loss    = progress.epoch_loss;
         int    epoch_batches = progress.epoch_batches;
         for (int batch_index = progress.next_batch; batch_index < batches_per_epoch; ++batch_index) {
@@ -883,6 +935,17 @@ static bool train_adapter(const ACETrainCommand &          command,
                     dit_ggml_free(&model);
                     return false;
                 }
+                if (genre_selected[source_index]) {
+                    if (prepared_example->genre_encoder_hidden.empty()) {
+                        error = "selected genre conditioning is missing from prepared example";
+                        dit_ggml_free(&model);
+                        return false;
+                    }
+                    windowed.encoder_hidden               = prepared_example->genre_encoder_hidden;
+                    windowed.real_encoder_sequence_length = prepared_example->genre_encoder_sequence_length;
+                }
+                windowed.genre_encoder_hidden.clear();
+                windowed.genre_encoder_sequence_length = 0;
                 const float full_seconds =
                     (float) prepared_example->real_temporal_length / ACE_TRAIN_LATENTS_PER_SECOND;
                 const float offset_seconds = (float) window.first_latent / ACE_TRAIN_LATENTS_PER_SECOND;
