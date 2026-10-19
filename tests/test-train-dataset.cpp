@@ -119,6 +119,23 @@ int main() {
         return fail("fractional genre draws must carry across epochs");
     }
 
+    // A vocal song with no lyrics trains on empty lyrics, not [Instrumental].
+    const auto vocal = directory / "vocal.txt";
+    if (!write_file(vocal,
+                    "caption: whispered pop\nbpm: 120\nkey: \nsignature: 4\ngenre: \n"
+                    "is_instrumental: false\ncustom_tag: \nlyrics:\n")) {
+        std::filesystem::remove_all(directory);
+        return fail("could not create the vocal metadata fixture");
+    }
+    ACETrainingExample vocal_example;
+    if (!ace_training_read_metadata(vocal, vocal_example.metadata, error) || vocal_example.metadata.is_instrumental ||
+        !vocal_example.metadata.lyrics.empty() ||
+        !ace_training_request(vocal_example, 10.0f, preprocess).lyrics.empty()) {
+        std::filesystem::remove_all(directory);
+        return fail("a vocal example with empty lyrics must train on empty lyrics");
+    }
+    std::filesystem::remove(vocal);
+
     if (!write_file(directory / "unpaired.wav", "RIFFtest") || ace_training_load_dataset(directory, examples, error) ||
         error.find("unpaired.wav") == std::string::npos) {
         std::filesystem::remove_all(directory);
