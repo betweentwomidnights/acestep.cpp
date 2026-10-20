@@ -149,6 +149,7 @@ add_library(acestep-core STATIC
     src/pipeline-synth-ops.cpp
     src/pipeline-train.cpp
     src/pipeline-understand.cpp
+    src/genre-vocab.cpp
 )
 target_link_libraries(acestep-core PUBLIC yyjson)
 link_ggml_backends(acestep-core)
@@ -188,6 +189,11 @@ target_link_libraries(ace-server PRIVATE acestep-core httplib)
 link_ggml_backends(ace-server)
 
 add_executable(ace-understand tools/ace-understand.cpp)
+# The understand pass decodes genres against this vocabulary, read from
+# beside the executable (see src/genre-vocab.cpp).
+add_custom_command(TARGET ace-understand POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/ace-step/genres_vocab.txt" "$<TARGET_FILE_DIR:ace-understand>/genres_vocab.txt")
 target_link_libraries(ace-understand PRIVATE acestep-core)
 link_ggml_backends(ace-understand)
 

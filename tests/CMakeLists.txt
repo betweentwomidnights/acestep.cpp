@@ -43,6 +43,10 @@ add_executable(test-vae-latent-sampling test-vae-latent-sampling.cpp)
 target_link_libraries(test-vae-latent-sampling PRIVATE acestep-core)
 link_ggml_backends(test-vae-latent-sampling)
 
+# test-genre-vocab: the vocabulary queries behind the understand pass's genres field.
+add_executable(test-genre-vocab test-genre-vocab.cpp)
+target_include_directories(test-genre-vocab PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
 # test-train-dataset: verify paired WAV/metadata discovery and conditioning fields.
 add_executable(test-train-dataset test-train-dataset.cpp)
 target_link_libraries(test-train-dataset PRIVATE acestep-core)
@@ -126,6 +130,7 @@ ace_register_test(test-dora-backend)
 ace_register_test(test-adapter-merge)
 ace_register_test(test-adapter-functional)
 ace_register_test(test-vae-latent-sampling)
+ace_register_test(test-genre-vocab "${CMAKE_SOURCE_DIR}/vendor/ace-step/genres_vocab.txt")
 ace_register_test(test-train-dataset)
 ace_register_test(test-train-window)
 ace_register_test(test-train-adapter-state)
