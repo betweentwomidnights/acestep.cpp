@@ -148,9 +148,11 @@ static bool ace_training_read_metadata(const std::filesystem::path & path,
     while (!metadata.lyrics.empty() && metadata.lyrics.back() == '\n') {
         metadata.lyrics.pop_back();
     }
+    // A vocal example may leave its lyrics empty: PyTorch Carey trains it on
+    // empty lyric conditioning, and only an instrumental gets [Instrumental].
     if (!has_caption || !has_genre || !has_bpm || !has_key || !has_time_signature || !has_instrumental ||
         !has_custom_tag || !has_lyrics || metadata.caption.empty() || metadata.bpm <= 0 ||
-        metadata.time_signature <= 0 || (!metadata.is_instrumental && metadata.lyrics.empty())) {
+        metadata.time_signature <= 0) {
         error = "metadata file is missing required ACE-Step conditioning fields: " + path.string();
         return false;
     }
