@@ -850,12 +850,17 @@ static bool train_adapter(const ACETrainCommand &          command,
     }
     double              update_loss_sum = 0;
     std::vector<size_t> order(prepared.size());
-    auto                save = [&](const std::string & directory, bool final) {
+    // Joined as paths, not with "/": a Windows \\?\ output directory rejects
+    // forward slashes, so a string join failed every periodic checkpoint.
+    auto                output_child = [&](const std::string & name) {
+        return (std::filesystem::u8path(command.output_dir) / std::filesystem::u8path(name)).u8string();
+    };
+    auto save = [&](const std::string & directory, bool final) {
         control.phase   = "saving";
         control.message = "Saving native adapter and trainer continuation.";
         control.publish();
         if (!ace_save_train_checkpoint(directory, state, optimizer, progress.epoch, base_model_fingerprint, error,
-                                                      ace_train_continuation(plan, progress))) {
+                                       ace_train_continuation(plan, progress))) {
             return false;
         }
         std::filesystem::path generation;
@@ -1066,8 +1071,7 @@ static bool train_adapter(const ACETrainCommand &          command,
             ace_free_train_dit_graph(graph);
             if (update && !stop && command.checkpoint_every_steps > 0 &&
                 optimizer.step % command.checkpoint_every_steps == 0) {
-                if (!save(std::string(command.output_dir) + "/checkpoint-step-" + std::to_string(optimizer.step),
-                          false)) {
+                if (!save(output_child("checkpoint-step-" + std::to_string(optimizer.step)), false)) {
                     dit_ggml_free(&model);
                     return false;
                 }
@@ -1084,8 +1088,7 @@ static bool train_adapter(const ACETrainCommand &          command,
         const bool checkpoint_due =
             !final_epoch && command.checkpoint_every > 0 && (epoch + 1) % command.checkpoint_every == 0;
         if (checkpoint_due) {
-            const std::string checkpoint =
-                std::string(command.output_dir) + "/checkpoint-epoch-" + std::to_string(epoch + 1);
+            const std::string checkpoint = output_child("checkpoint-epoch-" + std::to_string(epoch + 1));
             std::fprintf(stderr, "[Ace-Train] saving epoch checkpoint=%s\n", checkpoint.c_str());
             if (!save(checkpoint, false)) {
                 dit_ggml_free(&model);

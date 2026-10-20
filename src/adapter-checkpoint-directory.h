@@ -59,7 +59,8 @@ static bool adapter_checkpoint_directory(const std::filesystem::path & requested
         error = "checkpoint generation pointer is invalid";
         return false;
     }
-    const std::filesystem::path generation = requested / target;
+    // The pointer is written with "/", which a Windows \\?\ directory rejects.
+    const std::filesystem::path generation = (requested / target).make_preferred();
     if (!std::filesystem::is_directory(generation)) {
         error = "checkpoint generation is missing";
         return false;

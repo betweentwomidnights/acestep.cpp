@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(acestep-ggml VERSION 0.1.2 LANGUAGES C CXX)
+project(acestep-ggml VERSION 0.1.3 LANGUAGES C CXX)
 
 include(CTest)
 
