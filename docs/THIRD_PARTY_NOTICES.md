@@ -17,6 +17,7 @@ included; their licenses and download terms are separate.
 | minimp3, lieff and contributors | CC0 1.0 | CC0 dedication retained in `minimp3-source.h` |
 | sa3.cpp audio analysis/WAV helpers and training CLI controls, betweentwomidnights | MIT | `LICENSE-sa3-analysis.txt`; audio helpers from `3b7bfbf2939983ff3411dea92e5357f04a0ec6ad`, controls/tests adapted from `e2f6d1039fabb50ad27729d3cc2013ac9c8002b1` |
 | Signalsmith Linear FFT, Signalsmith Audio | MIT | `LICENSE-signalsmith-linear.txt` |
+| ACE-Step 1.5 genre vocabulary (`genres_vocab.txt`), ACEStep | MIT | `LICENSE-ace-step.txt`; unchanged from [ace-step/ACE-Step-1.5](https://github.com/ace-step/ACE-Step-1.5) `acestep/genres_vocab.txt` |
 | mp3 encoder/decoder and WAV/audio helpers in this tree | Notices retained in source | Project `LICENSE` and original file headers |
 
 The Windows core archive also carries the Microsoft Visual C++ runtime

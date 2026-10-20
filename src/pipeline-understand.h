@@ -51,6 +51,8 @@ AceUnderstand * ace_understand_load(ModelStore * store, const AceUnderstandParam
 //   with [T_latent * 64] f32 and *T_latent_out is set; on any error path
 //   before tokenize, the buffer is left empty.
 // cancel/cancel_data: abort callback, polled between tokens. NULL = never cancel.
+// genres_out: optional; receives the LM's genres, constrained to ACE-Step's
+//   genre vocabulary (empty when the vocabulary is unavailable).
 // Returns 0 on success, -1 on error or cancellation.
 int ace_understand_generate(AceUnderstand *      ctx,
                             const float *        src_audio,
@@ -62,7 +64,8 @@ int ace_understand_generate(AceUnderstand *      ctx,
                             std::vector<float> * latent_out   = nullptr,
                             int *                T_latent_out = nullptr,
                             bool (*cancel)(void *)            = nullptr,
-                            void * cancel_data                = nullptr);
+                            void *        cancel_data         = nullptr,
+                            std::string * genres_out          = nullptr);
 
 void ace_understand_free(AceUnderstand * ctx);
 

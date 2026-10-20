@@ -1119,13 +1119,14 @@ static void understand_worker(std::shared_ptr<Job> job,
     }
 
     AceRequest         out;
+    std::string        genres;
     std::vector<float> captured_latent;
     int                captured_T_latent = 0;
     const float *      src_lat_ptr       = src_latents.empty() ? nullptr : src_latents.data();
     int                rc =
         ace_understand_generate(ctx, src_interleaved, src_len, src_lat_ptr, src_T_latent, &ace_req, &out,
                                 caption_only ? nullptr : &captured_latent, caption_only ? nullptr : &captured_T_latent,
-                                server_cancel_job, (void *) &job->cancel);
+                                server_cancel_job, (void *) &job->cancel, &genres);
     ace_understand_free(ctx);
     free(src_interleaved);
 
@@ -1168,7 +1169,7 @@ static void understand_worker(std::shared_ptr<Job> job,
         yyjson_mut_obj_add_strcpy(doc, root, "caption", out.caption.c_str());
         yyjson_mut_obj_add_strcpy(doc, root, "prompt", out.caption.c_str());
         yyjson_mut_obj_add_strcpy(doc, root, "lyrics", out.lyrics.c_str());
-        yyjson_mut_obj_add_str(doc, root, "genre", "");
+        yyjson_mut_obj_add_strcpy(doc, root, "genre", genres.c_str());
         yyjson_mut_obj_add_null(doc, root, "is_instrumental");
         yyjson_mut_obj_add_int(doc, root, "bpm", out.bpm);
         yyjson_mut_obj_add_strcpy(doc, root, "keyscale", out.keyscale.c_str());

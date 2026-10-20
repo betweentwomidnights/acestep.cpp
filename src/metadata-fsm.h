@@ -2,15 +2,17 @@
 // metadata-fsm.h: constrained decoding FSM for ACE-Step metadata
 //
 // PrefixTree for token-level constraints, MetadataFSM for structured
-// YAML metadata generation (BPM, duration, key, time signature, language).
-// Also: audio code parsing and Phase 1 output merging.
+// YAML metadata generation (BPM, duration, genres, key, time signature,
+// language). Also: audio code parsing and Phase 1 output merging.
 
 #include "bpe.h"
+#include "genre-vocab.h"
 #include "prompt.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -46,6 +48,8 @@ struct MetadataFSM {
         CAPTION_VALUE,
         DURATION_NAME,
         DURATION_VALUE,
+        GENRES_NAME,
+        GENRES_VALUE,
         KEYSCALE_NAME,
         KEYSCALE_VALUE,
         LANGUAGE_NAME,
@@ -67,6 +71,25 @@ struct MetadataFSM {
     // The user-provided caption is already in the prompt context; the LM
     // does not regenerate it and the lyrics/codes stay conditioned on it.
     bool skip_caption = false;
+
+    // Genres: off unless a caller asks for it, as in Python, whose FSM skips
+    // the field by default and generates it only in the understand pass. The
+    // value is constrained to ACE-Step's genre vocabulary.
+    bool skip_genres = true;
+
+    // Each LM token's text, lowercased with trailing whitespace trimmed (" "
+    // for a whitespace-only token), and the tokens indexed by first byte and
+    // by first non-space byte. Built once per LM and shared by every copy.
+    struct GenreTokens {
+        std::vector<std::string>      text;
+        std::vector<bool>             has_newline;
+        std::vector<std::vector<int>> by_first_byte = std::vector<std::vector<int>>(256);
+    };
+
+    std::shared_ptr<const GenreVocab>  genres_vocab;
+    std::shared_ptr<const GenreTokens> genres_tokens;
+    std::vector<int>                   genres_name;
+    std::string                        genres_acc;
 
     std::vector<int> bpm_name, caption_name, duration_name;
     std::vector<int> keyscale_name, language_name, timesig_name;
@@ -164,6 +187,33 @@ struct MetadataFSM {
         keyscale_name = bpe_encode(&bpe, "keyscale:", false);
         language_name = bpe_encode(&bpe, "language:", false);
         timesig_name  = bpe_encode(&bpe, "timesignature:", false);
+        genres_name   = bpe_encode(&bpe, "genres:", false);
+
+        genres_vocab = genre_vocab();
+        if (genres_vocab) {
+            auto tokens = std::make_shared<GenreTokens>();
+            tokens->text.resize((size_t) vsize);
+            tokens->has_newline.assign((size_t) vsize, false);
+            for (int id = 0; id < vsize; id++) {
+                std::string raw = genre_lower(decode_token(id));
+                if (raw.empty()) {
+                    continue;
+                }
+                tokens->has_newline[(size_t) id] = raw.find('\n') != std::string::npos;
+                size_t content                   = raw.find_first_not_of(" \t\r\n");
+                if (content == std::string::npos) {
+                    tokens->text[(size_t) id] = " ";
+                } else {
+                    tokens->text[(size_t) id] = raw.substr(0, raw.find_last_not_of(" \t\r\n") + 1);
+                }
+                unsigned char first = (unsigned char) raw[0];
+                tokens->by_first_byte[first].push_back(id);
+                if (content != std::string::npos && content > 0 && (unsigned char) raw[content] != first) {
+                    tokens->by_first_byte[(unsigned char) raw[content]].push_back(id);
+                }
+            }
+            genres_tokens = tokens;
+        }
 
         // BPM 30-300
         {
@@ -230,6 +280,7 @@ struct MetadataFSM {
         caption_ending          = false;
         pending_field_name.clear();
         value_acc.clear();
+        genres_acc.clear();
         inject_queue.clear();
         // forced_* values are NOT cleared: they persist across resets
         // (set once at setup, apply to every generate call)
@@ -278,6 +329,8 @@ struct MetadataFSM {
                 return &caption_name;
             case DURATION_NAME:
                 return &duration_name;
+            case GENRES_NAME:
+                return &genres_name;
             case KEYSCALE_NAME:
                 return &keyscale_name;
             case LANGUAGE_NAME:
@@ -306,6 +359,65 @@ struct MetadataFSM {
         }
     }
 
+    bool genres_enabled() const { return !skip_genres && genres_vocab && genres_tokens; }
+
+    // The tokens that keep the genres value a prefix of some vocabulary entry,
+    // and newline once it is a complete entry. Ported from Python's
+    // _get_allowed_genres_tokens. Two differences: the field name has no
+    // trailing space, so a first token with a leading space (" pop", as the LM
+    // writes "genres: pop") is matched without it where Python rejects it; and
+    // a token containing a newline cannot continue the value, where Python's
+    // trimmed text would let one end the line without ending the field.
+    std::vector<int> allowed_genre_tokens() const {
+        std::vector<int> allowed;
+        std::string      prefix  = genre_lower(genres_acc);
+        size_t           first   = prefix.find_first_not_of(" \t");
+        prefix                   = first == std::string::npos ? std::string() :
+                                                                prefix.substr(first, prefix.find_last_not_of(" \t") - first + 1);
+        const GenreVocab & vocab = *genres_vocab;
+        if (!vocab.has_prefix(prefix)) {
+            if (newline_tok >= 0) {
+                allowed.push_back(newline_tok);
+            }
+            return allowed;
+        }
+        std::vector<unsigned char> next;
+        bool                       complete = false;
+        vocab.next_bytes(prefix, next, complete);
+        bool space_ok = std::binary_search(next.begin(), next.end(), (unsigned char) ' ') ||
+                        std::binary_search(next.begin(), next.end(), (unsigned char) ',');
+        std::vector<int> candidates;
+        for (unsigned char byte : next) {
+            const auto & ids = genres_tokens->by_first_byte[byte];
+            candidates.insert(candidates.end(), ids.begin(), ids.end());
+        }
+        std::sort(candidates.begin(), candidates.end());
+        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+        for (int id : candidates) {
+            const std::string & text = genres_tokens->text[(size_t) id];
+            if (text.empty() || genres_tokens->has_newline[(size_t) id]) {
+                continue;
+            }
+            if (text == " ") {
+                if (space_ok) {
+                    allowed.push_back(id);
+                }
+                continue;
+            }
+            std::string candidate = prefix + text;
+            if (prefix.empty()) {
+                candidate.erase(0, candidate.find_first_not_of(' '));
+            }
+            if (vocab.has_prefix(candidate)) {
+                allowed.push_back(id);
+            }
+        }
+        if (complete && newline_tok >= 0) {
+            allowed.push_back(newline_tok);
+        }
+        return allowed;
+    }
+
     State next_name_state() const {
         switch (state) {
             case BPM_NAME:
@@ -316,6 +428,9 @@ struct MetadataFSM {
                 return DURATION_NAME;
             case DURATION_NAME:
             case DURATION_VALUE:
+                return genres_enabled() ? GENRES_NAME : KEYSCALE_NAME;
+            case GENRES_NAME:
+            case GENRES_VALUE:
                 return KEYSCALE_NAME;
             case KEYSCALE_NAME:
             case KEYSCALE_VALUE:
@@ -430,6 +545,24 @@ struct MetadataFSM {
             return;
         }
 
+        if (state == GENRES_VALUE) {
+            std::vector<int> allowed = allowed_genre_tokens();
+            if (allowed.empty() && newline_tok >= 0) {
+                allowed.push_back(newline_tok);
+            }
+            std::vector<float> saved(allowed.size());
+            for (size_t i = 0; i < allowed.size(); i++) {
+                saved[i] = logits[allowed[i]];
+            }
+            for (int v = 0; v < vocab_size; v++) {
+                logits[v] = -1e9f;
+            }
+            for (size_t i = 0; i < allowed.size(); i++) {
+                logits[allowed[i]] = saved[i];
+            }
+            return;
+        }
+
         // Caption value: block audio codes, allow everything else.
         // Also applies when caption_ending (LLM generating next field name).
         if (state == CAPTION_VALUE) {
@@ -539,6 +672,10 @@ struct MetadataFSM {
                     case DURATION_NAME:
                         state = DURATION_VALUE;
                         break;
+                    case GENRES_NAME:
+                        state = GENRES_VALUE;
+                        genres_acc.clear();
+                        break;
                     case KEYSCALE_NAME:
                         state = KEYSCALE_VALUE;
                         break;
@@ -556,6 +693,18 @@ struct MetadataFSM {
             return;
         }
 
+        if (state == GENRES_VALUE) {
+            if (token == newline_tok) {
+                state    = next_name_state();
+                name_pos = 0;
+                value_acc.clear();
+                genres_acc.clear();
+            } else {
+                genres_acc += decode_token(token);
+            }
+            return;
+        }
+
         if (current_value_tree()) {
             if (token == newline_tok) {
                 state    = next_name_state();
@@ -568,7 +717,12 @@ struct MetadataFSM {
         }
 
         if (state == CAPTION_VALUE) {
-            if (token == newline_tok) {
+            // A caption line can end inside a token, as in ".\n": any token
+            // holding a newline may end the caption, as in Python's FSM. Only
+            // the bare newline token counted before, so a caption ending on
+            // ".\n" swallowed the next field ("duration: 120") as caption
+            // text and the FSM resumed at the field after it.
+            if (token == newline_tok || decode_token(token).find('\n') != std::string::npos) {
                 // Don't transition yet: the caption may wrap (YAML continuation
                 // lines start with spaces). Peek at next token via a flag.
                 caption_pending_newline = true;
@@ -587,6 +741,9 @@ struct MetadataFSM {
     State field_name_to_value_state(const std::string & field) const {
         if (field == "duration") {
             return DURATION_VALUE;
+        }
+        if (field == "genres") {
+            return genres_enabled() ? GENRES_VALUE : DISABLED;
         }
         if (field == "keyscale") {
             return KEYSCALE_VALUE;

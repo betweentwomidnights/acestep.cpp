@@ -152,6 +152,9 @@ cp vendor/cpp-httplib/LICENSE "$STAGE/LICENSE-cpp-httplib.txt"
 cp ci/LICENSE-yyjson.txt "$STAGE/LICENSE-yyjson.txt"
 cp vendor/sa3-analysis/LICENSE.txt "$STAGE/LICENSE-sa3-analysis.txt"
 cp vendor/signalsmith-linear/LICENSE.txt "$STAGE/LICENSE-signalsmith-linear.txt"
+# Read from beside the executables by the understand pass (genres).
+cp vendor/ace-step/genres_vocab.txt "$STAGE/genres_vocab.txt"
+cp vendor/ace-step/LICENSE.txt "$STAGE/LICENSE-ace-step.txt"
 cp ci/standalone-README.txt "$STAGE/README.txt"
 DIRTY=false
 [ -z "$(git status --porcelain --untracked-files=no)" ] || DIRTY=true

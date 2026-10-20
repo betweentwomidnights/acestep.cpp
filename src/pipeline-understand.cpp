@@ -103,7 +103,11 @@ int ace_understand_generate(AceUnderstand *      ctx,
                             std::vector<float> * latent_out,
                             int *                T_latent_out,
                             bool (*cancel)(void *),
-                            void * cancel_data) {
+                            void *        cancel_data,
+                            std::string * genres_out) {
+    if (genres_out) {
+        genres_out->clear();
+    }
     if (!ctx || !req || !out) {
         return -1;
     }
@@ -282,7 +286,9 @@ int ace_understand_generate(AceUnderstand *      ctx,
     bool        use_fsm = ctx->params.use_fsm;
     MetadataFSM fsm;
     if (fsm_template) {
-        fsm = *fsm_template;
+        fsm             = *fsm_template;
+        // As Python's understand pass does, generate genres (vocabulary-constrained).
+        fsm.skip_genres = false;
     }
 
     // Step 3: build understand prompt
@@ -366,6 +372,10 @@ int ace_understand_generate(AceUnderstand *      ctx,
     std::string text   = bpe_decode(*bpe, gen_tokens);
     AcePrompt   parsed = {};
     parse_cot_and_lyrics(text, &parsed);
+    {
+        size_t think_end = text.find("</think>");
+        fprintf(stderr, "[Understand-CoT]\n%s\n", text.substr(0, think_end).c_str());
+    }
 
     if (parsed.bpm > 0) {
         fprintf(stderr, "[Understand-Result] bpm: %d\n", parsed.bpm);
@@ -381,6 +391,12 @@ int ace_understand_generate(AceUnderstand *      ctx,
     }
     if (!parsed.vocal_language.empty()) {
         fprintf(stderr, "[Understand-Result] language: %s\n", parsed.vocal_language.c_str());
+    }
+    if (!parsed.genres.empty()) {
+        fprintf(stderr, "[Understand-Result] genres: %s\n", parsed.genres.c_str());
+    }
+    if (genres_out) {
+        *genres_out = parsed.genres;
     }
     if (!parsed.caption.empty()) {
         fprintf(stderr, "[Understand-Result] caption: %.80s%s\n", parsed.caption.c_str(),

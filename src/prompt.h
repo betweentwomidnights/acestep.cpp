@@ -29,6 +29,7 @@ struct AcePrompt {
     std::string keyscale;
     std::string timesignature;
     std::string vocal_language;
+    std::string genres;  // understand pass only, from the vocabulary-constrained field
 };
 
 // CoT parsing (extract metadata + lyrics from LLM Phase1 output)
@@ -96,6 +97,11 @@ static bool parse_cot_and_lyrics(const std::string & text, AcePrompt * out) {
     std::string lang = get_field("language");
     if (!lang.empty()) {
         out->vocal_language = lang;
+    }
+
+    std::string genres = get_field("genres");
+    if (!genres.empty()) {
+        out->genres = genres;
     }
 
     std::string cap = get_field("caption");

@@ -74,8 +74,14 @@ The result contains `schema_version: 1`, `caption`, identical `prompt`, `lyrics`
 LM `bpm`, `keyscale`, `time_signature`, `language`, actual WAV `duration`, resolved
 `lm_seed`, selected `lm_model` / `synth_model` / `vae`, and a separate
 `local_analysis` object. No audio codes, latent attachments or adapter files are
-returned. `genre` is currently empty and `is_instrumental` is null: do not infer
-either from those placeholders. Lyrics and prose are model suggestions and need
+returned. `genre` is the LM's `genres:` field, which the understand pass
+generates as Python ACE-Step's does: decoded character by character against
+ACE-Step's genre vocabulary (`genres_vocab.txt`, 178k entries from
+[ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5), MIT), so it is always a
+complete vocabulary entry, lowercased. It is empty when the vocabulary is missing
+(the server logs a warning); packages place it beside the executables, and
+`ACE_GENRES_VOCAB` names another copy. `is_instrumental` is null: do not infer it
+from that placeholder. Lyrics and prose are model suggestions and need
 the application's existing quality checks and instrumental/trigger policy.
 Empty/malformed caption text or an exhausted decode budget fails the job.
 Decoding is bounded by the configured KV cache as well as its 4096-token limit.

@@ -360,6 +360,9 @@ Copy-Item (Join-Path $root "vendor\cpp-httplib\LICENSE") (Join-Path $coreDir "LI
 Copy-Item (Join-Path $root "ci\LICENSE-yyjson.txt") (Join-Path $coreDir "LICENSE-yyjson.txt")
 Copy-Item (Join-Path $root "vendor\sa3-analysis\LICENSE.txt") (Join-Path $coreDir "LICENSE-sa3-analysis.txt")
 Copy-Item (Join-Path $root "vendor\signalsmith-linear\LICENSE.txt") (Join-Path $coreDir "LICENSE-signalsmith-linear.txt")
+# Read from beside the executables by the understand pass (genres).
+Copy-Item (Join-Path $root "vendor\ace-step\genres_vocab.txt") $coreDir
+Copy-Item (Join-Path $root "vendor\ace-step\LICENSE.txt") (Join-Path $coreDir "LICENSE-ace-step.txt")
 $vcRuntime = Get-VcRuntime $buildPath
 foreach ($file in $vcRuntime) { Copy-Item $file $coreDir }
 
