@@ -30,6 +30,7 @@
 
 #include "audio-analysis.h"
 #include "audio-io.h"
+#include "job-progress.h"
 #include "model-registry.h"
 #include "model-store.h"
 #include "pipeline-lm.h"
@@ -217,12 +218,23 @@ struct Job {
     std::string            result_body;
     std::string            result_mime;
     std::atomic<bool>      cancel{ false };
+    JobProgress            progress;  // reported by the pipeline while it runs
 
     // memory ordering contract: result_body and result_mime are written
     // before status is stored (seq_cst). the client loads status (seq_cst)
     // and only reads result fields after seeing done/failed. this guarantees
     // visibility without an explicit mutex on the result fields.
 };
+
+// Queue `fn` for the GPU worker with `job`'s progress installed, so the
+// pipeline's stage and step reach GET /job while it runs.
+static void job_push(const std::shared_ptr<Job> & job, std::function<void()> fn) {
+    work_push([job, fn = std::move(fn)]() {
+        JobProgressScope scope(&job->progress);
+        job_progress_report(JOB_STAGE_LOAD, 0, 0);
+        fn();
+    });
+}
 
 static std::mutex                                            mtx_jobs;
 static std::unordered_map<std::string, std::shared_ptr<Job>> g_jobs;
@@ -385,6 +397,25 @@ static const char * job_status_str(JobStatus s) {
             return "cancelled";
     }
     return "unknown";
+}
+
+// GET /job's status JSON, with what a running job is doing:
+// {"status":"running","progress":{"stage":"dit","step":12,"total":50}}.
+// stage is queued (waiting for the GPU worker), load (models and inputs),
+// encode, dit or decode; step counts the steps or tiles of that stage
+// already done.
+static std::string job_status_json(const Job & job) {
+    const JobStatus status = job.status.load();
+    std::string     body   = "{\"status\":\"";
+    body += job_status_str(status);
+    body += "\"";
+    if (status == JobStatus::RUNNING) {
+        body += ",\"progress\":{\"stage\":\"";
+        body += job_stage_name(job.progress.stage.load(std::memory_order_relaxed));
+        body += "\",\"step\":" + std::to_string(job.progress.step.load(std::memory_order_relaxed));
+        body += ",\"total\":" + std::to_string(job.progress.total.load(std::memory_order_relaxed)) + "}";
+    }
+    return body + "}";
 }
 
 // log capture: intercept stderr via pipe, forward to terminal + ring buffer.
@@ -702,7 +733,7 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (LM, mode=%d, N=%zu)\n", job->id.c_str(), mode, ace_reqs.size());
 
-    work_push([job, reqs = std::move(ace_reqs), mode]() mutable { lm_worker(job, std::move(reqs), mode); });
+    job_push(job, [job, reqs = std::move(ace_reqs), mode]() mutable { lm_worker(job, std::move(reqs), mode); });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
     res.set_content(body, "application/json");
@@ -1063,9 +1094,9 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (%d requests)\n", job->id.c_str(), (int) ace_reqs.size());
 
-    work_push([job, reqs = std::move(ace_reqs), src_interleaved, src_len, src_lat = std::move(src_latents),
-               src_T_latent, ref_interleaved, ref_len, ref_lat = std::move(ref_latents), ref_T_latent, output_wav,
-               wav_fmt, peak_clip]() mutable {
+    job_push(job, [job, reqs = std::move(ace_reqs), src_interleaved, src_len, src_lat = std::move(src_latents),
+                   src_T_latent, ref_interleaved, ref_len, ref_lat = std::move(ref_latents), ref_T_latent, output_wav,
+                   wav_fmt, peak_clip]() mutable {
         synth_worker(job, std::move(reqs), src_interleaved, src_len, std::move(src_lat), src_T_latent, ref_interleaved,
                      ref_len, std::move(ref_lat), ref_T_latent, output_wav, wav_fmt, peak_clip);
     });
@@ -1330,8 +1361,8 @@ static void handle_understand_request(const httplib::Request & req, httplib::Res
 
     request_resolve_lm_seed(&ace_req);
 
-    work_push([job, ace_req, src_interleaved, src_len, latents = std::move(src_latents), src_T_latent, caption_only,
-               local_analysis]() mutable {
+    job_push(job, [job, ace_req, src_interleaved, src_len, latents = std::move(src_latents), src_T_latent, caption_only,
+                   local_analysis]() mutable {
         understand_worker(job, ace_req, src_interleaved, src_len, std::move(latents), src_T_latent, caption_only,
                           local_analysis);
     });
@@ -1610,7 +1641,7 @@ static void handle_vae(const httplib::Request & req, httplib::Response & res) {
         fprintf(stderr, "[Server] Job %s created (vae encode, %.2fs audio)\n", job->id.c_str(),
                 (float) src_len / 48000.0f);
 
-        work_push([job, ace_req, src_interleaved, src_len]() mutable {
+        job_push(job, [job, ace_req, src_interleaved, src_len]() mutable {
             encode_worker(job, ace_req, src_interleaved, src_len);
         });
 
@@ -1647,7 +1678,7 @@ static void handle_vae(const httplib::Request & req, httplib::Response & res) {
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (vae decode, %d latent frames)\n", job->id.c_str(), T);
 
-    work_push([job, ace_req, latents = std::move(src_latents), T, output_wav, wav_fmt, peak_clip]() mutable {
+    job_push(job, [job, ace_req, latents = std::move(src_latents), T, output_wav, wav_fmt, peak_clip]() mutable {
         decode_worker(job, ace_req, std::move(latents), T, output_wav, wav_fmt, peak_clip);
     });
 
@@ -1744,6 +1775,24 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
         yyjson_mut_arr_add_str(doc, adapters_arr, e.name.c_str());
     }
     yyjson_mut_obj_add_val(doc, root, "adapters", adapters_arr);
+
+    // adapter_info: each adapter's adapter_info.json, by adapter name, for
+    // the adapters that have a valid one
+    yyjson_mut_val * adapter_info = yyjson_mut_obj(doc);
+    for (const auto & e : g_registry.adapters) {
+        if (e.info.empty()) {
+            continue;
+        }
+        yyjson_doc * parsed = yyjson_read(e.info.data(), e.info.size(), 0);
+        if (!parsed) {
+            fprintf(stderr, "[Server] WARNING: adapter_info.json of %s is not JSON, skipped\n", e.name.c_str());
+            continue;
+        }
+        yyjson_mut_obj_add(adapter_info, yyjson_mut_strcpy(doc, e.name.c_str()),
+                           yyjson_val_mut_copy(doc, yyjson_doc_get_root(parsed)));
+        yyjson_doc_free(parsed);
+    }
+    yyjson_mut_obj_add_val(doc, root, "adapter_info", adapter_info);
 
     // cli: server settings
     yyjson_mut_val * cli = yyjson_mut_obj(doc);
@@ -2087,10 +2136,7 @@ int main(int argc, char ** argv) {
             return;
         }
         // default: return status JSON
-        std::string body = "{\"status\":\"";
-        body += job_status_str(job->status.load());
-        body += "\"}";
-        res.set_content(body, "application/json");
+        res.set_content(job_status_json(*job), "application/json");
     });
     svr.Post("/job", [](const httplib::Request & req, httplib::Response & res) {
         if (!req.has_param("id")) {

@@ -19,6 +19,11 @@ Point the server at this folder:
 ./build/ace-server --models ./models --adapters ./adapters
 ```
 
+A PEFT folder may also hold an `adapter_info.json`. `GET /props` returns it
+unread under `adapter_info`, keyed by the folder's name, so an application
+can publish details its clients need, such as the base model family or the
+training captions. See [the API reference](../docs/ARCHITECTURE.md).
+
 ## Functional LoRA / DoRA inference
 
 For quantized bases, use `ace-synth --adapter-mode functional` to retain the

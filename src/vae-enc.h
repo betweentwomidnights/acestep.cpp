@@ -409,6 +409,7 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
 
     // Short audio: encode directly
     if (T_audio <= audio_chunk) {
+        job_progress_report(JOB_STAGE_ENCODE, 0, 1);
         return vae_enc_encode_with_sampler(m, audio, T_audio, latent_out, max_T_latent, sampler);
     }
 
@@ -421,6 +422,7 @@ static int vae_enc_encode_tiled(VAEEncoder *          m,
     int latent_write_pos = 0;
 
     for (int i = 0; i < num_steps; i++) {
+        job_progress_report(JOB_STAGE_ENCODE, i, num_steps);
         // Core range in audio samples (the part we keep)
         int core_start = i * audio_stride;
         int core_end   = core_start + audio_stride;
