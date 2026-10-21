@@ -219,12 +219,21 @@ struct Job {
     std::string            result_mime;
     std::atomic<bool>      cancel{ false };
     JobProgress            progress;  // reported by the pipeline while it runs
+    std::string            error;     // why a failed job failed, for GET /job
 
-    // memory ordering contract: result_body and result_mime are written
-    // before status is stored (seq_cst). the client loads status (seq_cst)
-    // and only reads result fields after seeing done/failed. this guarantees
-    // visibility without an explicit mutex on the result fields.
+    // memory ordering contract: result_body, result_mime and error are
+    // written before status is stored (seq_cst). the client loads status
+    // (seq_cst) and only reads result fields after seeing done/failed. this
+    // guarantees visibility without an explicit mutex on the result fields.
 };
+
+// Fail `job` for `message`, which GET /job reports to the client as well as
+// the server log.
+static void job_fail(const std::shared_ptr<Job> & job, const std::string & message) {
+    fprintf(stderr, "[Server] %s\n", message.c_str());
+    job->error = message;
+    job->status.store(JobStatus::FAILED);
+}
 
 // Queue `fn` for the GPU worker with `job`'s progress installed, so the
 // pipeline's stage and step reach GET /job while it runs.
@@ -403,19 +412,28 @@ static const char * job_status_str(JobStatus s) {
 // {"status":"running","progress":{"stage":"dit","step":12,"total":50}}.
 // stage is queued (waiting for the GPU worker), load (models and inputs),
 // encode, dit or decode; step counts the steps or tiles of that stage
-// already done.
+// already done. A failed job that recorded why adds "error".
 static std::string job_status_json(const Job & job) {
-    const JobStatus status = job.status.load();
-    std::string     body   = "{\"status\":\"";
-    body += job_status_str(status);
-    body += "\"";
+    const JobStatus  status = job.status.load();
+    yyjson_mut_doc * doc    = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_val * root   = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_str(doc, root, "status", job_status_str(status));
     if (status == JobStatus::RUNNING) {
-        body += ",\"progress\":{\"stage\":\"";
-        body += job_stage_name(job.progress.stage.load(std::memory_order_relaxed));
-        body += "\",\"step\":" + std::to_string(job.progress.step.load(std::memory_order_relaxed));
-        body += ",\"total\":" + std::to_string(job.progress.total.load(std::memory_order_relaxed)) + "}";
+        yyjson_mut_val * progress = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, progress, "stage",
+                               job_stage_name(job.progress.stage.load(std::memory_order_relaxed)));
+        yyjson_mut_obj_add_int(doc, progress, "step", job.progress.step.load(std::memory_order_relaxed));
+        yyjson_mut_obj_add_int(doc, progress, "total", job.progress.total.load(std::memory_order_relaxed));
+        yyjson_mut_obj_add_val(doc, root, "progress", progress);
+    } else if (status == JobStatus::FAILED && !job.error.empty()) {
+        yyjson_mut_obj_add_strncpy(doc, root, "error", job.error.data(), job.error.size());
     }
-    return body + "}";
+    char *      json = yyjson_mut_write(doc, 0, nullptr);
+    std::string body = json ? json : "{\"status\":\"unknown\"}";
+    free(json);
+    yyjson_mut_doc_free(doc);
+    return body;
 }
 
 // log capture: intercept stderr via pipe, forward to terminal + ring buffer.
@@ -778,26 +796,23 @@ static void synth_worker(std::shared_ptr<Job>    job,
     std::string        dit_name = resolve_name(g_registry.dit, ace_reqs[0].synth_model, g_loaded_dit);
     const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
     if (!dit) {
-        fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
         free(src_interleaved);
         free(ref_interleaved);
-        job->status.store(JobStatus::FAILED);
+        job_fail(job, "DiT not found: " + dit_name);
         return;
     }
     if (g_registry.text_enc.empty() || g_registry.vae.empty()) {
-        fprintf(stderr, "[Server] Missing Text-Enc or VAE in registry\n");
         free(src_interleaved);
         free(ref_interleaved);
-        job->status.store(JobStatus::FAILED);
+        job_fail(job, "Missing Text-Enc or VAE in registry");
         return;
     }
     std::string        vae_name = resolve_name(g_registry.vae, ace_reqs[0].vae, g_loaded_vae);
     const ModelEntry * vae      = registry_find(g_registry.vae, vae_name.c_str());
     if (!vae) {
-        fprintf(stderr, "[Server] VAE not found: %s\n", vae_name.c_str());
         free(src_interleaved);
         free(ref_interleaved);
-        job->status.store(JobStatus::FAILED);
+        job_fail(job, "VAE not found: " + vae_name);
         return;
     }
 
@@ -810,10 +825,9 @@ static void synth_worker(std::shared_ptr<Job>    job,
     if (!ace_reqs[0].adapter.empty()) {
         const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].adapter.c_str());
         if (!adapter) {
-            fprintf(stderr, "[Server] Adapter not found: %s\n", ace_reqs[0].adapter.c_str());
             free(src_interleaved);
             free(ref_interleaved);
-            job->status.store(JobStatus::FAILED);
+            job_fail(job, "Adapter not found: " + ace_reqs[0].adapter);
             return;
         }
         p.adapter_path  = adapter->path.c_str();
@@ -824,10 +838,10 @@ static void synth_worker(std::shared_ptr<Job>    job,
 
     AceSynth * ctx = ace_synth_load(g_store, &p);
     if (!ctx) {
-        fprintf(stderr, "[Server] FATAL: synth load failed\n");
         free(src_interleaved);
         free(ref_interleaved);
-        job->status.store(JobStatus::FAILED);
+        job_fail(job, "FATAL: synth load failed for " + dit_name +
+                          (ace_reqs[0].adapter.empty() ? std::string() : " with adapter " + ace_reqs[0].adapter));
         return;
     }
 
@@ -883,7 +897,16 @@ static void synth_worker(std::shared_ptr<Job>    job,
         for (auto & a : audio) {
             ace_audio_free(&a);
         }
-        job->status.store(job->cancel.load() ? JobStatus::CANCELLED : JobStatus::FAILED);
+        if (job->cancel.load()) {
+            job->status.store(JobStatus::CANCELLED);
+        } else {
+            // An adapter trained on another DiT family fails here, when the
+            // DiT is prepared, not when the synth context loads.
+            job_fail(job, ace_reqs[0].adapter.empty() ?
+                              "Synthesis failed; the server log has the details" :
+                              "Synthesis failed; check that adapter " + ace_reqs[0].adapter + " was trained for " +
+                                  dit_name + ". The server log has the details");
+        }
         return;
     }
 

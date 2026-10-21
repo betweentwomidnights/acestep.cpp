@@ -952,6 +952,8 @@ GET  /job?id=N                  Poll job status
     stage: queued (waiting for the worker), load (models and inputs),
            encode (source audio, per VAE tile), dit (per sampling step),
            decode (per VAE tile); step counts what that stage has done
+  a failed /synth job also says why:
+    {"status":"failed","error":"Adapter not found: my-adapter"}
 
 GET  /job?id=N&result=1         Fetch job result
   lm:         application/json [AceRequest, ...]

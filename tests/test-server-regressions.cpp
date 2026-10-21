@@ -175,6 +175,11 @@ static int test_job_progress() {
     if (job_status_json(job) != "{\"status\":\"done\"}") {
         return fail("a finished job reports no progress");
     }
+    auto failed = std::make_shared<Job>();
+    job_fail(failed, "Adapter not found: \"tones\"");
+    if (job_status_json(*failed) != "{\"status\":\"failed\",\"error\":\"Adapter not found: \\\"tones\\\"\"}") {
+        return fail("a failed job reports why, as escaped JSON");
+    }
     return 0;
 }
 
