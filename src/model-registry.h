@@ -37,7 +37,14 @@ struct ModelEntry {
 struct AdapterEntry {
     std::string name;  // filename or directory name (e.g. "singer.safetensors" or "my-adapter")
     std::string path;  // full path (file or PEFT directory)
+    // A PEFT directory's adapter_info.json, as text: whatever the application
+    // that published the adapter wants clients to see beside its name. The
+    // server passes it through without interpreting it. Empty when absent.
+    std::string info;
 };
+
+// Largest adapter_info.json the registry reads.
+static const size_t ADAPTER_INFO_MAX_BYTES = 1 << 20;
 
 struct ModelRegistry {
     std::vector<ModelEntry>   lm;
@@ -266,8 +273,23 @@ static bool registry_scan_adapters(ModelRegistry * reg, const char * adapters_di
         std::string adapter =
             std::string(adapters_dir) + REGISTRY_SEP + dname + REGISTRY_SEP + "adapter_model.safetensors";
         if (registry_is_file(adapter.c_str())) {
-            std::string full = std::string(adapters_dir) + REGISTRY_SEP + dname;
-            reg->adapters.push_back({ dname, full });
+            std::string       full = std::string(adapters_dir) + REGISTRY_SEP + dname;
+            std::string       info;
+            const std::string info_path = full + REGISTRY_SEP + "adapter_info.json";
+            if (FILE * f = std::fopen(info_path.c_str(), "rb")) {
+                char   buffer[65536];
+                size_t n = 0;
+                while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0 && info.size() <= ADAPTER_INFO_MAX_BYTES) {
+                    info.append(buffer, n);
+                }
+                std::fclose(f);
+                if (info.size() > ADAPTER_INFO_MAX_BYTES) {
+                    fprintf(stderr, "[Registry] WARNING: %s is over %zu bytes, ignored\n", info_path.c_str(),
+                            ADAPTER_INFO_MAX_BYTES);
+                    info.clear();
+                }
+            }
+            reg->adapters.push_back({ dname, full, info });
             fprintf(stderr, "[Registry] Adapter: %s (PEFT)\n", dname.c_str());
             count++;
         }

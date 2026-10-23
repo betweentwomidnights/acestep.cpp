@@ -113,6 +113,76 @@ static int test_multipart() {
     return 0;
 }
 
+// /props passes each PEFT adapter's adapter_info.json through by name, and
+// leaves out adapters with none or with one that is not JSON.
+static int test_adapter_info() {
+    const auto unique  = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto dir     = std::filesystem::temp_directory_path() / ("ace-adapter-info-" + std::to_string(unique));
+    auto       adapter = [&](const char * name, const char * info) {
+        std::filesystem::create_directories(dir / name);
+        FILE * weights = std::fopen((dir / name / "adapter_model.safetensors").string().c_str(), "wb");
+        std::fclose(weights);
+        if (info) {
+            FILE * f = std::fopen((dir / name / "adapter_info.json").string().c_str(), "wb");
+            std::fputs(info, f);
+            std::fclose(f);
+        }
+    };
+    adapter("described", "{\"model_family\":\"xl\",\"captions\":[\"warm tape\",\"dusty drums\"]}");
+    adapter("garbled", "{not json");
+    adapter("plain", nullptr);
+    g_registry = {};
+    registry_scan_adapters(&g_registry, dir.string().c_str());
+    httplib::Request  req;
+    httplib::Response res;
+    handle_props(req, res);
+    g_registry = {};
+    std::filesystem::remove_all(dir);
+    yyjson_doc * doc = yyjson_read(res.body.c_str(), res.body.size(), 0);
+    if (!doc) {
+        return fail("props must contain valid JSON");
+    }
+    yyjson_val * root     = yyjson_doc_get_root(doc);
+    yyjson_val * info     = yyjson_obj_get(root, "adapter_info");
+    yyjson_val * captions = yyjson_obj_get(yyjson_obj_get(info, "described"), "captions");
+    const bool   ok       = yyjson_arr_size(yyjson_obj_get(root, "adapters")) == 3 && yyjson_obj_size(info) == 1 &&
+                    !strcmp(yyjson_get_str(yyjson_obj_get(yyjson_obj_get(info, "described"), "model_family")), "xl") &&
+                    yyjson_arr_size(captions) == 2 &&
+                    !strcmp(yyjson_get_str(yyjson_arr_get(captions, 1)), "dusty drums");
+    yyjson_doc_free(doc);
+    if (!ok) {
+        return fail("props must list every adapter and pass through only valid adapter_info.json");
+    }
+    return 0;
+}
+
+// GET /job reports a running job's stage and step as the pipeline reports
+// them on the job's thread, and only while it runs.
+static int test_job_progress() {
+    Job job;
+    if (job_status_json(job) != "{\"status\":\"running\",\"progress\":{\"stage\":\"queued\",\"step\":0,\"total\":0}}") {
+        return fail("a job that has not started reports queued");
+    }
+    {
+        JobProgressScope scope(&job.progress);
+        job_progress_report(JOB_STAGE_DIT, 12, 50);
+    }
+    job_progress_report(JOB_STAGE_DECODE, 1, 2);  // no job installed: ignored
+    if (job_status_json(job) != "{\"status\":\"running\",\"progress\":{\"stage\":\"dit\",\"step\":12,\"total\":50}}") {
+        return fail("a running job reports the stage and step its thread reported");
+    }
+    job.status.store(JobStatus::DONE);
+    if (job_status_json(job) != "{\"status\":\"done\"}") {
+        return fail("a finished job reports no progress");
+    }
+    auto failed = std::make_shared<Job>();
+    job_fail(failed, "Adapter not found: \"tones\"");
+    if (job_status_json(*failed) != "{\"status\":\"failed\",\"error\":\"Adapter not found: \\\"tones\\\"\"}") {
+        return fail("a failed job reports why, as escaped JSON");
+    }
+    return 0;
+}
+
 static int test_bind_failure() {
     httplib::Server occupied;
     // Disable httplib's default reuse option so this fixture actually owns the port.
@@ -161,9 +231,10 @@ int main(int argc, char ** argv) {
         fputs("FATAL-TAIL", stderr);  // Also exercise a partial final line.
         std::exit(17);                // Skip the capture destructor, as the loaders do.
     }
-    if (test_float_roundtrip() || test_multipart() || test_bind_failure()) {
+    if (test_float_roundtrip() || test_multipart() || test_adapter_info() || test_job_progress() ||
+        test_bind_failure()) {
         return 1;
     }
-    fprintf(stderr, "PASS: server float round trips, multipart batches, and bind failure\n");
+    fprintf(stderr, "PASS: server float round trips, multipart batches, adapter info, job progress and bind failure\n");
     return 0;
 }

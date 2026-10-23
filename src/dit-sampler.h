@@ -8,6 +8,7 @@
 #include "dit-graph.h"
 #include "dit.h"
 #include "dwt-haar.h"
+#include "job-progress.h"
 #include "solvers/solver-registry.h"
 #include "static-graph.h"
 
@@ -420,6 +421,7 @@ static int dit_ggml_generate(DiTGGML *           model,
             ggml_free(ctx);
             return -1;
         }
+        job_progress_report(JOB_STAGE_DIT, step, num_steps);
         float t_curr = schedule[step];
 
         // Cover mode: at cover_steps, swap context to silence and enc_hidden to text2music

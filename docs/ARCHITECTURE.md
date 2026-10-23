@@ -947,6 +947,13 @@ POST /vae                       Submit VAE encode or decode, returns job ID
 
 GET  /job?id=N                  Poll job status
   response: {"status":"running|done|failed|cancelled"}
+  while running, also what the job is doing:
+    {"status":"running","progress":{"stage":"dit","step":12,"total":50}}
+    stage: queued (waiting for the worker), load (models and inputs),
+           encode (source audio, per VAE tile), dit (per sampling step),
+           decode (per VAE tile); step counts what that stage has done
+  a failed /synth job also says why:
+    {"status":"failed","error":"Adapter not found: my-adapter"}
 
 GET  /job?id=N&result=1         Fetch job result
   lm:         application/json [AceRequest, ...]
@@ -1000,11 +1007,20 @@ default AceRequest (source of truth for webui dropdowns and placeholders):
     "dit": ["acestep-v15-turbo-Q8_0.gguf", "acestep-v15-xl-turbo-Q8_0.gguf"],
     "vae": ["vae-BF16.gguf"]
   },
-  "adapters": [],
+  "adapters": ["my-adapter"],
+  "adapter_info": { "my-adapter": { "model_family": "xl", "captions": ["..."] } },
   "cli": { "max_batch": 1 },
   "default": { "caption": "", "duration": 0, ... }
 }
 ```
+
+`adapter_info` holds, by adapter name, the `adapter_info.json` a PEFT adapter
+directory carries beside `adapter_model.safetensors`: whatever the application
+that published the adapter wants its clients to see, such as the base model
+family it was trained on or the captions it was trained with. The server
+passes it through unread. Adapters without one, or whose file is not JSON or
+is over 1 MiB, are absent from it but still listed in `adapters`. Like the
+adapters themselves, it is read when the server starts.
 
 ### Concurrency
 

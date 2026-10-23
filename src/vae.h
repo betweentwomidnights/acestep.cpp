@@ -12,6 +12,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "job-progress.h"
 #include "vae-tile.h"
 
 #include <cmath>
@@ -490,6 +491,7 @@ static int vae_ggml_decode_tiled(VAEGGML *     m,
 
     // Short sequence: decode directly
     if (T_latent <= chunk_size) {
+        job_progress_report(JOB_STAGE_DECODE, 0, 1);
         return vae_ggml_decode(m, latent, T_latent, audio_out, max_T_audio);
     }
 
@@ -507,6 +509,7 @@ static int vae_ggml_decode_tiled(VAEGGML *     m,
             fprintf(stderr, "[VAE] Cancelled at tile %d/%d\n", i, num_steps);
             return -1;
         }
+        job_progress_report(JOB_STAGE_DECODE, i, num_steps);
         // Core range in latent frames (the part we keep)
         int core_start = i * stride;
         int core_end   = core_start + stride;
