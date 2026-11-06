@@ -50,7 +50,10 @@ jobs:
 
   lint:
     name: Lint & Static Analysis
-    runs-on: ubuntu-latest
+    # Pinned: clang-format and cppcheck come from the image's apt, so a new ubuntu-latest image changes the
+    # formatter and fails untouched code (Ubuntu 26.04's clang-format did, November 2026). Move this on
+    # purpose, together with a formatting commit made by the new version.
+    runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
