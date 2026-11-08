@@ -54,7 +54,10 @@ common = [str(exe), "--models", str(Path(args.models).resolve()), "--dataset", s
 
 
 def checkpoint(path):
-    pointer = (path / "checkpoint.current").read_text().strip()
+    # The trainer publishes the pointer as a directory symlink on POSIX and as a
+    # text file on Windows (src/train-checkpoint.h).
+    link = path / "checkpoint.current"
+    pointer = os.readlink(link) if link.is_symlink() else link.read_text().strip()
     resolved = (path / pointer).resolve()
     assert resolved.is_relative_to(path.resolve())
     return resolved
@@ -112,7 +115,8 @@ def same(left, right):
 
 
 full = run("full", ["--checkpoint-every-steps", "1"])
-assert (full / "checkpoint-step-1" / "checkpoint.current").is_file()
+step_pointer = full / "checkpoint-step-1" / "checkpoint.current"
+assert step_pointer.is_file() or step_pointer.is_symlink()
 partial = run("partial", ["--steps", "1"])
 same(full / "checkpoint-step-1", partial)
 partial_state = json.loads((checkpoint(partial) / "trainer_state.json").read_text())
