@@ -48,6 +48,34 @@ build directory and produces a local machine build, not a distributable one.
 gary4local owns publication of the shared CUDA runtime. Avoid `-SkipTests` for
 release evidence. Model-free tests do not prove real-model GPU training.
 
+### Reusing ggml-cuda
+
+Compiling `ggml-cuda.dll` is over 90% of a Windows build: close to two hours on
+a hosted runner. It depends only on the ggml pin, the CUDA toolkit, the
+compiler, and how `CMakeLists.txt` and `ci/package-windows.ps1` configure ggml.
+That includes `GGML_MAX_NAME=128`, which changes ggml's tensor layout, so a
+`ggml-cuda.dll` built without it must never load beside ACE's ggml-base.
+`ci\package-windows.ps1 -PrintGgmlCudaKey` names all of that, leaving out the
+`project(VERSION)` line, so a version bump alone doesn't change it.
+
+`release.yml` builds the DLL in its own job with `-GgmlCudaOnly`, through the
+package's own configure line, and keeps it with the CUDA runtime as a 90-day
+attested artifact named `ggml-cuda-<key>`. A later run with the same key
+packages that build with `-PrebuiltCuda` instead of compiling, so a release
+after a dry run takes minutes and ships the DLL the dry run tested. The
+packaging job checks the build's attestation against this repository's
+`release.yml`, and the package script refuses a bundle whose key isn't the one
+the checkout computes. `BUILD-INFO.json` names the run and commit that built
+the DLL. A pull request's build can't be attested, so it is kept under a name
+no later run reuses. Dispatch with `-f rebuild_ggml_cuda=true` to compile
+regardless.
+
+With a prebuilt DLL the package itself configures `GGML_CUDA=OFF`, since
+backends load at run time. `ACE_CACHE_CONFIG_ID` hashes the `GGML_*` options, so
+packages built this way carry a different ID than one that compiled CUDA in the
+same build. Training-cache keys already include the release version, so this
+changes no cache a released build could have reused.
+
 ## macOS
 
 On Apple Silicon run `ci/package-macos.sh --version v0.1.0`. The script builds
