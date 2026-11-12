@@ -165,3 +165,7 @@ build-ggml-check/
 /build-release-*/
 /dist-cpu/
 /dist-gpu-local/
+
+# Dedicated Linux package outputs
+/build-dist-linux*/
+/dist-linux*/
