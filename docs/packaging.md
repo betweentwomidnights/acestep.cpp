@@ -1,5 +1,7 @@
 # Native runtime releases
 
+Experimental Linux core/CUDA/Vulkan builds: [Linux packaging](LINUX_PACKAGING.md).
+
 Version is declared once in `project(VERSION)` in CMakeLists.txt. `ace-server
 --version` and `ace-train --version` print that bare version. The git revision
 remains available as `build_revision` in props and in other CLI banners.
