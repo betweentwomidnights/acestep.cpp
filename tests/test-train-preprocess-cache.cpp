@@ -17,7 +17,6 @@ int main() {
         data.context_channels = 3;
         data.patch_size       = 2;
         data.hidden_size      = 4;
-        data.max_latents      = 64;
         data.null_condition   = { 10, 20, 30, 40 };
         data.memory_limit     = 144;
     };

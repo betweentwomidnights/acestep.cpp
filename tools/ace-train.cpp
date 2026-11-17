@@ -691,7 +691,6 @@ static bool preprocess_dataset(const ACETrainCommand &                 command,
     prepared.patch_size       = metadata->cfg.patch_size;
     prepared.hidden_size      = int(null_condition.size());
     prepared.null_condition   = null_condition;
-    prepared.max_latents      = silence_latents.size();
     prepared.genre_variants   = command.preprocess.genre_variants;
     prepared.genre_eligible.clear();
     for (const auto & source : sources) {

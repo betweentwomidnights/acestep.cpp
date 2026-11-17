@@ -36,7 +36,6 @@ class ACETrainPreparedDataset {
     std::filesystem::path                 directory;
     size_t                                memory_limit    = 256ULL * 1024 * 1024;
     int                                   output_channels = 0, context_channels = 0, patch_size = 0, hidden_size = 0;
-    size_t                                max_latents        = 0;
     int                                   max_encoder_length = 0;
     std::vector<float>                    null_condition;
     size_t                                reused = 0, written = 0, rebuilt = 0;
@@ -58,8 +57,7 @@ class ACETrainPreparedDataset {
         const auto & c = example.context_latents;
         const auto & e = example.encoder_hidden;
         if (output_channels <= 0 || context_channels <= 0 || patch_size <= 0 || hidden_size <= 0 || t.empty() ||
-            t.size() > max_latents || t.size() % size_t(output_channels) != 0 ||
-            t.size() / size_t(output_channels) % size_t(patch_size) != 0 ||
+            t.size() % size_t(output_channels) != 0 || t.size() / size_t(output_channels) % size_t(patch_size) != 0 ||
             c.size() != t.size() / size_t(output_channels) * size_t(context_channels) ||
             example.real_temporal_length <= 0 ||
             size_t(example.real_temporal_length) > t.size() / size_t(output_channels) ||
@@ -138,8 +136,8 @@ class ACETrainPreparedDataset {
             count += size;
         }
         if (!ok || count != (file_size - 24 - header_size) / sizeof(float) ||
-            count * sizeof(float) != file_size - 24 - header_size || sizes[0] > max_latents || output_channels <= 0 ||
-            context_channels <= 0 || hidden_size <= 0 || sizes[0] % size_t(output_channels) ||
+            count * sizeof(float) != file_size - 24 - header_size || output_channels <= 0 || context_channels <= 0 ||
+            hidden_size <= 0 || sizes[0] % size_t(output_channels) ||
             sizes[1] != sizes[0] / size_t(output_channels) * size_t(context_channels) ||
             sizes[2] != sequence * size_t(hidden_size) || sizes[3] != genre_sequence * size_t(hidden_size)) {
             return false;

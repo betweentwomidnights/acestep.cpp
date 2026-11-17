@@ -81,7 +81,7 @@ static bool ace_prepare_training_audio(AceSynth *                 synth,
     duration = 0.0f;
     error.clear();
     if (!synth || !encoder || !synth->meta || synth->Oc <= 0 || synth->ctx_ch < synth->Oc ||
-        synth->meta->cfg.patch_size <= 0) {
+        synth->meta->cfg.patch_size <= 0 || synth->meta->silence_full.size() < (size_t) synth->Oc) {
         error = "invalid ACE-Step synthesis context for training preprocessing";
         return false;
     }
@@ -113,10 +113,9 @@ static bool ace_prepare_training_audio(AceSynth *                 synth,
 
     const int patch_size      = synth->meta->cfg.patch_size;
     const int temporal_length = ((real_temporal_length + patch_size - 1) / patch_size) * patch_size;
-    if ((size_t) temporal_length * synth->Oc > synth->meta->silence_full.size()) {
-        error = "training audio exceeds the DiT model's maximum latent duration: " + source.audio_path.string();
-        return false;
-    }
+    // A song longer than the silence table is fine here: it is trained on
+    // windows, and collation is what bounds the length of one training step.
+    const int silence_frames  = (int) (synth->meta->silence_full.size() / (size_t) synth->Oc);
     target.resize((size_t) temporal_length * synth->Oc, 0.0f);
 
     duration                = (float) audio_length / 48000.0f;
@@ -124,7 +123,8 @@ static bool ace_prepare_training_audio(AceSynth *                 synth,
     prepared.context_latents.resize((size_t) temporal_length * synth->ctx_ch);
     for (int time = 0; time < temporal_length; ++time) {
         float *       destination = prepared.context_latents.data() + (size_t) time * synth->ctx_ch;
-        const float * silence     = synth->meta->silence_full.data() + (size_t) time * synth->Oc;
+        const float * silence     = synth->meta->silence_full.data() +
+                                (size_t) ace_train_silence_frame(time, temporal_length, silence_frames) * synth->Oc;
         std::copy(silence, silence + synth->Oc, destination);
         std::fill(destination + synth->Oc, destination + synth->ctx_ch, 1.0f);
     }

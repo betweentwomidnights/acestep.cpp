@@ -185,6 +185,10 @@ GGML_BACKEND=CUDA0 ./build/ace-train \
 This baseline crops only the audio latents. The complete caption, lyrics, and
 full-song duration from the sidecar remain attached to every window, and each
 logged window includes its reproducible song name, offset, and duration.
+Windows are also how a song of any length is trained: preprocessing encodes the
+whole file once, and each epoch draws its window from anywhere in it. Only one
+training step is bounded, at the DiT's 600 s, so a song longer than that needs
+a window.
 `--examples-per-epoch N` can bound diagnostic runs while preserving
 deterministic resume; zero uses the complete dataset. Large optimizer
 checkpoints can be throttled with `--checkpoint-every N` (epochs) or
