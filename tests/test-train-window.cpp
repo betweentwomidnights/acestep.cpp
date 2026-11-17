@@ -78,6 +78,61 @@ int main() {
         return fail("an inverted window range must be rejected");
     }
 
+    // A song that fits the DiT's silence table reads it by position, as inference does.
+    const int table = 15000;
+    for (int time = 0; time < table; ++time) {
+        if (ace_train_silence_frame(time, table, table) != time) {
+            return fail("a song within the silence table must read it unchanged");
+        }
+    }
+    // A longer song keeps the table's start and then stays on its flat interior.
+    const int edge = ACE_TRAIN_SILENCE_EDGE_FRAMES;
+    const int song = 3 * table + 324;
+    for (int time = 0; time < song; ++time) {
+        const int frame = ace_train_silence_frame(time, song, table);
+        if (time < table - edge ? frame != time : (frame < edge || frame >= table - edge)) {
+            return fail("a long song's silence context must stay off the table's end transient");
+        }
+        if (time > 0 && time != table - edge) {
+            const int previous = ace_train_silence_frame(time - 1, song, table);
+            if (frame != previous + 1 && !(previous == table - edge - 1 && frame == edge)) {
+                return fail("a long song's silence context must advance one interior frame at a time");
+            }
+        }
+    }
+    if (ace_train_silence_frame(table - edge, song, table) != edge) {
+        return fail("a long song's silence context must wrap to the interior's first frame");
+    }
+    for (int time = 0; time < 1000; ++time) {
+        const int frame = ace_train_silence_frame(time, 1000, 100);
+        if (frame < 0 || frame >= 100) {
+            return fail("a table with no interior must still be read in range");
+        }
+    }
+
+    // Windows are cropped from a long song exactly as from a short one.
+    ACETrainDiffusionExample long_source;
+    long_source.real_temporal_length         = 2 * table;
+    long_source.real_encoder_sequence_length = 3;
+    long_source.target_latents.resize((size_t) 2 * table * 2);
+    long_source.context_latents.resize((size_t) 2 * table * 3);
+    long_source.encoder_hidden = { 10.0f, 20.0f, 30.0f };
+    bool beyond_table          = false;
+    for (int epoch = 0; epoch < 64; ++epoch) {
+        ACETrainDiffusionExample long_result;
+        ACETrainWindow           long_window;
+        if (!ace_train_crop_example(long_source, 2, 3, 2, config, 42, epoch, 0, long_result, long_window, error) ||
+            !long_window.cropped || long_window.latent_length > 1500 ||
+            long_window.first_latent + long_window.latent_length > 2 * table ||
+            long_result.target_latents.size() != (size_t) long_window.latent_length * 2) {
+            return fail("a song longer than the silence table must still yield bounded windows");
+        }
+        beyond_table = beyond_table || long_window.first_latent + long_window.latent_length > table;
+    }
+    if (!beyond_table) {
+        return fail("windows must reach the audio past the silence table's length");
+    }
+
     std::puts("ACE-Step rotating training windows: OK");
     return 0;
 }

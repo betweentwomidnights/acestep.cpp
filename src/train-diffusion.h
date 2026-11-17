@@ -68,6 +68,27 @@ static float ace_train_flow_min_snr_weight(float timestep, float gamma) {
     return std::min(snr, gamma) / std::max(snr, 1e-6f);
 }
 
+// The DiT's silence latent is a fixed table, 600 s at 25 Hz: flat through its
+// interior, with an encoder transient in its first and last few frames. A song
+// that fits reads the table by position, as inference does. A longer song keeps
+// that start and then stays on the flat interior, so no training window is ever
+// cropped across the table's end-of-clip transient.
+constexpr int ACE_TRAIN_SILENCE_EDGE_FRAMES = 64;
+
+static int ace_train_silence_frame(int time, int song_frames, int table_frames) {
+    if (song_frames <= table_frames) {
+        return time;
+    }
+    const int interior = table_frames - 2 * ACE_TRAIN_SILENCE_EDGE_FRAMES;
+    if (interior <= 0) {
+        return time % table_frames;
+    }
+    if (time < table_frames - ACE_TRAIN_SILENCE_EDGE_FRAMES) {
+        return time;
+    }
+    return ACE_TRAIN_SILENCE_EDGE_FRAMES + (time - ACE_TRAIN_SILENCE_EDGE_FRAMES) % interior;
+}
+
 static bool ace_collate_training_examples(const DiTGGML &                               model,
                                           const std::vector<ACETrainDiffusionExample> & sources,
                                           const std::vector<float> &                    silence_latents,
@@ -107,9 +128,15 @@ static bool ace_collate_training_examples(const DiTGGML &                       
         temporal_length         = std::max(temporal_length, source_temporal_length);
         encoder_sequence_length = std::max(encoder_sequence_length, source_encoder_length);
     }
-    if (context_channels < output_channels || silence_latents.size() < (size_t) temporal_length * output_channels ||
-        null_condition.size() != (size_t) hidden_size) {
+    if (context_channels < output_channels || null_condition.size() != (size_t) hidden_size) {
         error = "training padding values do not match the DiT dimensions";
+        return false;
+    }
+    // Preprocessing takes a song of any length; one training step does not.
+    if (silence_latents.size() < (size_t) temporal_length * output_channels) {
+        error = "a training example spans " + std::to_string(temporal_length) + " latent frames, more than the " +
+                std::to_string(silence_latents.size() / (size_t) output_channels) +
+                " (600 s) the DiT takes in one step; train longer songs on windows with --window-max-seconds";
         return false;
     }
 
