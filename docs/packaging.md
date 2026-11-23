@@ -84,7 +84,11 @@ On Apple Silicon run `ci/package-macos.sh --version v0.1.0`. The script builds
 and tests both slices (x86_64 execution needs Rosetta), merges tools and dylibs,
 rewrites imports to the flat archive, and probes startup outside that directory.
 `acestep-vX.Y.Z-macos-universal.zip` and `SHA256SUMS-macos` are the outputs.
-The macOS deployment target is 13.3. Metal is arm64-only in this package.
+The macOS deployment target is 13.3. Metal is arm64-only in this package. The
+arm64 backend loads the precompiled `default.metallib`, or `default-bf16.metallib`
+on macOS 14+ devices with BF16, from beside its dylib instead of compiling shaders
+at startup; builds with an OS 26 SDK also ship `ggml-tensor.metallib`. Building
+needs Xcode and its Metal Toolchain.
 
 Published releases require Developer ID signing and accepted notarization.
 The workflow reads the same `MACOS_CERT_P12`, `MACOS_CERT_PASSWORD`,
