@@ -133,7 +133,8 @@ while IFS= read -r arm; do
   BINARIES+=("$name")
 done < <(find -L "$BUILD_PATH/arm64" -type f -name '*.dylib')
 [ -f "$STAGE/libggml.0.dylib" ] || fail "no libggml.0.dylib staged"
-# Rewrite all non-system imports to the flat package before codesigning.
+# Read imports from both architectures, including arm64-only Metal dependencies.
+# Rewrite non-system imports to the flat package before codesigning.
 for name in "${BINARIES[@]}"; do
   file="$STAGE/$name"
   case "$name" in *.dylib) install_name_tool -id "@rpath/$name" "$file" ;; esac
@@ -143,7 +144,7 @@ for name in "${BINARIES[@]}"; do
     base="$(basename "$dep")"
     [ -f "$STAGE/$base" ] || fail "$name depends on unstaged $dep"
     install_name_tool -change "$dep" "@loader_path/$base" "$file"
-  done < <(otool -L "$file" | awk '/^[[:space:]]/ {print $1}' | sort -u)
+  done < <(otool -arch all -L "$file" | awk '/^[[:space:]]/ {print $1}' | sort -u)
   codesign --force --sign - "$file"
 done
 for tool in ace-server ace-train; do
