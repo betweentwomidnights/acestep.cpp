@@ -7,6 +7,7 @@
 # ACE_NOTARY_ISSUER provide credentials. --require-signing rejects missing ones.
 # Usage: ci/package-macos.sh --version v0.1.1 [--jobs 3] [--require-signing]
 # Builds and tests both slices on Apple Silicon with Rosetta (macOS 15+).
+# The signed Intel dry-run job cross-builds arm64 for testing on a separate Mac.
 set -euo pipefail
 
 VERSION=""
@@ -38,7 +39,13 @@ cd "$ROOT"
 
 [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "--version must look like v0.1.0"
 [ "$(uname -s)" = Darwin ] || fail "this script builds the macOS package; run it on a Mac"
-[ "$(uname -m)" = arm64 ] || fail "build on Apple Silicon: only there can the Metal slice be checked"
+HOST_ARCH="$(uname -m)"
+if [ "$HOST_ARCH" != arm64 ]; then
+  [ "$HOST_ARCH" = x86_64 ] && [ "${ACE_INTEL_DRY_RUN:-0}" = 1 ] &&
+    [ -z "${TAG:-}" ] && [ "$REQUIRE_SIGNING" = 1 ] ||
+    fail "build on Apple Silicon or use the Intel signed dry-run job"
+  echo "Intel dry run: verify the packaged arm64 slice and its Metal libraries on Apple Silicon"
+fi
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || fail "--jobs must be positive"
 
 # The script clears its staging and output folders, so keep both inside this checkout.
@@ -65,8 +72,8 @@ if [ "$NOTARIZE" = 1 ] && [ "$SIGN" = 0 ]; then fail "notarizing needs ACE_SIGN_
 
 command -v cmake >/dev/null || fail "cmake is not on PATH"
 CTEST="$(dirname "$(command -v cmake)")/ctest"
-ROSETTA=0
-if arch -x86_64 /usr/bin/true 2>/dev/null; then ROSETTA=1; fi
+CAN_RUN_X86=0
+if arch -x86_64 /usr/bin/true 2>/dev/null; then CAN_RUN_X86=1; fi
 
 echo "acestep.cpp  $(git rev-parse --short HEAD)"
 echo "ggml       $(git -C ggml rev-parse HEAD)"
@@ -77,7 +84,7 @@ XCODE="$(xcodebuild -version 2>/dev/null | sed -n 1p)"
 echo "xcode      $XCODE"
 echo "signing    $([ "$SIGN" = 1 ] && echo "Developer ID" || echo "ad-hoc (local check only)")"
 echo "notarize   $([ "$NOTARIZE" = 1 ] && echo yes || echo no)"
-echo "rosetta    $([ "$ROSETTA" = 1 ] && echo "yes: the x86_64 slice is tested" || echo "no: the x86_64 slice is built but not run")"
+echo "x86_64     $([ "$CAN_RUN_X86" = 1 ] && echo "yes: the x86_64 slice is tested" || echo "no: the x86_64 slice is built but not run")"
 
 # --- build and stage ---------------------------------------------------------
 build_slice() {
@@ -95,8 +102,10 @@ build_slice x86_64 OFF
 ARM="$BUILD_PATH/arm64"
 X86="$BUILD_PATH/x86_64"
 if [ "$SKIP_TESTS" = 0 ]; then
-  "$CTEST" --test-dir "$BUILD_PATH/arm64" -C Release --output-on-failure
-  if [ "$ROSETTA" = 1 ]; then
+  if [ "$HOST_ARCH" = arm64 ]; then
+    "$CTEST" --test-dir "$BUILD_PATH/arm64" -C Release --output-on-failure
+  fi
+  if [ "$CAN_RUN_X86" = 1 ]; then
     "$CTEST" --test-dir "$BUILD_PATH/x86_64" -C Release --output-on-failure
   fi
 fi
@@ -139,7 +148,8 @@ for name in "${BINARIES[@]}"; do
 done
 for tool in ace-server ace-train; do
   for a in arm64 x86_64; do
-    [ "$a" = x86_64 ] && [ "$ROSETTA" = 0 ] && continue
+    [ "$a" = arm64 ] && [ "$HOST_ARCH" != arm64 ] && continue
+    [ "$a" = x86_64 ] && [ "$CAN_RUN_X86" = 0 ] && continue
     reported="$(arch -"$a" "$STAGE/$tool" --version 2>/dev/null)"
     [ "v$reported" = "$VERSION" ] || fail "$tool reports $reported instead of $VERSION"
   done
@@ -216,15 +226,18 @@ metal_probe() {  # accepted libraries (space-separated), then the command to run
 for name in default.metallib default-bf16.metallib; do
   [ -s "$STAGE/$name" ] || fail "$name is not staged"
 done
-metal_probe "default.metallib default-bf16.metallib" "$STAGE/ace-server" --props
-metal_probe default.metallib env GGML_METAL_BF16_DISABLE=1 "$STAGE/ace-server" --props
+if [ "$HOST_ARCH" = arm64 ]; then
+  metal_probe "default.metallib default-bf16.metallib" "$STAGE/ace-server" --props
+  metal_probe default.metallib env GGML_METAL_BF16_DISABLE=1 "$STAGE/ace-server" --props
+fi
 rm -rf "$METAL_SCRATCH"
 
-# Probe both packaged slices from outside the package directory.
+# Probe each runnable packaged slice from outside the package directory.
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/acestep-package-check.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 for a in arm64 x86_64; do
-  [ "$a" = x86_64 ] && [ "$ROSETTA" = 0 ] && continue
+  [ "$a" = arm64 ] && [ "$HOST_ARCH" != arm64 ] && continue
+  [ "$a" = x86_64 ] && [ "$CAN_RUN_X86" = 0 ] && continue
   (cd "$SCRATCH"; arch -"$a" "$STAGE/ace-server" --props --device cpu > "props-$a.json")
   /usr/bin/python3 - "$SCRATCH/props-$a.json" "$VERSION" <<'PY'
 import json, sys

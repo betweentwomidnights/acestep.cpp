@@ -267,9 +267,9 @@ jobs:
 
   macos:
     name: macos-universal (metal + cpu)
-    # macOS 15: its Rosetta runs the x86_64 slice's AVX2 code, so CI tests both slices.
-    runs-on: macos-15
-    if: github.event_name == 'release' || (inputs.platforms != 'windows' && inputs.platforms != 'linux')
+    # Use the Intel pool for the signed dry run. Verify its arm64 slice on Apple Silicon.
+    runs-on: macos-15-intel
+    if: github.event_name == 'workflow_dispatch' && inputs.platforms == 'macos' && inputs.tag == ''
     timeout-minutes: 90
     env:
       # The macOS 26 SDK builds the separate Metal tensor library for newer GPUs.
@@ -343,11 +343,10 @@ jobs:
             xcodebuild -downloadComponent MetalToolchain
           fi
 
-      - name: Build, test, sign, notarize, and package
-        run: |
-          args=(--version "$VERSION" --jobs 3)
-          [ -n "$TAG" ] && args+=(--require-signing)
-          ./ci/package-macos.sh "${args[@]}"
+      - name: Cross-build, test Intel, sign, notarize, and package
+        env:
+          ACE_INTEL_DRY_RUN: 1
+        run: ./ci/package-macos.sh --version "$VERSION" --jobs 3 --require-signing
 
       - name: Remove the signing keychain
         if: always() && env.SIGNING_KEYCHAIN != ''
@@ -361,18 +360,6 @@ jobs:
           name: acestep-${{ env.VERSION }}-macos-universal
           path: dist/
           retention-days: 14
-
-      - name: Attest provenance
-        if: env.TAG != ''
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: 'dist/*.zip'
-
-      - name: Attach to release
-        if: env.TAG != ''
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$TAG" dist/acestep-*-macos-universal.zip dist/SHA256SUMS-macos --clobber
 
   linux:
     name: Linux packages
