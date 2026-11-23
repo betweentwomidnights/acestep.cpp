@@ -267,8 +267,8 @@ jobs:
 
   macos:
     name: macos-universal (metal + cpu)
-    # macOS 15: its Rosetta runs the x86_64 slice's AVX2 code, so CI tests both slices.
-    runs-on: macos-15
+    # Retry the dry run on the macOS 26 ARM64 image while macOS 15 capacity is constrained.
+    runs-on: macos-26
     if: github.event_name == 'release' || (inputs.platforms != 'windows' && inputs.platforms != 'linux')
     timeout-minutes: 90
     env:
