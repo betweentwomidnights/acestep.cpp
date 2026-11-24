@@ -117,11 +117,11 @@ int main() {
         // Text that is not UTF-8 degrades to U+FFFD instead of failing the whole status. A cp1252
         // o-acute (one 0xF3 byte) in a file name used to stop training with "cannot serialize".
         ace_training::TrainCliControl bad;
-        bad.message                   = "Preparing J\xF3hannsson.wav";
-        bad.error                     = "ok \xC3\xB3 \xE3\x83\x87 then truncated \xE3\x83";
-        const std::string text        = bad.json();
-        yyjson_doc *      bad_doc     = yyjson_read(text.data(), text.size(), 0);
-        yyjson_val *      bad_root    = yyjson_doc_get_root(bad_doc);
+        bad.message                = "Preparing J\xF3hannsson.wav";
+        bad.error                  = "ok \xC3\xB3 \xE3\x83\x87 then truncated \xE3\x83";
+        const std::string text     = bad.json();
+        yyjson_doc *      bad_doc  = yyjson_read(text.data(), text.size(), 0);
+        yyjson_val *      bad_root = yyjson_doc_get_root(bad_doc);
         expect(bad_doc != nullptr, "invalid UTF-8 still serializes");
         expect(bad_doc && std::string(yyjson_get_str(yyjson_obj_get(bad_root, "message"))) ==
                               "Preparing J\xEF\xBF\xBDhannsson.wav",
