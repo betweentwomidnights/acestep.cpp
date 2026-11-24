@@ -234,3 +234,22 @@ target_link_libraries(mp3-codec PRIVATE Threads::Threads)
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+
+# Every acestep.cpp executable runs with UTF-8 as its Windows process code page, so the narrow argv,
+# std::filesystem::path(std::string), path::string() and fopen agree with the code that already reads
+# paths as UTF-8. A library cannot set this: an app that links acestep-core chooses its own code page.
+if(MSVC)
+    set(ACE_UTF8_TARGET_DIRS ${CMAKE_CURRENT_SOURCE_DIR})
+    if(BUILD_TESTING)
+        list(APPEND ACE_UTF8_TARGET_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    endif()
+    foreach(ace_directory IN LISTS ACE_UTF8_TARGET_DIRS)
+        get_property(ace_directory_targets DIRECTORY ${ace_directory} PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(ace_target IN LISTS ace_directory_targets)
+            get_target_property(ace_target_type ${ace_target} TYPE)
+            if(ace_target_type STREQUAL "EXECUTABLE")
+                target_sources(${ace_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cmake/utf8-code-page.manifest)
+            endif()
+        endforeach()
+    endforeach()
+endif()

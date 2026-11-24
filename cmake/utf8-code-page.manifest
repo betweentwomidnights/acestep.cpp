@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Run with UTF-8 as the process code page (Windows 10 1903 and newer). Parts of acestep.cpp already
+     read paths as UTF-8 (u8path, the gguf readers), but a narrow argv, std::filesystem::path(std::string),
+     path::string() and fopen otherwise use the legacy system code page. A dataset file named "Jóhannsson"
+     could reach the progress JSON as invalid UTF-8, and names outside that code page became "?". -->
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>
